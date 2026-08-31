@@ -13,7 +13,7 @@ A cross-platform desktop launcher for the [DeepSeek-Harness](https://github.com/
 
 ## What it does
 
-dsh-launcher is the **PCL (Minecraft-launcher) model for AI harnesses**: one desktop app that owns the whole lifecycle of your DSH setups.
+dsh-launcher is a desktop launcher for AI harnesses that manages the entire lifecycle of your DSH environments—from setup and configuration to plugins, runtimes, and launching.
 
 | | |
 | --- | --- |
