@@ -7,6 +7,7 @@ import type {
   LaunchSession,
   PluginUpdate,
   ProcessState,
+  ProviderPreset,
   ProviderProfile,
   ProviderView,
   RecommendResult,
@@ -35,9 +36,10 @@ export const ipc = {
   switchInstance: (id: string) => call<InstanceManifest>('switch_instance', { id }),
 
   getProvider: () => call<ProviderView>('get_provider'),
-  setProvider: (profile: ProviderProfile, apiKey: string | null) =>
-    call<ProviderProfile>('set_provider', { profile, apiKey }),
-  removeProviderKey: () => call<void>('remove_provider_key'),
+  listProviderPresets: () => call<ProviderPreset[]>('list_provider_presets'),
+  saveProvider: (profile: ProviderProfile, apiKey: string | null) =>
+    call<ProviderProfile>('save_provider', { profile, apiKey }),
+  removeProviderKey: () => call<void>('remove_provider_key', { id: 'default' }),
 
   launch: (id: string) => call<ProcessState>('launch', { id }),
   stop: () => call<ProcessState>('stop'),

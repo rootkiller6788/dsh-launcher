@@ -31,6 +31,7 @@ use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 pub mod diagnostics;
+pub mod llm;
 pub mod runtimes;
 pub mod theme;
 
@@ -1058,6 +1059,7 @@ mod tests {
                 name: "E2E".into(),
                 base_url: None,
                 model: None,
+                models: vec![],
             },
             api_key: "sk-dummy-not-validated-at-boot".into(),
         };

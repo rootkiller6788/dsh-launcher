@@ -140,6 +140,16 @@ pub async fn launch(
                         }
                     }
                 }
+                // Inject the provider's model catalog so DSH's selector shows
+                // the chosen provider's models. baseURL + key already reach DSH
+                // through env; only the catalog needs the settings RPC.
+                if !provider.profile.models.is_empty() {
+                    if let Err(e) =
+                        dsh_adapter::llm::set_models(port, &provider.profile.models).await
+                    {
+                        emit_log(&app, &format!("{id} · model catalog sync failed: {e}"));
+                    }
+                }
             }
             handle.set_status(ProcessStatus::Running);
             emit_log(&app, &format!("{id} · DSH web ready at {url}"));

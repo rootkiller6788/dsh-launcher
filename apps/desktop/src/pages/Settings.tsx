@@ -13,11 +13,6 @@ const THEMES: { value: Theme; label: string }[] = [
   { value: 'system', label: 'settings.themeSystem' },
 ]
 
-const MODELS = [
-  { id: 'deepseek-v4-flash', label: 'DeepSeek-V4-Flash (default)' },
-  { id: 'deepseek-v4-pro', label: 'DeepSeek-V4-Pro' },
-]
-
 function Field({
   label,
   hint,
@@ -41,6 +36,7 @@ type Flash = 'saving' | 'saved' | 'failed' | null
 export function Settings() {
   const t = useT()
   const provider = useAppStore((s) => s.provider)
+  const presets = useAppStore((s) => s.presets)
   const settings = useAppStore((s) => s.settings)
   const system = useAppStore((s) => s.system)
   const busy = useAppStore((s) => s.busy)
@@ -57,7 +53,8 @@ export function Settings() {
   const [name, setName] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE_URL)
-  const [model, setModel] = useState(MODELS[0].id)
+  const [models, setModels] = useState('')
+  const [presetId, setPresetId] = useState('deepseek')
   const [dshPath, setDshPath] = useState('')
   const [flash, setFlash] = useState<Flash>(null)
 
@@ -65,15 +62,31 @@ export function Settings() {
     if (provider) {
       setName(provider.profile.name)
       setBaseUrl(provider.profile.baseUrl ?? DEFAULT_BASE_URL)
-      setModel(provider.profile.model ?? MODELS[0].id)
+      setModels((provider.profile.models ?? []).join(', '))
     }
     if (settings) setDshPath(settings.dshPath ?? '')
   }, [provider, settings])
 
+  const applyPreset = (id: string) => {
+    setPresetId(id)
+    const p = presets.find((x) => x.id === id)
+    if (!p) return
+    setName(p.name)
+    setBaseUrl(p.baseUrl)
+    setModels(p.models.join(', '))
+  }
+
   const save = async () => {
     setFlash('saving')
+    const modelList = models.split(',').map((m) => m.trim()).filter(Boolean)
     const okProvider = await saveProvider(
-      { id: 'default', name, baseUrl: baseUrl.trim() || null, model: model.trim() || null },
+      {
+        id: 'default',
+        name,
+        baseUrl: baseUrl.trim() || null,
+        model: modelList[0] ?? null,
+        models: modelList,
+      },
       apiKey || null,
     )
     const okSettings = await saveSettings({
@@ -152,6 +165,19 @@ export function Settings() {
       <section className="mb-8 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-6">
         <h2 className="mb-4 text-base font-semibold text-zinc-100">{t('settings.provider')}</h2>
         <div className="space-y-4">
+          <Field label={t('settings.providerPreset')} hint={t('settings.providerPresetHint')}>
+            <select
+              value={presetId}
+              onChange={(e) => applyPreset(e.target.value)}
+              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 outline-none focus:border-blue-500"
+            >
+              {presets.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </Field>
           <Field label={t('settings.name')}>
             <input
               value={name}
@@ -179,18 +205,13 @@ export function Settings() {
               className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-zinc-100 outline-none focus:border-blue-500"
             />
           </Field>
-          <Field label={t('settings.model')} hint={t('settings.modelHint')}>
-            <select
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 outline-none focus:border-blue-500"
-            >
-              {MODELS.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
+          <Field label={t('settings.models')} hint={t('settings.modelsHint')}>
+            <input
+              value={models}
+              onChange={(e) => setModels(e.target.value)}
+              placeholder="gpt-4o, gpt-4o-mini"
+              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-100 outline-none focus:border-blue-500"
+            />
           </Field>
         </div>
       </section>
@@ -213,9 +234,9 @@ export function Settings() {
                   </dd>
                 </div>
                 <div className="flex gap-2">
-                  <dt className="w-16 shrink-0 text-zinc-500">{t('settings.model')}</dt>
+                  <dt className="w-16 shrink-0 text-zinc-500">{t('settings.models')}</dt>
                   <dd className="truncate font-mono">
-                    {provider.profile.model ?? t('settings.default')}
+                    {(provider.profile.models ?? []).join(', ') || t('settings.default')}
                   </dd>
                 </div>
               </dl>

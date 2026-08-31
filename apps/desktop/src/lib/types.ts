@@ -36,6 +36,16 @@ export interface ProviderProfile {
   name: string
   baseUrl?: string | null
   model?: string | null
+  /** Model catalog ids (a LiteLLM-style subset) shown to DSH. */
+  models?: string[]
+}
+
+export interface ProviderPreset {
+  id: string
+  name: string
+  baseUrl: string
+  needsKey: boolean
+  models: string[]
 }
 
 export interface ProviderView {
