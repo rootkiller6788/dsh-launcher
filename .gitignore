@@ -24,3 +24,7 @@ Thumbs.db
 
 # Downloaded artifacts (not source)
 .cat.tgz
+
+# Launcher runtime artifacts
+*.pids
+spawned.pids
