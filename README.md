@@ -1,7 +1,6 @@
 # dsh-launcher
 
-**DSHL** — Turn installing DSH, configuring Providers, adding plugins, and hitting Launch into something you can complete with a double-click on the executable.
-A cross-platform desktop launcher for the [DeepSeek-Harness](https://github.com/deepseek-ai/deepseek-harness) runtime, supporting **Windows & macOS**. Manage runtimes, isolated instances, providers and plugins — then hit **Launch** and the harness opens in its own window. No terminal, no preinstalled Node, no source tree.
+DSHL — A Windows & macOS desktop launcher for DeepSeek-Harness that simplifies runtime installation, isolated instances, provider configuration, plugin management, and one-click launching—no terminal, Node.js, or source setup required.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2B-0078D6)](#)
