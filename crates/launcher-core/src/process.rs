@@ -154,7 +154,14 @@ pub fn kill_tree(pid: u32) {
 }
 
 #[cfg(not(windows))]
-pub fn kill_tree(_pid: u32) {}
+pub fn kill_tree(pid: u32) {
+    // The child is spawned as its own process-group leader (`process_group(0)`
+    // in spawn_child), so its pgid == pid. killpg(SIGKILL) reaps the whole
+    // tree — node, pnpm, corepack, and every grandchild — no matter how deep.
+    unsafe {
+        let _ = libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+    }
+}
 
 /// True if a process with this PID is currently alive (best-effort probe).
 #[cfg(windows)]
@@ -172,8 +179,11 @@ pub fn pid_alive(pid: u32) -> bool {
 }
 
 #[cfg(not(windows))]
-pub fn pid_alive(_pid: u32) -> bool {
-    false
+pub fn pid_alive(pid: u32) -> bool {
+    // kill(pid, 0) succeeds (errno != ESRCH) iff a process with that pid
+    // exists — including a zombie not yet reaped. Best-effort, like the
+    // Windows OpenProcess probe.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
 /// Persistent record of every PID the launcher has spawned. Written on launch,
@@ -228,7 +238,8 @@ impl PidLedger {
 
 /// Kill every previously-recorded PID that is still alive and reset the
 /// ledger. Returns how many trees were reaped. Runs before every launch.
-#[cfg(windows)]
+/// Cross-platform: the per-PID probe (`pid_alive`) and tree-kill (`kill_tree`)
+/// are cfg'd per OS, the sweep loop is not.
 pub fn sweep_leftover(ledger: &PidLedger) -> usize {
     let mut swept = 0;
     for pid in ledger.read() {
@@ -240,11 +251,6 @@ pub fn sweep_leftover(ledger: &PidLedger) -> usize {
     }
     ledger.clear();
     swept
-}
-
-#[cfg(not(windows))]
-pub fn sweep_leftover(_ledger: &PidLedger) -> usize {
-    0
 }
 
 /// A spawned harness process. Holding the handle keeps the process alive;
@@ -301,6 +307,11 @@ pub async fn spawn_child(mut cmd: tokio::process::Command, on_log: LogSink) -> R
         use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
     }
+
+    // Own process group so kill_tree can killpg(-pgid) the whole tree on Unix
+    // (Windows uses the Job Object above instead).
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     let mut child: Child = cmd
         .spawn()

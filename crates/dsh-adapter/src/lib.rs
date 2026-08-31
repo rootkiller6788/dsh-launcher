@@ -142,13 +142,14 @@ impl DshAdapter {
             out.push(PathBuf::from(p));
         }
         if let Some(dir) = &self.resource_dir {
-            out.push(dir.join("node").join("node.exe"));
+            out.push(dir.join("node").join(crate::runtimes::node_exe_name()));
         }
         // Dev: the vendored copy beside the tauri source, before any managed
         // install. Two `..` up (crates/dsh-adapter → launcher root), then apps/…
         out.push(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../apps/desktop/src-tauri/vendor/node/node.exe"),
+                .join("../../apps/desktop/src-tauri/vendor/node")
+                .join(crate::runtimes::node_exe_name()),
         );
         if let Some(rt) = &self.runtimes {
             out.push(rt.managed_node_exe());

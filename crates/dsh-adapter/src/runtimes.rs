@@ -265,7 +265,7 @@ impl Runtimes {
     }
 }
 
-fn node_exe_name() -> &'static str {
+pub(crate) fn node_exe_name() -> &'static str {
     if cfg!(windows) {
         "node.exe"
     } else {
@@ -360,8 +360,13 @@ fn copy_tree_recursive(src: &Path, dst: &Path) -> Result<()> {
         let ft = std::fs::symlink_metadata(&from)?;
         if ft.file_type().is_symlink() {
             let target = std::fs::read_link(&from)?;
+            // Remap in-src targets to dst — pnpm's workspace links are absolute
+            // paths into the source checkout, so an unremapped copy would still
+            // depend on the dev tree. Same self-containment contract as Windows.
+            let link_dir = from.parent().unwrap_or(src);
+            let remapped = remap_target(&target, link_dir, src, dst);
             #[cfg(unix)]
-            std::os::unix::fs::symlink(&target, &to)?;
+            std::os::unix::fs::symlink(&remapped, &to)?;
             continue;
         }
         if ft.is_dir() {
@@ -416,11 +421,10 @@ fn restore_junctions(src: &Path, dst: &Path) -> Result<()> {
     create_junctions_batch(&links)
 }
 
-/// Resolve a source junction target to where it must point in `dst`. A relative
-/// target resolves against the link's own directory (Windows junction
-/// semantics); the resulting in-`src` path becomes the matching path in `dst`.
-/// Targets outside `src` stay verbatim.
-#[cfg(windows)]
+/// Resolve a source link target to where it must point in `dst`. A relative
+/// target resolves against the link's own directory (both Windows junction and
+/// Unix symlink semantics); the resulting in-`src` path becomes the matching
+/// path in `dst`. Targets outside `src` stay verbatim.
 fn remap_target(target: &Path, link_dir: &Path, src: &Path, dst: &Path) -> PathBuf {
     let abs_src = if target.is_absolute() {
         target.to_path_buf()

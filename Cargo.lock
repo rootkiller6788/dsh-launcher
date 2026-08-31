@@ -2154,6 +2154,7 @@ dependencies = [
  "directories",
  "flate2",
  "keyring",
+ "libc",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
