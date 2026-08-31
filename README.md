@@ -1,8 +1,7 @@
 # dsh-launcher
 
-**PCL for DSH** — 把「装 DSH、配 Provider、装插件、点 Launch」变成双击 `.exe` 就能完成。
-
-A Windows desktop launcher for the [DeepSeek-Harness](https://github.com/deepseek-ai/deepseek-harness) runtime. Manage runtimes, isolated instances, providers and plugins — then hit **Launch** and the harness opens in its own window. No terminal, no preinstalled Node, no source tree.
+**DSHL** — Turn installing DSH, configuring Providers, adding plugins, and hitting Launch into something you can complete with a double-click on the executable.
+A cross-platform desktop launcher for the [DeepSeek-Harness](https://github.com/deepseek-ai/deepseek-harness) runtime, supporting **Windows & macOS**. Manage runtimes, isolated instances, providers and plugins — then hit **Launch** and the harness opens in its own window. No terminal, no preinstalled Node, no source tree.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2B-0078D6)](#)
