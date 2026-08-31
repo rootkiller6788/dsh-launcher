@@ -1,0 +1,13 @@
+{
+  "name": "ai-harness-launcher",
+  "private": true,
+  "version": "0.1.0",
+  "description": "PCL for AI Harnesses — launcher, instance manager, package manager and setup ecosystem.",
+  "scripts": {
+    "dev": "pnpm --filter desktop tauri dev",
+    "build": "pnpm --filter desktop tauri build",
+    "dev:web": "pnpm --filter desktop dev",
+    "check:rust": "cargo check --workspace"
+  },
+  "packageManager": "pnpm@11.18.0"
+}

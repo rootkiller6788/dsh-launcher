@@ -1,0 +1,6 @@
+packages:
+  - "apps/*"
+
+# Build-script approval for dependencies that need a postinstall step.
+allowBuilds:
+  esbuild: true

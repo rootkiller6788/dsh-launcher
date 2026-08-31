@@ -1,0 +1,12 @@
+{
+  "name": "dsh-tauri-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH Host sidecar: Phase 1 mock, later the real upstream DSH Host + reusable port/LAN/settings logic ported from dsh-desktop.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "smoke": "node index.js --port 43120"
+  }
+}

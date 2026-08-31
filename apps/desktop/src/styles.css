@@ -1,0 +1,96 @@
+@import "tailwindcss";
+
+/* Remap the zinc scale onto DeepSeek Harness's `neutral-bluish` palette
+ * (design-platform.css) — DSH's dark theme is a "soft dark" (#151517 base,
+ * #232324 surfaces), notably lighter than Tailwind's near-black zinc. */
+@theme {
+  --color-zinc-50: #f9fafb;
+  --color-zinc-100: #ebeff2;
+  --color-zinc-200: #e1e5ee;
+  --color-zinc-300: #cfd3d6;
+  --color-zinc-400: #adb2b8;
+  --color-zinc-500: #979da6;
+  --color-zinc-600: #81858c;
+  --color-zinc-700: #61666b;
+  --color-zinc-800: #43454a;
+  --color-zinc-900: #232324;
+  --color-zinc-950: #151517;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/* The app is dark-first; the light palette below overrides the tokens. */
+html {
+  color-scheme: dark;
+}
+
+/* Light scheme — reverse the zinc scale onto DSH's light `neutral-bluish`
+ * palette (design-platform.css), and deepen the accent text shades that sit on
+ * light surfaces, so the same utility classes read correctly in both modes.
+ * Tailwind v4 emits `--color-*` on `:root`; overriding them on
+ * `html[data-theme="light"]` swaps every `bg-*`/`text-*`/`border-*` at once. */
+html[data-theme='light'] {
+  color-scheme: light;
+  --color-zinc-50: #0f1115;
+  --color-zinc-100: #151517;
+  --color-zinc-200: #232324;
+  --color-zinc-300: #61666b;
+  --color-zinc-400: #81858c;
+  --color-zinc-500: #979da6;
+  --color-zinc-600: #adb2b8;
+  --color-zinc-700: #cfd3d6;
+  --color-zinc-800: #e1e5ee;
+  --color-zinc-900: #f9fafb;
+  --color-zinc-950: #ffffff;
+  --color-blue-300: #1d4ed8;
+  --color-red-200: #dc2626;
+  --color-red-300: #b91c1c;
+  --color-red-400: #dc2626;
+  --color-amber-300: #b45309;
+  --color-amber-400: #d97706;
+  --color-orange-400: #c2410c;
+  --color-emerald-400: #059669;
+}
+
+body {
+  @apply bg-zinc-950 text-zinc-200;
+  -webkit-font-smoothing: antialiased;
+  font-family: "Segoe UI", "PingFang SC", "HarmonyOS Sans SC", "MiSans",
+    "Source Han Sans SC", "Noto Sans SC", "Microsoft YaHei UI",
+    "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Slim scrollbars that follow the theme (WebView2 is Chromium). */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-zinc-700);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 9999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--color-zinc-600);
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Custom dropdown panels keep scrollability but hide the scrollbar. */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
