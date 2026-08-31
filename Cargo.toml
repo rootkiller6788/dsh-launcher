@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/launcher-core",
+    "crates/dsh-adapter",
+    "apps/desktop/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["process", "io-util", "sync", "time", "net", "rt-multi-thread", "macros"] }
+tracing = "0.1"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_System_JobObjects"] }

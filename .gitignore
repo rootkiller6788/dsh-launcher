@@ -1,0 +1,26 @@
+# Rust / cargo
+target/
+**/target/
+
+# Node / pnpm
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+*.tsbuildinfo
+
+# Tauri build artifacts
+apps/desktop/src-tauri/gen/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+
+# Local runtime data (never commit credentials)
+%LOCALAPPDATA%/AIHarnessLauncher/
+
+# Downloaded artifacts (not source)
+.cat.tgz

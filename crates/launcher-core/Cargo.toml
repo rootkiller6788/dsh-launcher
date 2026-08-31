@@ -1,0 +1,19 @@
+[package]
+name = "launcher-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+directories = "6"
+keyring = "4"
+rusqlite = { version = "0.32", features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+flate2 = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
