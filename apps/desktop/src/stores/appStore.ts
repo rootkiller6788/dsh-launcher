@@ -13,6 +13,7 @@ import type {
   Page,
   PluginUpdate,
   ProcessState,
+  ProviderPreset,
   ProviderProfile,
   ProviderView,
   RecommendResult,
@@ -36,6 +37,7 @@ interface AppStore {
   activeInstance: InstanceManifest | null
   system: SystemInfo | null
   provider: ProviderView | null
+  presets: ProviderPreset[]
   settings: AppSettings | null
   language: Lang
   theme: Theme
@@ -94,6 +96,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   activeInstance: null,
   system: null,
   provider: null,
+  presets: [],
   settings: null,
   language: 'en',
   theme: 'system',
@@ -171,7 +174,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
   refreshProvider: async () => {
     try {
-      set({ provider: await ipc.getProvider() })
+      const [provider, presets] = await Promise.all([
+        ipc.getProvider(),
+        ipc.listProviderPresets(),
+      ])
+      set({ provider, presets })
     } catch (e) {
       set({ error: String(e) })
     }
@@ -263,7 +270,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   saveProvider: async (profile, apiKey) => {
     set({ busy: true, error: null })
     try {
-      const saved = await ipc.setProvider(profile, apiKey)
+      const saved = await ipc.saveProvider(profile, apiKey)
       set({
         provider: {
           profile: saved,

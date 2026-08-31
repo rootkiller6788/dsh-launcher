@@ -52,7 +52,7 @@ pub async fn get_preference(port: u16) -> Result<Option<String>> {
 
 /// POST a full-form client-request envelope to the harness apiproxy and return
 /// the response's `result` value (the apiproxy is POST-only; path == method).
-async fn host_rpc(port: u16, method: &str, payload: Value) -> Result<Value> {
+pub(crate) async fn host_rpc(port: u16, method: &str, payload: Value) -> Result<Value> {
     let body = json!({
         "type": "client-request",
         "rpcId": format!("launcher-theme-{}", std::process::id()),
@@ -78,7 +78,7 @@ async fn host_rpc(port: u16, method: &str, payload: Value) -> Result<Value> {
 
 /// `{ok: true}` carries the value; `{ok: false}` carries an error object.
 /// The apiproxy reports business errors over HTTP 200.
-fn ensure_ok(value: &Value, method: &str) -> Result<()> {
+pub(crate) fn ensure_ok(value: &Value, method: &str) -> Result<()> {
     match value.get("ok").and_then(Value::as_bool) {
         Some(true) => Ok(()),
         _ => {

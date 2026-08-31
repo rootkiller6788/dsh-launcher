@@ -20,7 +20,7 @@ pub use instance::{InstanceManifest, RuntimeRef};
 pub use market::{RecommendPlan, RecommendResult, Registry, RegistryPlugin};
 pub use paths::AppPaths;
 pub use process::{ChildHandle, LogLine, LogSink, LogStream, ProcessState, ProcessStatus};
-pub use provider::{ProviderProfile, ProviderVault, ResolvedProvider};
+pub use provider::{ProviderPreset, ProviderProfile, ProviderVault, ResolvedProvider};
 pub use runtime::{RuntimeAdapter, RuntimeInfo};
 pub use settings::AppSettings;
 
