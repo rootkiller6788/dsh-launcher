@@ -30,14 +30,54 @@ const NPM_CHINA: &str = "https://mirrors.cloud.tencent.com/npm";
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The LLM system prompt for recommendation (faithful to smart-plugin-market).
-const SYSTEM_PROMPT: &str = "You are the plugin recommendation assistant for DeepSeek Harness.\n\
-Given a user need, compose 3 plugin-combination plans drawn ONLY from the candidate list.\n\
+const SYSTEM_PROMPT: &str = "You are the bundle recommendation assistant for DeepSeek Harness.\n\
+Given a user need, compose 3 bundle plans drawn ONLY from the candidate list, mixing plugins, skins, skills and MCP servers as the need warrants.\n\
 Rules:\n\
 - Output ONLY a JSON object, no prose, no markdown fences.\n\
-- Each plan: id (\"A\"|\"B\"|\"C\"), title, rationale, and a plugins array of 2-6 entries.\n\
-- Each plugin entry: \"name\" must be EXACTLY one candidate name (form \"owner/repo\"), plus a one-line \"reason\".\n\
+- Each plan: id (\"A\"|\"B\"|\"C\"), title, rationale, and an items array of 2-6 entries.\n\
+- Each item: \"name\" must be EXACTLY one candidate name (form \"owner/repo\"), \"kind\" must be EXACTLY one of plugin|theme|skill|mcp, plus a one-line \"reason\".\n\
 - The three plans should trade off: minimal vs comprehensive vs focused on one aspect.\n\
-- Never cite a plugin name outside the candidate list.";
+- Never cite a name or kind outside the candidate list.";
+
+/// What kind of content a market entry is. The catalog carries plugins plus
+/// themes (skins — which are themselves DSH plugins), skills, and MCP servers;
+/// `Bundle` is reserved for curated composition packages (import-only today).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ContentKind {
+    #[default]
+    Plugin,
+    Theme,
+    Skill,
+    Mcp,
+    Bundle,
+}
+
+impl ContentKind {
+    /// Lowercase wire form, matching `#[serde(rename_all = "lowercase")]`; used
+    /// in recommendation candidate ids (`kind:owner/name`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ContentKind::Plugin => "plugin",
+            ContentKind::Theme => "theme",
+            ContentKind::Skill => "skill",
+            ContentKind::Mcp => "mcp",
+            ContentKind::Bundle => "bundle",
+        }
+    }
+}
+
+/// One content item within a bundle (a curated catalog bundle or an
+/// LLM-composed recommendation plan). `name` is the `owner/name` key of the
+/// referenced entry, resolved against the merged catalog at install time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanItem {
+    pub name: String,
+    pub kind: ContentKind,
+    #[serde(default)]
+    pub reason: String,
+}
 
 /// One curated plugin entry. `spec` is a computed field (not part of the
 /// registry JSON): the ready-to-install pnpm target the launcher hands to
@@ -45,6 +85,10 @@ Rules:\n\
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RegistryPlugin {
+    /// Content type discriminator. Existing plugin catalogs omit it and
+    /// default to [`ContentKind::Plugin`].
+    #[serde(default)]
+    pub kind: ContentKind,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -74,6 +118,44 @@ pub struct RegistryPlugin {
     pub deprecated: Option<bool>,
     #[serde(default)]
     pub replacement: Option<String>,
+    // --- theme (skin) specific ---
+    #[serde(default)]
+    pub preview: Option<String>,
+    #[serde(default)]
+    pub preview_css: Option<String>,
+    /// Monorepo subdirectory the skin lives in (install still targets repo root).
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub gist: Option<String>,
+    // --- skill specific ---
+    /// Direct URL to the SKILL.md (raw.githubusercontent…), pre-resolved at
+    /// catalog-generation time so install is a plain download.
+    #[serde(default)]
+    pub fetch: Option<String>,
+    #[serde(default)]
+    pub skill_name: Option<String>,
+    // --- mcp specific ---
+    #[serde(default)]
+    pub server_name: Option<String>,
+    /// `"stdio"` or `"streamable-http"`.
+    #[serde(default)]
+    pub transport: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub env: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub mcp_url: Option<String>,
+    #[serde(default)]
+    pub headers: Option<HashMap<String, String>>,
+    // --- bundle specific ---
+    /// Curated bundle's item references (kind + owner/name + reason), resolved
+    /// against the merged catalog and installed as a group.
+    #[serde(default)]
+    pub items: Option<Vec<PlanItem>>,
     /// Computed install target (npm | tarball | `github:owner/repo`).
     #[serde(default)]
     pub spec: String,
@@ -89,6 +171,12 @@ impl RegistryPlugin {
         } else {
             format!("{}/{}", owner, self.name)
         }
+    }
+
+    /// Kind-qualified identity for cross-kind recommendation (`kind:owner/name`),
+    /// unambiguous when the merged catalog carries plugins + themes + skills + MCP.
+    pub fn kind_key(&self) -> String {
+        format!("{}:{}", self.kind.as_str(), self.key())
     }
 
     /// Install target derivation (npm → tarball → `github:owner/repo`).
@@ -145,22 +233,90 @@ pub fn hydrate(mut reg: Registry) -> Registry {
     reg
 }
 
-/// A plugin within a recommendation plan.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanPlugin {
-    pub name: String,
-    pub reason: String,
+/// The bundled theme/skin catalog, compiled into the binary via `include_str!`
+/// so the skin tab works offline (no hosted endpoint exists for these, unlike
+/// the plugin catalog).
+const THEMES_CATALOG: &str = include_str!("../data/content-themes.json");
+/// The bundled skill catalog (offline snapshot of awesome-agent-skills).
+const SKILLS_CATALOG: &str = include_str!("../data/content-skills.json");
+/// The bundled MCP server catalog (offline snapshot of awesome-mcp-servers,
+/// enriched with transport/command/args/env from the hand-maintained
+/// `scripts/data/mcp-overrides.json`).
+const MCPS_CATALOG: &str = include_str!("../data/content-mcps.json");
+/// The bundled bundle catalog (offline snapshot of awesome-agent-bundles).
+const BUNDLES_CATALOG: &str = include_str!("../data/content-bundles.json");
+
+/// Load the bundled theme catalog, hydrated (install spec computed).
+pub fn bundled_themes() -> Registry {
+    serde_json::from_str::<Registry>(THEMES_CATALOG)
+        .map(hydrate)
+        .unwrap_or_default()
 }
 
-/// One LLM-composed plugin combination.
+/// Load the bundled skill catalog. Skills have no install spec (they download a
+/// SKILL.md via `fetch`), so hydration is a no-op but keeps the shape uniform.
+pub fn bundled_skills() -> Registry {
+    serde_json::from_str::<Registry>(SKILLS_CATALOG)
+        .map(hydrate)
+        .unwrap_or_default()
+}
+
+/// Load the bundled MCP catalog. MCP servers carry their own launch config
+/// (`serverName`/`transport`/`command`/…), so hydration is a no-op here too.
+pub fn bundled_mcps() -> Registry {
+    serde_json::from_str::<Registry>(MCPS_CATALOG)
+        .map(hydrate)
+        .unwrap_or_default()
+}
+
+/// Load the bundled bundle catalog. Bundles are composites with no install spec
+/// of their own (they expand into their items), so hydration is a no-op.
+pub fn bundled_bundles() -> Registry {
+    serde_json::from_str::<Registry>(BUNDLES_CATALOG)
+        .map(hydrate)
+        .unwrap_or_default()
+}
+
+/// The merged bundled content catalogs (themes + skills + MCP + bundles) — the
+/// offline fallback when the hosted content endpoint is unreachable.
+pub fn bundled_content() -> Registry {
+    let mut reg = Registry::default();
+    reg.plugins.extend(bundled_themes().plugins);
+    reg.plugins.extend(bundled_skills().plugins);
+    reg.plugins.extend(bundled_mcps().plugins);
+    reg.plugins.extend(bundled_bundles().plugins);
+    reg.categories.extend(bundled_themes().categories);
+    reg.categories.extend(bundled_skills().categories);
+    reg.categories.extend(bundled_mcps().categories);
+    reg.categories.extend(bundled_bundles().categories);
+    reg.count = reg.plugins.len();
+    reg
+}
+
+/// Append a content registry (themes/skills/MCP) to a plugin registry, merging
+/// the kind categories and recounting. Applied at the `market_registry`
+/// response boundary so the smart-search candidate set stays plugin-only.
+pub fn extend_with_content(mut reg: Registry, content: Registry) -> Registry {
+    reg.plugins.extend(content.plugins);
+    reg.categories.extend(content.categories);
+    reg.count = reg.plugins.len();
+    reg
+}
+
+/// Append the bundled catalogs to a fetched plugin registry — the offline path,
+/// equivalent to [`extend_with_content`] fed by [`bundled_content`].
+pub fn extend_with_bundled(reg: Registry) -> Registry {
+    extend_with_content(reg, bundled_content())
+}
+
+/// One LLM-composed bundle combination.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecommendPlan {
     pub id: String,
     pub title: String,
     pub rationale: String,
-    pub plugins: Vec<PlanPlugin>,
+    pub items: Vec<PlanItem>,
 }
 
 /// The smart-search result: plans (already validated ⊆ registry) + the raw
@@ -246,6 +402,51 @@ pub async fn fetch_registry(paths: &AppPaths) -> Result<Registry> {
         return Ok(reg);
     }
     Err(last_err.unwrap_or_else(|| anyhow!("registry unreachable")))
+}
+
+/// Non-plugin content (themes/skills/MCP/bundles) is also served as structured
+/// JSON from a hosted endpoint — one repo, four files — fetched live with the
+/// bundled snapshot as the offline fallback. The base URL defaults to the
+/// plugin catalog's host so a repo can publish `content-*.json` alongside
+/// `plugins.json`; `AHL_CONTENT_URL` overrides it (e.g. a dedicated repo's
+/// GitHub Pages root).
+const CONTENT_BASE_DEFAULT: &str = "https://awesome-dsh-plugin.com/";
+
+/// Fetch each content kind from the hosted endpoint, falling back to its
+/// bundled snapshot when that file is unreachable. Always returns a merged
+/// registry of all four kinds (bundled content guarantees non-empty results).
+/// The four fetches run concurrently so a slow/hostile endpoint costs at most
+/// one timeout, not four.
+pub async fn fetch_content() -> Result<Registry> {
+    let client = reqwest::Client::builder()
+        .timeout(CATALOG_TIMEOUT)
+        .build()?;
+    let base = env_override("AHL_CONTENT_URL").unwrap_or_else(|| CONTENT_BASE_DEFAULT.to_string());
+
+    let themes_url = format!("{base}content-themes.json");
+    let skills_url = format!("{base}content-skills.json");
+    let mcps_url = format!("{base}content-mcps.json");
+    let bundles_url = format!("{base}content-bundles.json");
+    let (themes, skills, mcps, bundles) = tokio::join!(
+        fetch_url_catalog(&client, &themes_url),
+        fetch_url_catalog(&client, &skills_url),
+        fetch_url_catalog(&client, &mcps_url),
+        fetch_url_catalog(&client, &bundles_url),
+    );
+
+    let mut content = Registry::default();
+    for (remote, bundled) in [
+        (themes, bundled_themes as fn() -> Registry),
+        (skills, bundled_skills as fn() -> Registry),
+        (mcps, bundled_mcps as fn() -> Registry),
+        (bundles, bundled_bundles as fn() -> Registry),
+    ] {
+        let kind = remote.unwrap_or_else(|_| bundled());
+        content.plugins.extend(kind.plugins);
+        content.categories.extend(kind.categories);
+    }
+    content.count = content.plugins.len();
+    Ok(content)
 }
 
 async fn fetch_url_catalog(client: &reqwest::Client, url: &str) -> Result<Registry> {
@@ -390,8 +591,37 @@ pub fn prefilter(registry: &Registry, need: &str, n: usize) -> Vec<RegistryPlugi
         .collect()
 }
 
-/// Compose three plans from the model output, dropping any plugin name outside
-/// the candidate set — the `Result ⊆ Registry` invariant.
+/// Bundle recommendation candidate pool: sample the top `per_kind` matches of
+/// each content kind so a need can produce mixed plans (plugins + skins + skills
+/// + MCP) instead of being swamped by whichever kind is largest.
+pub fn prefilter_diverse(registry: &Registry, need: &str, per_kind: usize) -> Vec<RegistryPlugin> {
+    let tokens = tokenize(need);
+    let mut kinds: Vec<ContentKind> = Vec::new();
+    for p in &registry.plugins {
+        // Bundles are composites, not leaf installables — never recommended as
+        // a plan item.
+        if p.kind != ContentKind::Bundle && !kinds.contains(&p.kind) {
+            kinds.push(p.kind);
+        }
+    }
+    kinds.sort_by_key(|k| k.as_str());
+    let mut out: Vec<RegistryPlugin> = Vec::new();
+    for kind in kinds {
+        let mut scored: Vec<(usize, i32)> = registry
+            .plugins
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.kind == kind)
+            .map(|(i, p)| (i, score_plugin(p, &tokens)))
+            .collect();
+        scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        out.extend(scored.into_iter().take(per_kind).map(|(i, _)| registry.plugins[i].clone()));
+    }
+    out
+}
+
+/// Compose three plans from the model output, dropping any item whose
+/// `kind:name` falls outside the candidate set — the `Result ⊆ Registry` invariant.
 pub fn validate_plans(raw: &str, allowed: &HashSet<String>) -> Vec<RecommendPlan> {
     let json = extract_json(raw);
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) else {
@@ -409,30 +639,49 @@ pub fn validate_plans(raw: &str, allowed: &HashSet<String>) -> Vec<RecommendPlan
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let mut plugins = Vec::new();
-        if let Some(ps) = plan.get("plugins").and_then(|v| v.as_array()) {
-            for p in ps {
-                let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                if allowed.contains(&name) {
-                    let reason = p
+        let mut items = Vec::new();
+        let raw_items = plan
+            .get("items")
+            .and_then(|v| v.as_array())
+            .or_else(|| plan.get("plugins").and_then(|v| v.as_array()));
+        if let Some(arr) = raw_items {
+            for it in arr {
+                let name = it.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let kind_raw = it.get("kind").and_then(|v| v.as_str()).unwrap_or("plugin");
+                let kind = parse_kind(kind_raw);
+                let key = format!("{}:{}", kind.as_str(), name);
+                if allowed.contains(&key) {
+                    let reason = it
                         .get("reason")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    plugins.push(PlanPlugin { name, reason });
+                    items.push(PlanItem { name, kind, reason });
                 }
             }
         }
-        if !plugins.is_empty() {
+        if !items.is_empty() {
             out.push(RecommendPlan {
                 id,
                 title,
                 rationale,
-                plugins,
+                items,
             });
         }
     }
     out
+}
+
+/// Map a model-supplied kind string to a [`ContentKind`], tolerating the
+/// user-facing "skin" alias for themes.
+fn parse_kind(raw: &str) -> ContentKind {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "skin" | "theme" => ContentKind::Theme,
+        "skill" => ContentKind::Skill,
+        "mcp" => ContentKind::Mcp,
+        "bundle" => ContentKind::Bundle,
+        _ => ContentKind::Plugin,
+    }
 }
 
 /// Smart search: prefilter → LLM re-rank → validate, against the user's
@@ -442,8 +691,8 @@ pub async fn recommend(
     provider: &ResolvedProvider,
     need: &str,
 ) -> Result<RecommendResult> {
-    let candidates = prefilter(registry, need, 40);
-    let candidate_names: Vec<String> = candidates.iter().map(|p| p.key()).collect();
+    let candidates = prefilter_diverse(registry, need, 12);
+    let candidate_names: Vec<String> = candidates.iter().map(|p| p.kind_key()).collect();
     let allowed: HashSet<String> = candidate_names.iter().cloned().collect();
 
     let base = provider
@@ -509,10 +758,11 @@ fn build_prompt(need: &str, candidates: &[RegistryPlugin]) -> String {
     let mut lines = vec![
         format!("Need: {}", need.trim()),
         String::new(),
-        "Candidate plugins (name | category | description):".to_string(),
+        "Candidates (kind | name | category | description):".to_string(),
     ];
     for (i, p) in candidates.iter().enumerate() {
         let name = p.key();
+        let kind = p.kind.as_str();
         let cat = p.category.first().cloned().unwrap_or_else(|| "other".into());
         let desc = format!(
             "{} {}",
@@ -521,12 +771,12 @@ fn build_prompt(need: &str, candidates: &[RegistryPlugin]) -> String {
         );
         let desc = desc.split_whitespace().collect::<Vec<_>>().join(" ");
         let desc: String = desc.chars().take(180).collect();
-        lines.push(format!("{}. {} | {} | {}", i + 1, name, cat, desc));
+        lines.push(format!("{}. {} | {} | {} | {}", i + 1, kind, name, cat, desc));
     }
     lines.push(String::new());
     lines.push("Return 3 plans as JSON:".to_string());
     lines.push(
-        "{\"plans\":[{\"id\":\"A\",\"title\":\"...\",\"rationale\":\"...\",\"plugins\":[{\"name\":\"owner/repo\",\"reason\":\"...\"}]}]}"
+        "{\"plans\":[{\"id\":\"A\",\"title\":\"...\",\"rationale\":\"...\",\"items\":[{\"name\":\"owner/repo\",\"kind\":\"plugin|theme|skill|mcp\",\"reason\":\"...\"}]}]}"
             .to_string(),
     );
     lines.join("\n")
@@ -735,15 +985,15 @@ mod tests {
 
     #[test]
     fn validate_drops_names_outside_candidates() {
-        let allowed: HashSet<String> = ["a/github-thing".into(), "b/other".into()].into_iter().collect();
-        let raw = r#"{"plans":[{"id":"A","title":"t","rationale":"r","plugins":[
-            {"name":"a/github-thing","reason":"real"},
-            {"name":"evil/nonexistent","reason":"hallucinated"}
+        let allowed: HashSet<String> = ["plugin:a/github-thing".into(), "plugin:b/other".into()].into_iter().collect();
+        let raw = r#"{"plans":[{"id":"A","title":"t","rationale":"r","items":[
+            {"name":"a/github-thing","kind":"plugin","reason":"real"},
+            {"name":"evil/nonexistent","kind":"plugin","reason":"hallucinated"}
         ]}]}"#;
         let plans = validate_plans(raw, &allowed);
         assert_eq!(plans.len(), 1);
-        assert_eq!(plans[0].plugins.len(), 1);
-        assert_eq!(plans[0].plugins[0].name, "a/github-thing");
+        assert_eq!(plans[0].items.len(), 1);
+        assert_eq!(plans[0].items[0].name, "a/github-thing");
     }
 
     #[test]
@@ -760,6 +1010,90 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(gh.install_spec(), "github:o/r");
+    }
+
+    #[test]
+    fn kind_defaults_to_plugin() {
+        let json = r#"{"name":"p","owner":"o","url":"https://github.com/o/p"}"#;
+        let p: RegistryPlugin = serde_json::from_str(json).expect("kindless entry parses");
+        assert_eq!(p.kind, ContentKind::Plugin);
+    }
+
+    #[test]
+    fn bundled_mcps_load_with_config() {
+        let reg = bundled_mcps();
+        assert!(!reg.plugins.is_empty(), "bundled MCP catalog is empty");
+        assert!(
+            reg.plugins.iter().all(|p| p.kind == ContentKind::Mcp),
+            "bundled catalog should be all MCP servers"
+        );
+        assert!(
+            reg.plugins.iter().all(|p| p.server_name.is_some()),
+            "every MCP entry must carry a serverName"
+        );
+        // Bulk-parsed entries whose source has no runnable command (Go/Rust/etc.)
+        // ship without one and fall back to "open GitHub" in the UI — but the large
+        // majority must still be one-click installable.
+        let installable = reg
+            .plugins
+            .iter()
+            .filter(|p| p.command.is_some() || p.mcp_url.is_some())
+            .count();
+        assert!(
+            installable * 100 >= reg.plugins.len() * 60,
+            "most MCP entries should carry a command (stdio) or mcpUrl (http), got {installable}/{}",
+            reg.plugins.len()
+        );
+    }
+
+    #[test]
+    fn bundled_themes_load_and_hydrate() {
+        let reg = bundled_themes();
+        assert!(!reg.plugins.is_empty(), "bundled theme catalog is empty");
+        assert!(
+            reg.plugins.iter().all(|p| p.kind == ContentKind::Theme),
+            "bundled catalog should be all themes"
+        );
+        assert!(
+            reg.plugins.iter().all(|p| !p.spec.is_empty()),
+            "every theme must derive a non-empty install spec"
+        );
+    }
+
+    #[test]
+    fn bundled_content_merges_all_kinds() {
+        let content = bundled_content();
+        assert!(!content.plugins.is_empty());
+        let has = |k: ContentKind| content.plugins.iter().any(|p| p.kind == k);
+        assert!(has(ContentKind::Theme));
+        assert!(has(ContentKind::Skill));
+        assert!(has(ContentKind::Mcp));
+        assert!(has(ContentKind::Bundle));
+        // Each kind's category label is merged for the filter dropdown.
+        for key in ["skin", "skill", "mcp", "bundle"] {
+            assert!(content.categories.contains_key(key), "missing category {key}");
+        }
+        assert_eq!(content.count, content.plugins.len());
+    }
+
+    #[test]
+    fn bundled_bundles_load_and_reference_items() {
+        let reg = bundled_bundles();
+        assert!(!reg.plugins.is_empty(), "bundled bundle catalog is empty");
+        assert!(
+            reg.plugins.iter().all(|p| p.kind == ContentKind::Bundle),
+            "bundled catalog should be all bundles"
+        );
+        // Every bundle expands into at least one leaf item, each with a kind
+        // (plugin/theme/skill/mcp — never bundle) and a non-empty reference key.
+        for b in &reg.plugins {
+            let items = b.items.as_ref().expect("bundle should carry items");
+            assert!(!items.is_empty(), "bundle {} has no items", b.name);
+            for it in items {
+                assert_ne!(it.kind, ContentKind::Bundle, "bundle item must be a leaf");
+                assert!(!it.name.is_empty(), "bundle item missing reference key");
+            }
+        }
     }
 
     #[test]

@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
   AppSettings,
+  BundleManifest,
+  BundleSummary,
   DiagnosticsReport,
   InstanceManifest,
   InstalledPlugin,
@@ -12,6 +14,7 @@ import type {
   ProviderView,
   RecommendResult,
   Registry,
+  RegistryPlugin,
   RuntimeEntry,
   RuntimeManagerView,
   SystemInfo,
@@ -58,6 +61,17 @@ export const ipc = {
   pluginUpdates: (id: string) => call<PluginUpdate[]>('plugin_updates', { id }),
   pluginUpdate: (id: string, name: string) => call<void>('plugin_update', { id, name }),
   profileDiagnostics: (id: string) => call<DiagnosticsReport>('profile_diagnostics', { id }),
+
+  skillList: (id: string) => call<string[]>('skill_list', { id }),
+  skillInstall: (id: string, entry: RegistryPlugin) => call<void>('skill_install', { id, entry }),
+  skillUninstall: (id: string, skill: string) => call<void>('skill_uninstall', { id, skill }),
+
+  mcpList: (id: string) => call<string[]>('mcp_list', { id }),
+  mcpInstall: (id: string, entry: RegistryPlugin) => call<void>('mcp_install', { id, entry }),
+  mcpUninstall: (id: string, entry: RegistryPlugin) => call<void>('mcp_uninstall', { id, entry }),
+
+  bundleImport: (id: string, manifest: BundleManifest) =>
+    call<BundleSummary>('bundle_import', { id, manifest }),
 
   getSettings: () => call<AppSettings>('get_settings'),
   setSettings: (settings: AppSettings) => call<AppSettings>('set_settings', { settings }),

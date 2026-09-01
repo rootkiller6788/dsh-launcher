@@ -1,0 +1,146 @@
+{
+  "updated": "2026-09-01",
+  "count": 3,
+  "categories": {
+    "bundle": {
+      "en": "Bundles",
+      "zh": "整合包"
+    }
+  },
+  "plugins": [
+    {
+      "name": "GitHub 开发者工作流",
+      "owner": "",
+      "url": "",
+      "category": [
+        "bundle"
+      ],
+      "description": {
+        "zh": "面向写代码、管仓库的开发者：接入 GitHub 与 Git 工具，配一套代码编辑风皮肤。"
+      },
+      "npm": null,
+      "tarball": null,
+      "screenshots": [],
+      "stars": null,
+      "downloads": null,
+      "install": "",
+      "added": "",
+      "deprecated": null,
+      "replacement": null,
+      "kind": "bundle",
+      "items": [
+        {
+          "name": "modelcontextprotocol/server-github",
+          "kind": "mcp",
+          "reason": "官方 GitHub MCP：查 issue/PR/仓库、读写评论"
+        },
+        {
+          "name": "modelcontextprotocol/server-git",
+          "kind": "mcp",
+          "reason": "Git 操作 MCP：diff/log/commit 走原生 git"
+        },
+        {
+          "name": "callstackincubator/github",
+          "kind": "skill",
+          "reason": "GitHub 工作流 Skill：PR 审查、分支管理等约定"
+        },
+        {
+          "name": "LucasN0820/dsh-skin-claude-code",
+          "kind": "theme",
+          "reason": "类 Claude Code 的代码编辑风皮肤"
+        }
+      ]
+    },
+    {
+      "name": "本地知识库与记忆",
+      "owner": "",
+      "url": "",
+      "category": [
+        "bundle"
+      ],
+      "description": {
+        "zh": "让 DeepSeek 记住上下文、读写本地文件与数据库，做持久化助手。"
+      },
+      "npm": null,
+      "tarball": null,
+      "screenshots": [],
+      "stars": null,
+      "downloads": null,
+      "install": "",
+      "added": "",
+      "deprecated": null,
+      "replacement": null,
+      "kind": "bundle",
+      "items": [
+        {
+          "name": "modelcontextprotocol/server-memory",
+          "kind": "mcp",
+          "reason": "知识图谱记忆 MCP：跨会话持久记忆"
+        },
+        {
+          "name": "modelcontextprotocol/server-filesystem",
+          "kind": "mcp",
+          "reason": "文件系统 MCP：安全读写本地文件"
+        },
+        {
+          "name": "modelcontextprotocol/server-sqlite",
+          "kind": "mcp",
+          "reason": "SQLite MCP：本地结构化数据查询"
+        },
+        {
+          "name": "anthropics/web-artifacts-builder",
+          "kind": "skill",
+          "reason": "生成可交互 Web 制品的 Skill"
+        }
+      ]
+    },
+    {
+      "name": "网络研究 · 网页自动化",
+      "owner": "",
+      "url": "",
+      "category": [
+        "bundle"
+      ],
+      "description": {
+        "zh": "联网搜索、抓取与浏览器自动化，让 DeepSeek 能查最新资料并操作网页。"
+      },
+      "npm": null,
+      "tarball": null,
+      "screenshots": [],
+      "stars": null,
+      "downloads": null,
+      "install": "",
+      "added": "",
+      "deprecated": null,
+      "replacement": null,
+      "kind": "bundle",
+      "items": [
+        {
+          "name": "modelcontextprotocol/server-brave-search",
+          "kind": "mcp",
+          "reason": "Brave 搜索 MCP（需在配置里补 BRAVE_API_KEY）"
+        },
+        {
+          "name": "browserbase/mcp",
+          "kind": "mcp",
+          "reason": "Browserbase 浏览器自动化 MCP"
+        },
+        {
+          "name": "firecrawl/firecrawl-build-search",
+          "kind": "skill",
+          "reason": "Firecrawl 网页抓取/搜索 Skill"
+        },
+        {
+          "name": "anthropics/webapp-testing",
+          "kind": "skill",
+          "reason": "用 Playwright 做 Web 应用测试的 Skill"
+        },
+        {
+          "name": "webkubor/dsh-bloom-theme",
+          "kind": "theme",
+          "reason": "Bloom 视觉皮肤，清爽阅读"
+        }
+      ]
+    }
+  ]
+}

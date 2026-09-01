@@ -67,6 +67,12 @@ export function Settings() {
     if (settings) setDshPath(settings.dshPath ?? '')
   }, [provider, settings])
 
+  // Load the preset library once on mount — presets aren't fetched by the
+  // global `refresh()`, so the dropdown would otherwise render empty.
+  useEffect(() => {
+    void refreshProvider()
+  }, [refreshProvider])
+
   const applyPreset = (id: string) => {
     setPresetId(id)
     const p = presets.find((x) => x.id === id)

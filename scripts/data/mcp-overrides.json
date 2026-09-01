@@ -1,0 +1,349 @@
+[
+  {
+    "name": "server-github",
+    "owner": "modelcontextprotocol",
+    "url": "https://github.com/modelcontextprotocol/servers",
+    "description": "GitHub API: repos, issues, pull requests, and code search.",
+    "serverName": "github",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-github"
+    ],
+    "env": {}
+  },
+  {
+    "name": "server-filesystem",
+    "owner": "modelcontextprotocol",
+    "url": "https://github.com/modelcontextprotocol/servers",
+    "description": "Read, write, and search files on a local filesystem.",
+    "serverName": "filesystem",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-filesystem"
+    ],
+    "env": {}
+  },
+  {
+    "name": "server-memory",
+    "owner": "modelcontextprotocol",
+    "url": "https://github.com/modelcontextprotocol/servers",
+    "description": "Knowledge-graph memory: persistent entities and relations across sessions.",
+    "serverName": "memory",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-memory"
+    ],
+    "env": {}
+  },
+  {
+    "name": "server-fetch",
+    "owner": "modelcontextprotocol",
+    "url": "https://github.com/modelcontextprotocol/servers",
+    "description": "Fetch a URL and convert it to Markdown for the model.",
+    "serverName": "fetch",
+    "transport": "stdio",
+    "command": "uvx",
+    "args": [
+      "mcp-server-fetch"
+    ],
+    "env": {}
+  },
+  {
+    "name": "server-git",
+    "owner": "modelcontextprotocol",
+    "url": "https://github.com/modelcontextprotocol/servers",
+    "description": "Read, search, and manipulate Git repositories.",
+    "serverName": "git",
+    "transport": "stdio",
+    "command": "uvx",
+    "args": [
+      "mcp-server-git"
+    ],
+    "env": {}
+  },
+  {
+    "name": "server-sqlite",
+    "owner": "modelcontextprotocol",
+    "url": "https://github.com/modelcontextprotocol/servers",
+    "description": "Query and inspect local SQLite databases.",
+    "serverName": "sqlite",
+    "transport": "stdio",
+    "command": "uvx",
+    "args": [
+      "mcp-server-sqlite"
+    ],
+    "env": {}
+  },
+  {
+    "name": "server-puppeteer",
+    "owner": "modelcontextprotocol",
+    "url": "https://github.com/modelcontextprotocol/servers",
+    "description": "Browser automation: navigate pages, click, and extract content.",
+    "serverName": "puppeteer",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-puppeteer"
+    ],
+    "env": {}
+  },
+  {
+    "name": "server-brave-search",
+    "owner": "modelcontextprotocol",
+    "url": "https://github.com/modelcontextprotocol/servers",
+    "description": "Web and local search through the Brave Search API.",
+    "serverName": "brave-search",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-brave-search"
+    ],
+    "env": {}
+  },
+  {
+    "name": "server-sequential-thinking",
+    "owner": "modelcontextprotocol",
+    "url": "https://github.com/modelcontextprotocol/servers",
+    "description": "Step-by-step reasoning with a chain-of-thought workspace.",
+    "serverName": "sequential-thinking",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-sequential-thinking"
+    ],
+    "env": {}
+  },
+  {
+    "name": "mcp",
+    "owner": "microsoft",
+    "url": "https://github.com/microsoft/playwright-mcp",
+    "description": "Playwright browser automation: screenshot, navigate, and interact.",
+    "serverName": "playwright",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@playwright/mcp@latest"
+    ],
+    "env": {}
+  },
+  {
+    "name": "firecrawl-mcp",
+    "owner": "mendableai",
+    "url": "https://github.com/mendableai/firecrawl-mcp-server",
+    "description": "Turn whole websites into LLM-ready Markdown via Firecrawl.",
+    "serverName": "firecrawl",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "firecrawl-mcp"
+    ],
+    "env": {}
+  },
+  {
+    "name": "mcp-server-supabase",
+    "owner": "supabase-community",
+    "url": "https://github.com/supabase-community/supabase-mcp",
+    "description": "Query and manage Supabase projects (Postgres, Auth, Storage).",
+    "serverName": "supabase",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@supabase/mcp-server-supabase"
+    ],
+    "env": {}
+  },
+  {
+    "name": "server-everything",
+    "owner": "modelcontextprotocol",
+    "url": "https://github.com/modelcontextprotocol/servers",
+    "description": "MCP server that exercises all the features of the MCP protocol",
+    "serverName": "everything",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-everything"
+    ],
+    "env": {}
+  },
+  {
+    "name": "server-pdf",
+    "owner": "modelcontextprotocol",
+    "url": "https://github.com/modelcontextprotocol/servers",
+    "description": "MCP server for loading and extracting text from PDF files with chunked pagination and interactive viewer",
+    "serverName": "pdf",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-pdf"
+    ],
+    "env": {}
+  },
+  {
+    "name": "server-wiki-explorer",
+    "owner": "modelcontextprotocol",
+    "url": "https://github.com/modelcontextprotocol/servers",
+    "description": "Wikipedia link explorer MCP App Server with graph visualization",
+    "serverName": "wiki-explorer",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-wiki-explorer"
+    ],
+    "env": {}
+  },
+  {
+    "name": "server-system-monitor",
+    "owner": "modelcontextprotocol",
+    "url": "https://github.com/modelcontextprotocol/servers",
+    "description": "System monitor MCP App Server with real-time stats",
+    "serverName": "system-monitor",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-system-monitor"
+    ],
+    "env": {}
+  },
+  {
+    "name": "server-google-maps",
+    "owner": "modelcontextprotocol",
+    "url": "https://github.com/modelcontextprotocol/servers",
+    "description": "MCP server for using the Google Maps API — requires GOOGLE_MAPS_API_KEY",
+    "serverName": "google-maps",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-google-maps"
+    ],
+    "env": {}
+  },
+  {
+    "name": "mcp-server",
+    "owner": "e2b-dev",
+    "url": "https://github.com/e2b-dev/mcp-server",
+    "description": "A Model Context Protocol server — requires E2B_API_KEY",
+    "serverName": "e2b",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@e2b/mcp-server"
+    ],
+    "env": {}
+  },
+  {
+    "name": "mcp-server-neon",
+    "owner": "neondatabase",
+    "url": "https://github.com/neondatabase/mcp-server-neon",
+    "description": "MCP server for interacting with Neon Management API and databases — requires NEON_API_KEY",
+    "serverName": "neon",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@neondatabase/mcp-server-neon"
+    ],
+    "env": {}
+  },
+  {
+    "name": "chrome-devtools-mcp",
+    "owner": "ChromeDevTools",
+    "url": "https://github.com/ChromeDevTools/chrome-devtools-mcp",
+    "description": "MCP server for Chrome DevTools",
+    "serverName": "chrome-devtools",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "chrome-devtools-mcp"
+    ],
+    "env": {}
+  },
+  {
+    "name": "context7-mcp",
+    "owner": "upstash",
+    "url": "https://github.com/upstash/context7",
+    "description": "MCP server for Context7",
+    "serverName": "context7",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@upstash/context7-mcp"
+    ],
+    "env": {}
+  },
+  {
+    "name": "mcp-server-commands",
+    "owner": "g0t4",
+    "url": "https://github.com/g0t4/mcp-server-commands",
+    "description": "An MCP server to run arbitrary commands",
+    "serverName": "commands",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "mcp-server-commands"
+    ],
+    "env": {}
+  },
+  {
+    "name": "mcp-server",
+    "owner": "getsentry",
+    "url": "https://github.com/getsentry/sentry-mcp",
+    "description": "requires SENTRY_AUTH_TOKEN",
+    "serverName": "sentry",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@sentry/mcp-server"
+    ],
+    "env": {}
+  },
+  {
+    "name": "dbhub",
+    "owner": "bytebase",
+    "url": "https://github.com/bytebase/dbhub",
+    "description": "Minimal, token-efficient Database MCP Server for PostgreSQL, MySQL, SQL Server, SQLite, MariaDB — requires DATABASE_URL",
+    "serverName": "dbhub",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@bytebase/dbhub"
+    ],
+    "env": {}
+  },
+  {
+    "name": "mcp",
+    "owner": "browserbase",
+    "url": "https://github.com/browserbase/mcp-server-browserbase",
+    "description": "MCP server for AI web browser automation using Browserbase and Stagehand — requires BROWSERBASE_API_KEY",
+    "serverName": "browserbase",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@browserbasehq/mcp"
+    ],
+    "env": {}
+  }
+]

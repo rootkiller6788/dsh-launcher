@@ -5,6 +5,7 @@
 //! credential vault (`provider`), the process supervisor (`process`), and the
 //! small `RuntimeAdapter` contract that DSH-specific behavior plugs into.
 
+pub mod bundle;
 pub mod diagnostics;
 pub mod history;
 pub mod instance;
@@ -15,6 +16,7 @@ pub mod provider;
 pub mod runtime;
 pub mod settings;
 
+pub use bundle::{BundleItemResult, BundleManifest, BundleSummary};
 pub use history::{LaunchHistory, LaunchSession};
 pub use instance::{InstanceManifest, RuntimeRef};
 pub use market::{RecommendPlan, RecommendResult, Registry, RegistryPlugin};

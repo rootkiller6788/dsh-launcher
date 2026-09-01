@@ -8,7 +8,7 @@ use crate::state::AppState;
 
 /// Refuse plugin mutations while the target instance is running (its profile
 /// files are being read by the live DSH process).
-async fn ensure_not_running(state: &AppState, id: &str) -> Result<(), AppError> {
+pub(crate) async fn ensure_not_running(state: &AppState, id: &str) -> Result<(), AppError> {
     let guard = state.child.lock().await;
     if let Some(running) = guard.as_ref() {
         if running.instance_id == id {

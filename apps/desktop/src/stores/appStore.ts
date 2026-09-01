@@ -4,6 +4,8 @@ import { ipc } from '../lib/ipc'
 import { applyTheme } from '../lib/theme'
 import type {
   AppSettings,
+  BundleManifest,
+  BundleSummary,
   DiagnosticsReport,
   InstanceManifest,
   InstalledPlugin,
@@ -18,6 +20,7 @@ import type {
   ProviderView,
   RecommendResult,
   Registry,
+  RegistryPlugin,
   SystemInfo,
   Theme,
 } from '../lib/types'
@@ -48,6 +51,8 @@ interface AppStore {
   registry: Registry | null
   registryError: string | null
   installedPlugins: InstalledPlugin[]
+  installedSkills: string[]
+  installedMcps: string[]
   recommendations: RecommendResult | null
   searching: boolean
   updates: PluginUpdate[]
@@ -84,6 +89,13 @@ interface AppStore {
   installPlugin: (target: string) => Promise<boolean>
   uninstallPlugin: (name: string) => Promise<boolean>
   togglePlugin: (name: string, enabled: boolean) => Promise<boolean>
+  installSkill: (entry: RegistryPlugin) => Promise<boolean>
+  uninstallSkill: (id: string) => Promise<boolean>
+  refreshInstalledSkills: () => Promise<void>
+  installMcp: (entry: RegistryPlugin) => Promise<boolean>
+  uninstallMcp: (entry: RegistryPlugin) => Promise<boolean>
+  refreshInstalledMcps: () => Promise<void>
+  importBundle: (manifest: BundleManifest) => Promise<BundleSummary | null>
   refreshUpdates: () => Promise<void>
   updatePlugin: (name: string) => Promise<boolean>
   refreshDiagnostics: () => Promise<void>
@@ -107,6 +119,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   registry: null,
   registryError: null,
   installedPlugins: [],
+  installedSkills: [],
+  installedMcps: [],
   recommendations: null,
   searching: false,
   updates: [],
@@ -453,6 +467,115 @@ export const useAppStore = create<AppStore>((set, get) => ({
     } catch (e) {
       set({ error: String(e) })
       return false
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  refreshInstalledSkills: async () => {
+    const id = get().activeId
+    if (!id) {
+      set({ installedSkills: [] })
+      return
+    }
+    try {
+      set({ installedSkills: await ipc.skillList(id) })
+    } catch {
+      /* non-fatal */
+    }
+  },
+
+  installSkill: async (entry) => {
+    const id = get().activeId
+    if (!id) return false
+    set({ busy: true, error: null })
+    try {
+      await ipc.skillInstall(id, entry)
+      await get().refreshInstalledSkills()
+      return true
+    } catch (e) {
+      set({ error: String(e) })
+      return false
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  uninstallSkill: async (skill) => {
+    const id = get().activeId
+    if (!id) return false
+    set({ busy: true, error: null })
+    try {
+      await ipc.skillUninstall(id, skill)
+      await get().refreshInstalledSkills()
+      return true
+    } catch (e) {
+      set({ error: String(e) })
+      return false
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  refreshInstalledMcps: async () => {
+    const id = get().activeId
+    if (!id) {
+      set({ installedMcps: [] })
+      return
+    }
+    try {
+      set({ installedMcps: await ipc.mcpList(id) })
+    } catch {
+      /* non-fatal */
+    }
+  },
+
+  installMcp: async (entry) => {
+    const id = get().activeId
+    if (!id) return false
+    set({ busy: true, error: null })
+    try {
+      await ipc.mcpInstall(id, entry)
+      await get().refreshInstalledMcps()
+      return true
+    } catch (e) {
+      set({ error: String(e) })
+      return false
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  uninstallMcp: async (entry) => {
+    const id = get().activeId
+    if (!id) return false
+    set({ busy: true, error: null })
+    try {
+      await ipc.mcpUninstall(id, entry)
+      await get().refreshInstalledMcps()
+      return true
+    } catch (e) {
+      set({ error: String(e) })
+      return false
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  importBundle: async (manifest) => {
+    const id = get().activeId
+    if (!id) return null
+    set({ busy: true, error: null })
+    try {
+      const summary = await ipc.bundleImport(id, manifest)
+      // Bundle items can install plugins/skills/MCP, so refresh every index.
+      await get().refreshInstalledPlugins()
+      await get().refreshInstalledSkills()
+      await get().refreshInstalledMcps()
+      return summary
+    } catch (e) {
+      set({ error: String(e) })
+      return null
     } finally {
       set({ busy: false })
     }

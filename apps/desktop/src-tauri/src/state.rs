@@ -30,6 +30,8 @@ pub struct AppState {
     pub session_id: Mutex<Option<i64>>,
     /// Cached market registry (fetched lazily, avoids re-hitting the network).
     pub registry: Mutex<Option<Registry>>,
+    /// Cached non-plugin content (themes/skills/MCP), fetched lazily the same way.
+    pub content: Mutex<Option<Registry>>,
 }
 
 impl AppState {
@@ -51,6 +53,7 @@ impl AppState {
             history,
             session_id: Mutex::new(None),
             registry: Mutex::new(None),
+            content: Mutex::new(None),
         }
     }
 }
