@@ -1,3 +1,4 @@
+pub mod content;
 pub mod diagnostics;
 pub mod history;
 pub mod instance;

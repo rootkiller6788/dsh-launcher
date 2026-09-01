@@ -53,7 +53,7 @@ const en: Dict = {
   'market.title': 'Market',
   'market.installsInto': 'Installs into active instance:',
   'market.smartSearch': 'Smart Search',
-  'market.smartHint': 'Describe what you want, get 3 plugin-combination plans.',
+  'market.smartHint': 'Describe what you want, get 3 bundle plans mixing plugins, skins, skills and MCP servers.',
   'market.smartPlaceholder': 'e.g. I want DeepSeek to work with GitHub',
   'market.recommend': 'Recommend',
   'market.thinking': 'Thinking…',
@@ -75,9 +75,27 @@ const en: Dict = {
   'market.shots': '{n} shots',
   'market.install': 'Install',
   'market.remove': 'Remove',
+  'market.openGithub': 'Open GitHub',
+  'market.installAll': 'Install all',
   'market.disable': 'Disable',
   'market.enable': 'Enable',
   'market.update': 'Update {from} → {to}',
+  'market.tabPlugins': 'Plugins',
+  'market.tabThemes': 'Skins',
+  'market.tabSkills': 'Skills',
+  'market.tabMcp': 'MCP',
+  'market.tabBundles': 'Bundles',
+  'market.bundleHint':
+    'Paste a bundle manifest (JSON) — a bundle installs a whole combination of plugins, skins, skills and MCP servers in one click.',
+  'market.bundlePlaceholder':
+    '{\n  "name": "My bundle",\n  "version": "1.0.0",\n  "description": "…",\n  "items": [ … ]\n}',
+  'market.bundleImport': 'Install bundle',
+  'market.bundleInvalid': 'Invalid bundle JSON: {error}',
+  'market.bundleSummary': 'Done: {installed} installed, {failed} failed',
+  'market.skillNote':
+    'Skills install as files into the instance’s skills/ folder and are discovered by the agent’s skill plugin — some agent presets may need to mount it first.',
+  'market.mcpNote':
+    'MCP servers install as mcp-client rows in the instance’s cordis.patch.yml. Servers that need a token (e.g. GitHub, Brave) must have it supplied in the config after install.',
 
   'activity.title': 'Activity',
   'activity.clear': 'Clear logs',
@@ -222,7 +240,7 @@ const zh: Dict = {
   'market.title': '市场',
   'market.installsInto': '安装到当前实例：',
   'market.smartSearch': '智能搜索',
-  'market.smartHint': '描述你的需求，得到 3 个插件组合方案。',
+  'market.smartHint': '描述你的需求，得到 3 个整合方案（插件、皮肤、Skill、MCP 组合）。',
   'market.smartPlaceholder': '例如：我想让 DeepSeek 操作 GitHub',
   'market.recommend': '推荐',
   'market.thinking': '思考中…',
@@ -244,9 +262,27 @@ const zh: Dict = {
   'market.shots': '{n} 张截图',
   'market.install': '安装',
   'market.remove': '移除',
+  'market.openGithub': '打开 GitHub',
+  'market.installAll': '一键安装',
   'market.disable': '停用',
   'market.enable': '启用',
   'market.update': '更新 {from} → {to}',
+  'market.tabPlugins': '插件',
+  'market.tabThemes': '皮肤',
+  'market.tabSkills': 'Skill',
+  'market.tabMcp': 'MCP',
+  'market.tabBundles': '整合包',
+  'market.bundleHint':
+    '粘贴整合包清单（JSON）——一键装齐插件、皮肤、Skill 与 MCP 服务器的组合。',
+  'market.bundlePlaceholder':
+    '{\n  "name": "我的整合包",\n  "version": "1.0.0",\n  "description": "…",\n  "items": [ … ]\n}',
+  'market.bundleImport': '安装整合包',
+  'market.bundleInvalid': '整合包 JSON 无效：{error}',
+  'market.bundleSummary': '完成：成功 {installed} 个，失败 {failed} 个',
+  'market.skillNote':
+    'Skill 以文件形式安装到实例的 skills/ 目录，由 agent 的 skill 插件发现——部分 agent preset 需要先挂载该插件。',
+  'market.mcpNote':
+    'MCP 服务器以 mcp-client 行写入实例的 cordis.patch.yml。需要 token 的服务器（如 GitHub、Brave）安装后需在配置里补上密钥。',
 
   'activity.title': '活动',
   'activity.clear': '清空日志',

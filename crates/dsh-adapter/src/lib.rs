@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+pub mod content;
 pub mod diagnostics;
 pub mod llm;
 pub mod runtimes;
@@ -669,7 +670,7 @@ fn without_comment_lines(text: &str) -> String {
 /// the profile template ships (appending after it would produce two top-level
 /// YAML documents — the loader refuses that). Port of dsh-market's
 /// `appendPatchEntry`.
-fn append_patch_entry(patch_path: &Path, block: &str) -> Result<()> {
+pub(crate) fn append_patch_entry(patch_path: &Path, block: &str) -> Result<()> {
     let text = std::fs::read_to_string(patch_path).unwrap_or_default();
     let core = text.trim();
     if core.is_empty() {
@@ -815,6 +816,52 @@ fn remove_row_blocks(patch_path: &Path, ids: &[String]) -> Result<()> {
     }
     if changed {
         std::fs::write(patch_path, restore_placeholder(&next))
+            .with_context(|| format!("write {}", patch_path.display()))?;
+    }
+    Ok(())
+}
+
+/// Remove a whole top-level `- insert:` block that contains a row with id
+/// `row_id` — the MCP-uninstall cleanup (each MCP install appends its own
+/// insert block). The block spans from its `- insert:` line to the next
+/// column-0 entry (or EOF). Line-based, like the other patch writers; restores
+/// the `[]` placeholder if that empties the file.
+pub(crate) fn remove_insert_block(patch_path: &Path, row_id: &str) -> Result<()> {
+    let text = std::fs::read_to_string(patch_path).unwrap_or_default();
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut removed = false;
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i].trim_end_matches('\r');
+        if line.starts_with("- insert:") {
+            // Block end (exclusive): the next column-0 line after this one.
+            let mut end = i + 1;
+            while end < lines.len() {
+                let inner = lines[end].trim_end_matches('\r');
+                if !inner.is_empty() && !inner.starts_with(' ') && !inner.starts_with('\t') {
+                    break;
+                }
+                end += 1;
+            }
+            let contains = (i + 1..end).any(|k| {
+                let inner = lines[k].trim_end_matches('\r').trim_start();
+                parse_id(inner).as_deref() == Some(row_id)
+            });
+            if contains {
+                removed = true;
+                i = end;
+                continue;
+            }
+        }
+        out.push(lines[i].to_string());
+        i += 1;
+    }
+    if removed {
+        std::fs::write(patch_path, restore_placeholder(&out.join("\n")))
             .with_context(|| format!("write {}", patch_path.display()))?;
     }
     Ok(())

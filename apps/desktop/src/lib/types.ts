@@ -130,6 +130,8 @@ export interface LaunchSession {
   status: 'running' | 'stopped' | 'crashed' | string
 }
 
+export type ContentKind = 'plugin' | 'theme' | 'skill' | 'mcp' | 'bundle'
+
 export interface RegistryPlugin {
   name: string
   owner: string
@@ -145,6 +147,26 @@ export interface RegistryPlugin {
   added: string
   deprecated?: boolean | null
   replacement?: string | null
+  /** Content type discriminator; omitted means `plugin`. */
+  kind?: ContentKind
+  /** theme (skin) specific */
+  preview?: string | null
+  previewCss?: string | null
+  path?: string | null
+  gist?: string | null
+  /** skill specific */
+  fetch?: string | null
+  skillName?: string | null
+  /** mcp specific */
+  serverName?: string | null
+  transport?: string | null
+  command?: string | null
+  args?: string[] | null
+  env?: Record<string, string> | null
+  mcpUrl?: string | null
+  headers?: Record<string, string> | null
+  /** bundle specific — item references (kind + owner/name + reason). */
+  items?: PlanItem[] | null
   /** Computed install target (npm | tarball | github:owner/repo). */
   spec: string
 }
@@ -156,8 +178,30 @@ export interface Registry {
   plugins: RegistryPlugin[]
 }
 
-export interface PlanPlugin {
+/** A bundle = a curated list of content items installed in one pass. */
+export interface BundleManifest {
   name: string
+  version: string
+  description: string
+  items: RegistryPlugin[]
+}
+
+export interface BundleItemResult {
+  name: string
+  kind: string
+  ok: boolean
+  error?: string | null
+}
+
+export interface BundleSummary {
+  installed: number
+  failed: number
+  results: BundleItemResult[]
+}
+
+export interface PlanItem {
+  name: string
+  kind: ContentKind
   reason: string
 }
 
@@ -165,7 +209,7 @@ export interface RecommendPlan {
   id: string
   title: string
   rationale: string
-  plugins: PlanPlugin[]
+  items: PlanItem[]
 }
 
 export interface RecommendResult {

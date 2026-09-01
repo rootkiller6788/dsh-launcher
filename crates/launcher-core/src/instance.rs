@@ -26,8 +26,11 @@ pub struct InstanceManifest {
     pub profile: String,
     /// Reference into the provider vault, never an inline key.
     pub provider_ref: String,
+    #[serde(default)]
     pub plugins: Vec<String>,
+    #[serde(default)]
     pub skills: Vec<String>,
+    #[serde(default)]
     pub mcp: Vec<String>,
     /// The instance's isolated `$DSH_HOME` (profiles/config live here).
     pub workspace: String,
@@ -118,6 +121,44 @@ impl InstanceManifest {
             return Err(anyhow!("instance '{id}' not found"));
         }
         Self::load(&file)
+    }
+
+    /// Append an installed skill id (canonical `owner/name`) if not present,
+    /// then persist. Skills are plain files under `workspace/skills/`, so the
+    /// manifest is the only index of what's installed.
+    pub fn add_skill(paths: &AppPaths, id: &str, skill: &str) -> Result<Self> {
+        let mut m = Self::get(paths, id)?;
+        if !m.skills.iter().any(|s| s == skill) {
+            m.skills.push(skill.to_string());
+            m.save(&paths.instance_file(id))?;
+        }
+        Ok(m)
+    }
+
+    /// Remove an installed skill id, then persist.
+    pub fn remove_skill(paths: &AppPaths, id: &str, skill: &str) -> Result<Self> {
+        let mut m = Self::get(paths, id)?;
+        m.skills.retain(|s| s != skill);
+        m.save(&paths.instance_file(id))?;
+        Ok(m)
+    }
+
+    /// Append an installed MCP server id if not present, then persist.
+    pub fn add_mcp(paths: &AppPaths, id: &str, server: &str) -> Result<Self> {
+        let mut m = Self::get(paths, id)?;
+        if !m.mcp.iter().any(|s| s == server) {
+            m.mcp.push(server.to_string());
+            m.save(&paths.instance_file(id))?;
+        }
+        Ok(m)
+    }
+
+    /// Remove an installed MCP server id, then persist.
+    pub fn remove_mcp(paths: &AppPaths, id: &str, server: &str) -> Result<Self> {
+        let mut m = Self::get(paths, id)?;
+        m.mcp.retain(|s| s != server);
+        m.save(&paths.instance_file(id))?;
+        Ok(m)
     }
 
     /// Create a fresh instance: slug id derived from the name, isolated

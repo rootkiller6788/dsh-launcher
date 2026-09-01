@@ -1,7 +1,15 @@
 import { useEffect, useMemo, useRef, useState, type ImgHTMLAttributes } from 'react'
 import { useAppStore } from '../stores/appStore'
 import { useT } from '../lib/i18n'
-import type { InstalledPlugin, PluginUpdate, RecommendPlan, RegistryPlugin } from '../lib/types'
+import type {
+  BundleManifest,
+  BundleSummary,
+  ContentKind,
+  InstalledPlugin,
+  PluginUpdate,
+  RecommendPlan,
+  RegistryPlugin,
+} from '../lib/types'
 
 /** Stable identity: `owner/name` when an owner exists, else the bare name. */
 function pluginKey(p: RegistryPlugin) {
@@ -9,6 +17,23 @@ function pluginKey(p: RegistryPlugin) {
 }
 
 type SortKey = 'stars' | 'new' | 'name'
+
+const KINDS: { value: ContentKind; label: string }[] = [
+  { value: 'plugin', label: 'market.tabPlugins' },
+  { value: 'theme', label: 'market.tabThemes' },
+  { value: 'skill', label: 'market.tabSkills' },
+  { value: 'mcp', label: 'market.tabMcp' },
+  // 整合包 tab 暂时下线：bundle 生态尚未成熟，等 awesome-agent-bundles 火起来再开。
+  // { value: 'bundle', label: 'market.tabBundles' },
+]
+
+const KIND_LABEL: Record<ContentKind, string> = {
+  plugin: 'market.tabPlugins',
+  theme: 'market.tabThemes',
+  skill: 'market.tabSkills',
+  mcp: 'market.tabMcp',
+  bundle: 'market.tabBundles',
+}
 
 /// Prefix proxy for `raw.githubusercontent.com` screenshots (the same gh-proxy
 /// dsh-market uses in its China route), so image loads aren't hostage to the
@@ -65,6 +90,7 @@ export function Market() {
   const registry = useAppStore((s) => s.registry)
   const registryError = useAppStore((s) => s.registryError)
   const installedPlugins = useAppStore((s) => s.installedPlugins)
+  const installedSkills = useAppStore((s) => s.installedSkills)
   const recommendations = useAppStore((s) => s.recommendations)
   const searching = useAppStore((s) => s.searching)
   const updates = useAppStore((s) => s.updates)
@@ -79,6 +105,14 @@ export function Market() {
   const uninstallPlugin = useAppStore((s) => s.uninstallPlugin)
   const togglePlugin = useAppStore((s) => s.togglePlugin)
   const updatePlugin = useAppStore((s) => s.updatePlugin)
+  const installSkill = useAppStore((s) => s.installSkill)
+  const uninstallSkill = useAppStore((s) => s.uninstallSkill)
+  const refreshInstalledSkills = useAppStore((s) => s.refreshInstalledSkills)
+  const installedMcps = useAppStore((s) => s.installedMcps)
+  const installMcp = useAppStore((s) => s.installMcp)
+  const uninstallMcp = useAppStore((s) => s.uninstallMcp)
+  const refreshInstalledMcps = useAppStore((s) => s.refreshInstalledMcps)
+  const importBundle = useAppStore((s) => s.importBundle)
 
   const [need, setNeed] = useState('')
   const [query, setQuery] = useState('')
@@ -88,17 +122,22 @@ export function Market() {
   const [visible, setVisible] = useState(60)
   const [shuffleKey, setShuffleKey] = useState(0)
   const [preview, setPreview] = useState<{ urls: string[]; index: number } | null>(null)
+  const [activeKind, setActiveKind] = useState<ContentKind>('plugin')
 
   useEffect(() => {
     void loadRegistry()
     void refreshInstalledPlugins()
     void refreshUpdates()
-  }, [loadRegistry, refreshInstalledPlugins, refreshUpdates])
+    void refreshInstalledSkills()
+    void refreshInstalledMcps()
+  }, [loadRegistry, refreshInstalledPlugins, refreshUpdates, refreshInstalledSkills, refreshInstalledMcps])
 
   useEffect(() => {
     void refreshInstalledPlugins()
     void refreshUpdates()
-  }, [activeId, refreshInstalledPlugins, refreshUpdates])
+    void refreshInstalledSkills()
+    void refreshInstalledMcps()
+  }, [activeId, refreshInstalledPlugins, refreshUpdates, refreshInstalledSkills, refreshInstalledMcps])
 
   useEffect(() => {
     setVisible(60)
@@ -111,7 +150,7 @@ export function Market() {
 
   const filtered = useMemo(() => {
     if (!registry) return []
-    let list = registry.plugins
+    let list = registry.plugins.filter((p) => (p.kind ?? 'plugin') === activeKind)
     const q = query.trim().toLowerCase()
     if (q) {
       list = list.filter((p) => {
@@ -133,10 +172,11 @@ export function Market() {
       if (sort === 'new') return b.added.localeCompare(a.added)
       return a.name.localeCompare(b.name)
     })
-  }, [registry, query, category, sort, shuffleKey])
+  }, [registry, query, category, sort, shuffleKey, activeKind])
 
   const shown = filtered.slice(0, visible)
-  const find = (name: string) => registry?.plugins.find((p) => pluginKey(p) === name)
+  const findItem = (kind: ContentKind, name: string) =>
+    registry?.plugins.find((p) => (p.kind ?? 'plugin') === kind && pluginKey(p) === name)
   const updateFor = (name: string) => updates.find((u) => u.name === name)
   const catLabel = (id: string) =>
     registry?.categories?.[id]?.[language] || registry?.categories?.[id]?.en || id
@@ -153,12 +193,46 @@ export function Market() {
         </div>
         {registry && (
           <span className="text-xs text-zinc-500">
-            {registry.count} plugins · updated {registry.updated}
+            {registry.count} items · updated {registry.updated}
           </span>
         )}
       </div>
 
-      {/* Smart search */}
+      {/* Content-type tabs */}
+      <div className="mb-6 flex rounded-lg border border-zinc-800 bg-zinc-900/60 p-1">
+        {KINDS.map((k) => (
+          <button
+            key={k.value}
+            onClick={() => {
+              setActiveKind(k.value)
+              setVisible(60)
+              setQuery('')
+              setCategory('')
+            }}
+            className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+              activeKind === k.value ? 'bg-blue-500 text-white' : 'text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            {t(k.label)}
+          </button>
+        ))}
+      </div>
+
+      {activeKind === 'skill' && (
+        <p className="mb-6 rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-2 text-xs text-zinc-500">
+          {t('market.skillNote')}
+        </p>
+      )}
+
+      {activeKind === 'mcp' && (
+        <p className="mb-6 rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-2 text-xs text-zinc-500">
+          {t('market.mcpNote')}
+        </p>
+      )}
+
+      {/* Smart search — bundle assistant: composes cross-kind plans over the
+          full catalog (plugins + skins + skills + MCP) */}
+      {activeKind === 'bundle' && (
       <div className="mb-6 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5">
         <h2 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-500">
           {t('market.smartSearch')}
@@ -187,11 +261,12 @@ export function Market() {
           ) : (
             <div className="mt-4 space-y-3">
               {recommendations.plans.map((plan) => (
-                <PlanCard key={plan.id} plan={plan} find={find} install={installPlugin} />
+                <PlanCard key={plan.id} plan={plan} findItem={findItem} importBundle={importBundle} />
               ))}
             </div>
           ))}
-      </div>
+        </div>
+      )}
 
       {/* Browse */}
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -289,20 +364,50 @@ export function Market() {
       )}
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        {shown.map((p) => (
-          <PluginCard
-            key={pluginKey(p)}
-            plugin={p}
-            installed={match(p)}
-            update={match(p) ? updateFor(match(p)!.name) : undefined}
-            busy={busy}
-            install={installPlugin}
-            remove={uninstallPlugin}
-            toggle={togglePlugin}
-            updateAction={updatePlugin}
-            onPreview={(urls) => setPreview({ urls, index: 0 })}
-          />
-        ))}
+        {shown.map((p) => {
+          const key = pluginKey(p)
+          if ((p.kind ?? 'plugin') === 'skill') {
+            return (
+              <SkillCard
+                key={key}
+                plugin={p}
+                installed={installedSkills.includes(key)}
+                busy={busy}
+                install={installSkill}
+                remove={uninstallSkill}
+              />
+            )
+          }
+          if ((p.kind ?? 'plugin') === 'mcp') {
+            return (
+              <McpCard
+                key={key}
+                plugin={p}
+                installed={installedMcps.includes(key)}
+                busy={busy}
+                install={installMcp}
+                remove={uninstallMcp}
+              />
+            )
+          }
+          if ((p.kind ?? 'plugin') === 'bundle') {
+            return <BundleCard key={key} plugin={p} findItem={findItem} importBundle={importBundle} />
+          }
+          return (
+            <PluginCard
+              key={key}
+              plugin={p}
+              installed={match(p)}
+              update={match(p) ? updateFor(match(p)!.name) : undefined}
+              busy={busy}
+              install={installPlugin}
+              remove={uninstallPlugin}
+              toggle={togglePlugin}
+              updateAction={updatePlugin}
+              onPreview={(urls) => setPreview({ urls, index: 0 })}
+            />
+          )
+        })}
       </div>
       {shown.length < filtered.length && (
         <div className="mt-4 text-center">
@@ -318,7 +423,7 @@ export function Market() {
         <p className="mt-3 text-center text-xs text-zinc-600">
           {query.trim() || category
             ? t('market.matches', { n: filtered.length })
-            : t('market.total', { n: registry.plugins.length })}
+            : t('market.total', { n: filtered.length })}
           {shown.length < filtered.length ? t('market.showing', { n: shown.length }) : ''}
         </p>
       )}
@@ -373,14 +478,27 @@ export function Market() {
 
 function PlanCard({
   plan,
-  find,
-  install,
+  findItem,
+  importBundle,
 }: {
   plan: RecommendPlan
-  find: (name: string) => RegistryPlugin | undefined
-  install: (spec: string) => Promise<boolean>
+  findItem: (kind: ContentKind, name: string) => RegistryPlugin | undefined
+  importBundle: (manifest: BundleManifest) => Promise<BundleSummary | null>
 }) {
   const t = useT()
+  const busy = useAppStore((s) => s.busy)
+  const installAll = async () => {
+    const items = plan.items
+      .map((it) => findItem(it.kind, it.name))
+      .filter((p): p is RegistryPlugin => !!p)
+    if (items.length === 0) return
+    await importBundle({
+      name: plan.title,
+      version: '1.0.0',
+      description: plan.rationale,
+      items,
+    })
+  }
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-4">
       <div className="mb-1 flex items-center gap-2">
@@ -391,30 +509,199 @@ function PlanCard({
       </div>
       <p className="mb-3 text-xs text-zinc-400">{plan.rationale}</p>
       <div className="space-y-2">
-        {plan.plugins.map((pp) => {
-          const entry = find(pp.name)
-          return (
-            <div
-              key={pp.name}
-              className="flex items-center justify-between gap-3 rounded-lg bg-zinc-900/60 px-3 py-2"
-            >
-              <div className="min-w-0">
-                <div className="truncate font-mono text-xs text-zinc-200">{pp.name}</div>
-                <div className="truncate text-xs text-zinc-500">{pp.reason}</div>
-              </div>
-              {entry && entry.spec ? (
-                <button
-                  onClick={() => void install(entry.spec)}
-                  className="shrink-0 rounded bg-blue-500 px-2.5 py-1 text-xs font-medium text-white hover:bg-blue-400"
-                >
-                  {t('market.install')}
-                </button>
-              ) : (
-                <span className="shrink-0 text-xs text-zinc-600">—</span>
-              )}
+        {plan.items.map((it) => (
+          <div
+            key={`${it.kind}:${it.name}`}
+            className="flex items-center gap-3 rounded-lg bg-zinc-900/60 px-3 py-2"
+          >
+            <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] uppercase text-zinc-400">
+              {t(KIND_LABEL[it.kind])}
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="truncate font-mono text-xs text-zinc-200">{it.name}</div>
+              <div className="truncate text-xs text-zinc-500">{it.reason}</div>
             </div>
-          )
-        })}
+          </div>
+        ))}
+      </div>
+      <button
+        onClick={() => void installAll()}
+        disabled={busy}
+        className="mt-3 w-full rounded-lg bg-blue-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-400 disabled:opacity-40"
+      >
+        {t('market.installAll')}
+      </button>
+    </div>
+  )
+}
+
+function BundleCard({
+  plugin: p,
+  findItem,
+  importBundle,
+}: {
+  plugin: RegistryPlugin
+  findItem: (kind: ContentKind, name: string) => RegistryPlugin | undefined
+  importBundle: (manifest: BundleManifest) => Promise<BundleSummary | null>
+}) {
+  const t = useT()
+  const busy = useAppStore((s) => s.busy)
+  const desc = p.description.en || p.description.zh || ''
+  const installAll = async () => {
+    const items = (p.items ?? [])
+      .map((it) => findItem(it.kind, it.name))
+      .filter((x): x is RegistryPlugin => !!x)
+    if (items.length === 0) return
+    await importBundle({ name: p.name, version: '1.0.0', description: desc, items })
+  }
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-4">
+      <div className="mb-1 flex items-center gap-2">
+        <span className="rounded bg-purple-600/20 px-2 py-0.5 text-xs font-bold text-purple-300">
+          {t(KIND_LABEL.bundle)}
+        </span>
+        <span className="font-semibold text-zinc-100">{p.name}</span>
+      </div>
+      <p className="mb-3 text-xs text-zinc-400">{desc}</p>
+      <div className="space-y-2">
+        {(p.items ?? []).map((it) => (
+          <div
+            key={`${it.kind}:${it.name}`}
+            className="flex items-center gap-3 rounded-lg bg-zinc-900/60 px-3 py-2"
+          >
+            <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] uppercase text-zinc-400">
+              {t(KIND_LABEL[it.kind])}
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="truncate font-mono text-xs text-zinc-200">{it.name}</div>
+              <div className="truncate text-xs text-zinc-500">{it.reason}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+      <button
+        onClick={() => void installAll()}
+        disabled={busy}
+        className="mt-3 w-full rounded-lg bg-blue-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-400 disabled:opacity-40"
+      >
+        {t('market.installAll')}
+      </button>
+    </div>
+  )
+}
+
+function SkillCard({
+  plugin: p,
+  installed,
+  busy,
+  install,
+  remove,
+}: {
+  plugin: RegistryPlugin
+  installed: boolean
+  busy: boolean
+  install: (entry: RegistryPlugin) => Promise<boolean>
+  remove: (id: string) => Promise<boolean>
+}) {
+  const t = useT()
+  const desc = p.description.en || p.description.zh || ''
+  return (
+    <div className="flex flex-col rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+      <div className="mb-1 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate font-semibold text-zinc-100">{p.name}</div>
+          <div className="truncate font-mono text-[11px] text-zinc-500">{pluginKey(p)}</div>
+        </div>
+        <span className="shrink-0 rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-400">
+          SKILL
+        </span>
+      </div>
+      <p className="mb-3 line-clamp-2 text-xs text-zinc-400">{desc}</p>
+      <div className="mt-auto flex items-center gap-2">
+        {installed ? (
+          <button
+            onClick={() => void remove(pluginKey(p))}
+            disabled={busy}
+            className="ml-auto rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:border-red-500/50 hover:text-red-400 disabled:opacity-40"
+          >
+            {t('market.remove')}
+          </button>
+        ) : (
+          <button
+            onClick={() => void install(p)}
+            disabled={busy || !p.fetch}
+            className="ml-auto rounded-lg bg-blue-500 px-3 py-1 text-xs font-medium text-white hover:bg-blue-400 disabled:opacity-40"
+          >
+            {t('market.install')}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function McpCard({
+  plugin: p,
+  installed,
+  busy,
+  install,
+  remove,
+}: {
+  plugin: RegistryPlugin
+  installed: boolean
+  busy: boolean
+  install: (entry: RegistryPlugin) => Promise<boolean>
+  remove: (entry: RegistryPlugin) => Promise<boolean>
+}) {
+  const t = useT()
+  const desc = p.description.en || p.description.zh || ''
+  const transport = p.transport ?? 'stdio'
+  const launch =
+    transport === 'streamable-http' ? p.mcpUrl || '' : p.command || ''
+  const installable = !!(p.command || p.mcpUrl)
+  return (
+    <div className="flex flex-col rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+      <div className="mb-1 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate font-semibold text-zinc-100">{p.name}</div>
+          <div className="truncate font-mono text-[11px] text-zinc-500">{pluginKey(p)}</div>
+        </div>
+        <span className="shrink-0 rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-400">
+          MCP
+        </span>
+      </div>
+      <div className="mb-1 truncate font-mono text-[11px] text-zinc-500">
+        {installable ? transport : 'manual'}
+        {installable && launch ? ` · ${launch}` : ''}
+      </div>
+      <p className="mb-3 line-clamp-2 text-xs text-zinc-400">{desc}</p>
+      <div className="mt-auto flex items-center gap-2">
+        {installed ? (
+          <button
+            onClick={() => void remove(p)}
+            disabled={busy}
+            className="ml-auto rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:border-red-500/50 hover:text-red-400 disabled:opacity-40"
+          >
+            {t('market.remove')}
+          </button>
+        ) : installable ? (
+          <button
+            onClick={() => void install(p)}
+            disabled={busy}
+            className="ml-auto rounded-lg bg-blue-500 px-3 py-1 text-xs font-medium text-white hover:bg-blue-400 disabled:opacity-40"
+          >
+            {t('market.install')}
+          </button>
+        ) : (
+          <a
+            href={p.url}
+            target="_blank"
+            rel="noreferrer"
+            className="ml-auto rounded-lg border border-zinc-700 px-3 py-1 text-xs text-zinc-300 hover:border-blue-500/50 hover:text-blue-300"
+          >
+            {t('market.openGithub')}
+          </a>
+        )}
       </div>
     </div>
   )
@@ -444,7 +731,8 @@ function PluginCard({
   const t = useT()
   const desc = p.description.en || p.description.zh || ''
   const cat = p.category[0]
-  const shots = p.screenshots ?? []
+  // Themes carry a single `preview` image; plugins carry `screenshots`.
+  const shots = p.screenshots.length > 0 ? p.screenshots : p.preview ? [p.preview] : []
   return (
     <div className="flex flex-col rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
       {shots.length > 0 && (
