@@ -1069,9 +1069,23 @@ mod tests {
         assert!(has(ContentKind::Skill));
         assert!(has(ContentKind::Mcp));
         assert!(has(ContentKind::Bundle));
-        // Each kind's category label is merged for the filter dropdown.
-        for key in ["skin", "skill", "mcp", "bundle"] {
+        // Each kind's category label is merged for the filter dropdown. Themes
+        // and bundles keep their fixed labels; skills and MCP servers now carry
+        // their README sections as categories (not a flat "skill"/"mcp" bucket),
+        // so assert every such entry has a labeled category.
+        for key in ["skin", "bundle"] {
             assert!(content.categories.contains_key(key), "missing category {key}");
+        }
+        for kind in [ContentKind::Skill, ContentKind::Mcp] {
+            for p in content.plugins.iter().filter(|p| p.kind == kind) {
+                assert!(!p.category.is_empty(), "{} missing category", p.name);
+                assert!(
+                    content.categories.contains_key(p.category[0].as_str()),
+                    "{} has unlabeled category {:?}",
+                    p.name,
+                    p.category
+                );
+            }
         }
         assert_eq!(content.count, content.plugins.len());
     }

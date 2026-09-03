@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
-use launcher_core::process::{spawn_child, ChildHandle, LogSink};
+use launcher_core::process::{spawn_child_with_exit, ChildHandle, ExitSink, LogSink};
 use launcher_core::runtime::RuntimeInfo;
 use launcher_core::{
     AppSettings, InstanceManifest, LogLine, LogStream, ResolvedProvider, RuntimeAdapter,
@@ -32,6 +32,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 pub mod content;
 pub mod diagnostics;
+pub mod language;
 pub mod llm;
 pub mod runtimes;
 pub mod theme;
@@ -49,6 +50,47 @@ pub const DEFAULT_WEB_PORT: u16 = 3080;
 pub struct InstalledPlugin {
     pub name: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub toggleable: bool,
+    #[serde(default)]
+    pub kind: InstalledPluginKind,
+    #[serde(default)]
+    pub source: InstalledPluginSource,
+    #[serde(default)]
+    pub entry_id: Option<String>,
+    #[serde(default)]
+    pub fiber_phase: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum InstalledPluginKind {
+    #[default]
+    Plugin,
+    Theme,
+    Client,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum InstalledPluginSource {
+    #[default]
+    Profile,
+    Inventory,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InventoryEntry {
+    entry_id: String,
+    module_name: String,
+    enabled: bool,
+    fiber_phase: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InventorySnapshot {
+    entries: Vec<InventoryEntry>,
 }
 
 /// One installed plugin's update status (npm `latest` vs installed version).
@@ -160,13 +202,19 @@ impl DshAdapter {
     }
 
     /// The first Node candidate that exists on disk, else `node` on PATH.
+    /// The result is normalized with `canonicalize_for_node` so a `\\?\`
+    /// verbatim prefix (which Tauri's `resource_dir()` returns on Windows) is
+    /// stripped — `CreateProcessW` otherwise starts `node.exe` from a verbatim
+    /// path and it dies with `0xc0000142` (STATUS_DLL_INIT_FAILED).
     pub fn resolve_node(&self, settings: &AppSettings) -> Option<PathBuf> {
         for cand in self.node_candidates(settings) {
             if cand.is_file() {
-                return Some(cand);
+                return Some(Self::canonicalize_for_node(&cand));
             }
         }
-        which::which("node").ok()
+        which::which("node")
+            .ok()
+            .map(|p| Self::canonicalize_for_node(&p))
     }
 
     /// Locate Node and read its `--version`. Returns `(version, exe path)`.
@@ -261,6 +309,7 @@ impl RuntimeAdapter for DshAdapter {
         instance: &InstanceManifest,
         env: &HashMap<String, String>,
         on_log: LogSink,
+        on_exit: Option<ExitSink>,
     ) -> Result<ChildHandle> {
         let info = self.detect(settings)?;
         // Spawn through the resolved Node executable (bundled / managed / PATH),
@@ -289,7 +338,7 @@ impl RuntimeAdapter for DshAdapter {
         for (key, value) in env {
             cmd.env(key, value);
         }
-        let handle = spawn_child(cmd, on_log).await?;
+        let handle = spawn_child_with_exit(cmd, on_log, on_exit).await?;
         tracing::info!(pid = handle.pid, version = %info.version, "dsh web launched");
         Ok(handle)
     }
@@ -309,14 +358,15 @@ impl DshAdapter {
         serde_json::from_str(&text).ok()
     }
 
-    /// Installed plugins: `enabled` = in `dsh.profile.bundles` AND not disabled
-    /// by the user patch layer. In-box template bundles live in `bundles` but
-    /// never `dependencies`, so they are naturally excluded.
+    /// Installed packages as DSH sees them: profile dependencies plus bundled
+    /// profile rows. User-installed bundle plugins are toggleable; built-in
+    /// bundles and client/theme packages are visible assets but not toggleable
+    /// through the user patch layer.
     pub fn installed_plugins(instance: &InstanceManifest) -> Vec<InstalledPlugin> {
         let Some(value) = Self::read_profile_manifest(instance) else {
             return Vec::new();
         };
-        let deps: Vec<String> = value
+        let deps: HashSet<String> = value
             .get("dependencies")
             .and_then(|d| d.as_object())
             .map(|m| m.keys().cloned().collect())
@@ -326,20 +376,79 @@ impl DshAdapter {
             .and_then(|b| b.as_array())
             .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default();
+        let mut names: Vec<String> = deps.iter().cloned().collect();
+        for bundle in &bundles {
+            if !names.iter().any(|name| name == bundle) {
+                names.push(bundle.clone());
+            }
+        }
+        names.sort();
         let profile_dir = Self::profile_dir(instance);
         let disabled_ids = read_patch_disabled(&profile_dir.join("cordis.patch.yml"));
-        deps.into_iter()
+        names
+            .into_iter()
             .map(|name| {
                 let in_bundles = bundles.iter().any(|b| b == &name);
-                let disabled = inserted_row_ids(&profile_dir, &name)
-                    .iter()
-                    .any(|id| disabled_ids.contains(id));
+                let ids = inserted_row_ids(&profile_dir, &name);
+                let disabled = ids.iter().any(|id| disabled_ids.contains(id));
+                let kind = installed_plugin_kind(&profile_dir, &name, !ids.is_empty());
+                let enabled = match kind {
+                    InstalledPluginKind::Theme | InstalledPluginKind::Client => deps.contains(&name),
+                    InstalledPluginKind::Plugin => {
+                        if in_bundles {
+                            !disabled
+                        } else {
+                            !ids.is_empty() && !disabled
+                        }
+                    }
+                };
                 InstalledPlugin {
                     name,
-                    enabled: in_bundles && !disabled,
+                    enabled,
+                    toggleable: !ids.is_empty(),
+                    kind,
+                    source: InstalledPluginSource::Profile,
+                    entry_id: None,
+                    fiber_phase: None,
                 }
             })
             .collect()
+    }
+
+    /// Live DSH Cordis Loader inventory, the same source as the stock
+    /// Workspace Settings → Plugins → Plugin list tab.
+    pub async fn plugin_inventory(port: u16) -> Result<Vec<InstalledPlugin>> {
+        let payload = serde_json::json!({ "args": {} });
+        let value = crate::theme::host_rpc(port, "pluginInventory/list", payload).await?;
+        crate::theme::ensure_ok(&value, "pluginInventory/list")?;
+        let mut body = value
+            .get("value")
+            .cloned()
+            .ok_or_else(|| anyhow!("pluginInventory/list: missing value"))?;
+        if body.get("ok").and_then(|v| v.as_bool()).is_some() {
+            crate::theme::ensure_ok(&body, "pluginInventory/list remote")?;
+            body = body
+                .get("value")
+                .cloned()
+                .ok_or_else(|| anyhow!("pluginInventory/list remote: missing value"))?;
+        }
+        let snapshot: InventorySnapshot = serde_json::from_value(body)?;
+        Ok(snapshot
+            .entries
+            .into_iter()
+            .map(|entry| {
+                let name = inventory_short_name(&entry.module_name);
+                InstalledPlugin {
+                    kind: inventory_kind(&entry.module_name),
+                    name,
+                    enabled: entry.enabled,
+                    toggleable: false,
+                    source: InstalledPluginSource::Inventory,
+                    entry_id: Some(entry.entry_id),
+                    fiber_phase: entry.fiber_phase,
+                }
+            })
+            .collect())
     }
 
     /// The installed version of a plugin (from its `node_modules` package.json).
@@ -522,6 +631,74 @@ fn inserted_row_ids(profile_dir: &Path, name: &str) -> Vec<String> {
     ids.sort();
     ids.dedup();
     ids
+}
+
+fn package_json(profile_dir: &Path, name: &str) -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(profile_dir.join("node_modules").join(name).join("package.json")).ok()?;
+    serde_json::from_str::<serde_json::Value>(&text).ok()
+}
+
+fn installed_plugin_kind(profile_dir: &Path, name: &str, toggleable: bool) -> InstalledPluginKind {
+    let lower = name.to_lowercase();
+    let Some(pkg) = package_json(profile_dir, name) else {
+        return if !toggleable && (lower.contains("skin") || lower.contains("theme")) {
+            InstalledPluginKind::Theme
+        } else {
+            InstalledPluginKind::Plugin
+        };
+    };
+    let has_client = pkg.pointer("/dsh/client").is_some();
+    let has_bundle = pkg.pointer("/dsh/bundle").is_some();
+    let keywords = pkg
+        .get("keywords")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_lowercase)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let skinish = lower.contains("skin")
+        || lower.contains("theme")
+        || keywords.iter().any(|k| matches!(k.as_str(), "skin" | "theme"));
+    if has_client && skinish {
+        InstalledPluginKind::Theme
+    } else if has_client && !has_bundle {
+        InstalledPluginKind::Client
+    } else {
+        InstalledPluginKind::Plugin
+    }
+}
+
+fn inventory_short_name(module_name: &str) -> String {
+    let unscoped = if let Some((_, tail)) = module_name.split_once('/') {
+        tail
+    } else {
+        module_name
+    };
+    unscoped
+        .strip_prefix("cordis:")
+        .unwrap_or(unscoped)
+        .strip_prefix("cordis-plugin-")
+        .unwrap_or(unscoped)
+        .strip_prefix("dsh-host-")
+        .or_else(|| unscoped.strip_prefix("dsh-client-"))
+        .or_else(|| unscoped.strip_prefix("dsh-"))
+        .unwrap_or(unscoped)
+        .to_string()
+}
+
+fn inventory_kind(module_name: &str) -> InstalledPluginKind {
+    let lower = module_name.to_lowercase();
+    if lower.contains("skin") || lower.contains("theme") {
+        InstalledPluginKind::Theme
+    } else if lower.contains("dsh-client-") {
+        InstalledPluginKind::Client
+    } else {
+        InstalledPluginKind::Plugin
+    }
 }
 
 /// Line-wise extraction of the `id:` values nested under an `insert:` block —

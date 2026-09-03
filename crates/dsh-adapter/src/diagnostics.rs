@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use launcher_core::InstanceManifest;
 use serde::{Deserialize, Serialize};
 
-use crate::{parse_id, parse_inserted_ids, DshAdapter};
+use crate::{parse_id, parse_inserted_ids, remove_row_blocks, DshAdapter};
 
 /// One bundle in the load-order stack.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +283,34 @@ pub fn diagnose_profile(instance: &InstanceManifest) -> DiagnosticsReport {
     }
 }
 
+/// Remove stale user patch rows that target no mounted bundle entry.
+///
+/// This intentionally only removes the simple enable/disable rows written by
+/// the launcher (`- id: ...` + `disabled: true|false`). Other top-level patch
+/// shapes stay untouched and will still be reported by diagnostics.
+pub fn repair_orphan_toggle_rows(instance: &InstanceManifest) -> anyhow::Result<Vec<String>> {
+    let report = diagnose_profile(instance);
+    if report.orphans.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let profile_dir = DshAdapter::profile_dir(instance);
+    let workspace = PathBuf::from(&instance.workspace);
+    let mut repaired = Vec::new();
+    for patch_path in [
+        profile_dir.join("cordis.patch.yml"),
+        workspace.join("cordis.patch.yml"),
+    ] {
+        remove_row_blocks(&patch_path, &report.orphans)?;
+        for id in &report.orphans {
+            if !repaired.contains(id) {
+                repaired.push(id.clone());
+            }
+        }
+    }
+    Ok(repaired)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,5 +339,52 @@ mod tests {
         constraints.insert("b".to_string(), (vec![], vec!["a".to_string()]));
         let v = order_violations(&ns, &constraints);
         assert!(!v.is_empty());
+    }
+
+    #[test]
+    fn repair_orphan_toggle_rows_removes_stale_disable_blocks() {
+        let root = std::env::temp_dir().join(format!("dsh-diag-repair-{}", std::process::id()));
+        let workspace = root.join("workspace");
+        let profile = workspace.join("profiles").join("web");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(
+            profile.join("package.json"),
+            r#"{"dsh":{"profile":{"bundles":[]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            profile.join("cordis.patch.yml"),
+            "- id: smart-market\n  disabled: true\n- id: plugin-market\n  disabled: false\n",
+        )
+        .unwrap();
+
+        let instance = InstanceManifest {
+            id: "repair".into(),
+            name: "Repair".into(),
+            runtime: launcher_core::RuntimeRef {
+                id: "dsh".into(),
+                version: String::new(),
+            },
+            profile: "web".into(),
+            provider_ref: "default".into(),
+            plugins: vec![],
+            skills: vec![],
+            mcp: vec![],
+            workspace: workspace.display().to_string(),
+        };
+
+        let before = diagnose_profile(&instance);
+        assert_eq!(before.orphans, vec!["smart-market", "plugin-market"]);
+
+        let repaired = repair_orphan_toggle_rows(&instance).unwrap();
+        assert_eq!(repaired, vec!["smart-market", "plugin-market"]);
+
+        let after = diagnose_profile(&instance);
+        assert!(after.orphans.is_empty());
+        assert!(std::fs::read_to_string(profile.join("cordis.patch.yml"))
+            .unwrap()
+            .contains("[]"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

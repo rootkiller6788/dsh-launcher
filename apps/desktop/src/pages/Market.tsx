@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useRef, useState, type ImgHTMLAttributes } from 'react'
-import { useAppStore } from '../stores/appStore'
+import {
+  Boxes,
+  Download,
+  Layers3,
+  Package,
+  RefreshCw,
+  Search,
+  Shuffle,
+  SlidersHorizontal,
+} from 'lucide-react'
+import { useAppStore, type InstallJob } from '../stores/appStore'
 import { useT } from '../lib/i18n'
 import type {
   BundleManifest,
@@ -16,8 +26,18 @@ function pluginKey(p: RegistryPlugin) {
   return p.owner ? `${p.owner}/${p.name}` : p.name
 }
 
-type SortKey = 'stars' | 'new' | 'name'
+function repoPackageName(entry: RegistryPlugin) {
+  const repoPath = entry.url
+    ?.replace(/^https?:\/\/github\.com\//i, '')
+    .replace(/\/(?:tree|blob)\/.*$/i, '')
+    .replace(/#.*$/i, '')
+    .replace(/\/$/i, '')
+    .replace(/\.git$/i, '')
+    .toLowerCase()
+  return repoPath?.replace(/[/-]/g, '__')
+}
 
+type SortKey = 'stars' | 'new' | 'name'
 const KINDS: { value: ContentKind; label: string }[] = [
   { value: 'plugin', label: 'market.tabPlugins' },
   { value: 'theme', label: 'market.tabThemes' },
@@ -33,6 +53,64 @@ const KIND_LABEL: Record<ContentKind, string> = {
   skill: 'market.tabSkills',
   mcp: 'market.tabMcp',
   bundle: 'market.tabBundles',
+}
+
+const KIND_NOTES: Record<ContentKind, string[]> = {
+  plugin: [
+    'market.notePlugins1',
+    'market.notePlugins2',
+    'market.notePlugins3',
+    'market.notePlugins4',
+    'market.notePlugins5',
+  ],
+  theme: [
+    'market.noteSkins1',
+    'market.noteSkins2',
+    'market.noteSkins3',
+    'market.noteSkins4',
+    'market.noteSkins5',
+  ],
+  skill: [
+    'market.noteSkills1',
+    'market.noteSkills2',
+    'market.noteSkills3',
+    'market.noteSkills4',
+    'market.noteSkills5',
+  ],
+  mcp: [
+    'market.noteMcp1',
+    'market.noteMcp2',
+    'market.noteMcp3',
+    'market.noteMcp4',
+    'market.noteMcp5',
+  ],
+  bundle: [
+    'market.noteBundles1',
+    'market.noteBundles2',
+    'market.noteBundles3',
+    'market.noteBundles4',
+    'market.noteBundles5',
+  ],
+}
+
+function MarketStat({
+  icon: Icon,
+  label,
+  value,
+}: {
+  icon: typeof Package
+  label: string
+  value: string | number
+}) {
+  return (
+    <div className="rounded-lg border border-zinc-800/70 bg-zinc-950/25 px-4 py-3">
+      <div className="flex items-center gap-2 text-[11px] text-zinc-500">
+        <Icon className="h-3.5 w-3.5" strokeWidth={1.75} />
+        <span className="truncate">{label}</span>
+      </div>
+      <div className="mt-1 truncate text-xl font-semibold tabular-nums text-zinc-100">{value}</div>
+    </div>
+  )
 }
 
 /// Prefix proxy for `raw.githubusercontent.com` screenshots (the same gh-proxy
@@ -91,53 +169,48 @@ export function Market() {
   const registryError = useAppStore((s) => s.registryError)
   const installedPlugins = useAppStore((s) => s.installedPlugins)
   const installedSkills = useAppStore((s) => s.installedSkills)
-  const recommendations = useAppStore((s) => s.recommendations)
-  const searching = useAppStore((s) => s.searching)
   const updates = useAppStore((s) => s.updates)
   const busy = useAppStore((s) => s.busy)
   const activeInstance = useAppStore((s) => s.activeInstance)
   const activeId = useAppStore((s) => s.activeId)
+  const refreshDiagnostics = useAppStore((s) => s.refreshDiagnostics)
   const loadRegistry = useAppStore((s) => s.loadRegistry)
   const refreshInstalledPlugins = useAppStore((s) => s.refreshInstalledPlugins)
   const refreshUpdates = useAppStore((s) => s.refreshUpdates)
-  const recommend = useAppStore((s) => s.recommend)
-  const installPlugin = useAppStore((s) => s.installPlugin)
+  const installMarketEntry = useAppStore((s) => s.installMarketEntry)
   const uninstallPlugin = useAppStore((s) => s.uninstallPlugin)
   const togglePlugin = useAppStore((s) => s.togglePlugin)
   const updatePlugin = useAppStore((s) => s.updatePlugin)
-  const installSkill = useAppStore((s) => s.installSkill)
   const uninstallSkill = useAppStore((s) => s.uninstallSkill)
   const refreshInstalledSkills = useAppStore((s) => s.refreshInstalledSkills)
   const installedMcps = useAppStore((s) => s.installedMcps)
-  const installMcp = useAppStore((s) => s.installMcp)
+  const installJobs = useAppStore((s) => s.installJobs)
   const uninstallMcp = useAppStore((s) => s.uninstallMcp)
   const refreshInstalledMcps = useAppStore((s) => s.refreshInstalledMcps)
   const importBundle = useAppStore((s) => s.importBundle)
 
-  const [need, setNeed] = useState('')
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState('')
   const [catOpen, setCatOpen] = useState(false)
   const [sort, setSort] = useState<SortKey>('stars')
   const [visible, setVisible] = useState(60)
   const [shuffleKey, setShuffleKey] = useState(0)
+  const [noteIndex, setNoteIndex] = useState(() => Math.floor(Math.random() * 5))
   const [preview, setPreview] = useState<{ urls: string[]; index: number } | null>(null)
   const [activeKind, setActiveKind] = useState<ContentKind>('plugin')
 
   useEffect(() => {
     void loadRegistry()
     void refreshInstalledPlugins()
-    void refreshUpdates()
     void refreshInstalledSkills()
     void refreshInstalledMcps()
-  }, [loadRegistry, refreshInstalledPlugins, refreshUpdates, refreshInstalledSkills, refreshInstalledMcps])
+  }, [loadRegistry, refreshInstalledPlugins, refreshInstalledSkills, refreshInstalledMcps])
 
   useEffect(() => {
     void refreshInstalledPlugins()
-    void refreshUpdates()
     void refreshInstalledSkills()
     void refreshInstalledMcps()
-  }, [activeId, refreshInstalledPlugins, refreshUpdates, refreshInstalledSkills, refreshInstalledMcps])
+  }, [activeId, refreshInstalledPlugins, refreshInstalledSkills, refreshInstalledMcps])
 
   useEffect(() => {
     setVisible(60)
@@ -147,6 +220,13 @@ export function Market() {
     installedPlugins.find((ip) =>
       p.npm ? ip.name === p.npm : ip.name.toLowerCase().includes(p.name.toLowerCase()),
     )
+  const installedSkinKeys = new Set(activeInstance?.skins ?? [])
+  const skinInstalled = (p: RegistryPlugin): InstalledPlugin | undefined => {
+    if (!installedSkinKeys.has(pluginKey(p))) return undefined
+    const found = match(p) ?? installedPlugins.find((ip) => ip.name.toLowerCase().includes(p.name.toLowerCase()))
+    if (found && p.path && found.name.toLowerCase() === repoPackageName(p)) return undefined
+    return found
+  }
 
   const filtered = useMemo(() => {
     if (!registry) return []
@@ -180,253 +260,289 @@ export function Market() {
   const updateFor = (name: string) => updates.find((u) => u.name === name)
   const catLabel = (id: string) =>
     registry?.categories?.[id]?.[language] || registry?.categories?.[id]?.en || id
+  // The category dropdown is per-kind: collect only the categories that appear
+  // on items of the active type (plugins / skins / skills / MCP each have their
+  // own), never the global union.
+  const kindCategories = useMemo(() => {
+    if (!registry) return []
+    const set = new Set<string>()
+    for (const p of registry.plugins) {
+      if ((p.kind ?? 'plugin') !== activeKind) continue
+      for (const c of p.category) set.add(c)
+    }
+    return [...set].sort((a, b) => a.localeCompare(b))
+  }, [registry, activeKind])
+
+  const installedCount = installedPlugins.length + installedSkills.length + installedMcps.length
+  const activeKindCount =
+    registry?.plugins.filter((p) => (p.kind ?? 'plugin') === activeKind).length ?? 0
+  const updatableCount = updates.filter((u) => u.updatable).length
+  const noteKeys = KIND_NOTES[activeKind]
+  const noteKey = noteKeys[noteIndex % noteKeys.length]
+  const switchKind = (kind: ContentKind) => {
+    setActiveKind(kind)
+    setVisible(60)
+    setQuery('')
+    setCategory('')
+    setNoteIndex(Math.floor(Math.random() * KIND_NOTES[kind].length))
+  }
 
   return (
-    <div className="mx-auto max-w-4xl p-8">
-      <div className="mb-4 flex items-center justify-between">
+    <div className="flex h-full min-h-0 flex-col gap-5 overflow-hidden p-6">
+      <div className="flex shrink-0 items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold">{t('market.title')}</h1>
-          <p className="text-sm text-zinc-400">
+          <h1 className="text-2xl font-bold text-zinc-50">{t('market.title')}</h1>
+          <p className="mt-0.5 text-sm text-zinc-500">
             {t('market.installsInto')}{' '}
             <span className="font-medium text-zinc-200">{activeInstance?.name ?? '—'}</span>
           </p>
         </div>
         {registry && (
-          <span className="text-xs text-zinc-500">
-            {registry.count} items · updated {registry.updated}
+          <span className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-xs text-zinc-500">
+            {t('market.updated')} {registry.updated}
           </span>
         )}
       </div>
 
-      {/* Content-type tabs */}
-      <div className="mb-6 flex rounded-lg border border-zinc-800 bg-zinc-900/60 p-1">
-        {KINDS.map((k) => (
-          <button
-            key={k.value}
-            onClick={() => {
-              setActiveKind(k.value)
-              setVisible(60)
-              setQuery('')
-              setCategory('')
-            }}
-            className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-              activeKind === k.value ? 'bg-blue-500 text-white' : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            {t(k.label)}
-          </button>
-        ))}
-      </div>
+      <div className="grid min-h-0 flex-1 grid-cols-12 gap-5">
+        <aside className="col-span-4 flex min-h-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900/60 p-5">
+          <div className="grid grid-cols-3 gap-3">
+            <MarketStat icon={Package} label={t('market.catalog')} value={registry?.count ?? '-'} />
+            <MarketStat icon={Download} label={t('market.installed')} value={installedCount} />
+            <MarketStat icon={RefreshCw} label={t('market.updates')} value={updatableCount} />
+          </div>
 
-      {activeKind === 'skill' && (
-        <p className="mb-6 rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-2 text-xs text-zinc-500">
-          {t('market.skillNote')}
-        </p>
-      )}
-
-      {activeKind === 'mcp' && (
-        <p className="mb-6 rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-2 text-xs text-zinc-500">
-          {t('market.mcpNote')}
-        </p>
-      )}
-
-      {/* Smart search — bundle assistant: composes cross-kind plans over the
-          full catalog (plugins + skins + skills + MCP) */}
-      {activeKind === 'bundle' && (
-      <div className="mb-6 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5">
-        <h2 className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-          {t('market.smartSearch')}
-        </h2>
-        <p className="mb-3 text-xs text-zinc-500">{t('market.smartHint')}</p>
-        <div className="flex gap-2">
-          <input
-            value={need}
-            onChange={(e) => setNeed(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && need.trim() && void recommend(need.trim())}
-            placeholder={t('market.smartPlaceholder')}
-            className="flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 outline-none focus:border-blue-500"
-          />
-          <button
-            onClick={() => need.trim() && void recommend(need.trim())}
-            disabled={searching || !need.trim()}
-            className="rounded-lg bg-blue-500 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-400 disabled:opacity-40"
-          >
-            {searching ? t('market.thinking') : t('market.recommend')}
-          </button>
-        </div>
-
-        {recommendations &&
-          (recommendations.plans.length === 0 ? (
-            <p className="mt-4 text-sm text-zinc-500">{t('market.noPlans')}</p>
-          ) : (
-            <div className="mt-4 space-y-3">
-              {recommendations.plans.map((plan) => (
-                <PlanCard key={plan.id} plan={plan} findItem={findItem} importBundle={importBundle} />
-              ))}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Browse */}
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <h2 className="mr-auto text-xs font-semibold uppercase tracking-wide text-zinc-500">
-          {t('market.browse')}
-        </h2>
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder={t('market.filter')}
-          className="w-52 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-100 outline-none focus:border-blue-500"
-        />
-        <div className="relative">
-          <button
-            type="button"
-            onClick={() => setCatOpen((o) => !o)}
-            className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-blue-500"
-          >
-            {category ? catLabel(category) : t('market.allCategories')}
-            <span className="text-[10px] text-zinc-500">▾</span>
-          </button>
-          {catOpen && (
-            <>
-              <div className="fixed inset-0 z-40" onClick={() => setCatOpen(false)} />
-              <div className="no-scrollbar absolute right-0 z-50 mt-1 max-h-64 overflow-y-auto rounded-lg border border-zinc-700 bg-zinc-900 p-1 shadow-xl">
+          <div className="mt-5">
+            <h2 className="text-sm font-semibold text-zinc-200">{t('market.contentTypes')}</h2>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              {KINDS.map((k) => (
                 <button
-                  type="button"
-                  onClick={() => {
-                    setCategory('')
-                    setCatOpen(false)
-                  }}
-                  className={`block w-full whitespace-nowrap rounded px-3 py-1 text-left text-sm ${
-                    category === '' ? 'bg-blue-600/20 text-blue-300' : 'text-zinc-300 hover:bg-zinc-800'
+                  key={k.value}
+                  onClick={() => switchKind(k.value)}
+                  className={`rounded-lg border px-3 py-3 text-left text-sm font-medium transition-colors ${
+                    activeKind === k.value
+                      ? 'border-blue-500/50 bg-blue-500/10 text-blue-300'
+                      : 'border-zinc-800/80 bg-zinc-950/20 text-zinc-400 hover:border-zinc-700 hover:bg-zinc-800/30 hover:text-zinc-200'
                   }`}
                 >
-                  {t('market.allCategories')}
+                  {t(k.label)}
                 </button>
-                {registry &&
-                  Object.entries(registry.categories).map(([id]) => (
+              ))}
+            </div>
+          </div>
+
+          <div className="mt-5 rounded-lg border border-zinc-800/70 bg-zinc-950/25 p-4">
+            <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-zinc-500">
+              <Boxes className="h-3.5 w-3.5" strokeWidth={1.75} />
+              {t('market.activeCatalog')}
+            </div>
+            <div className="mt-3 flex items-end justify-between gap-4">
+              <div className="text-3xl font-semibold leading-tight tabular-nums text-zinc-100">
+                {activeKindCount}
+              </div>
+              <div className="text-right text-xs text-zinc-500">
+                <div>{t(KIND_LABEL[activeKind])}</div>
+                <div>{filtered.length} {t('market.visible')}</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-auto rounded-lg border border-blue-500/20 bg-blue-500/10 p-4">
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-blue-300">
+              <Layers3 className="h-3.5 w-3.5" strokeWidth={1.75} />
+              {t(KIND_LABEL[activeKind])} · {t('market.guidance')}
+            </div>
+            <p className="mt-3 text-xs leading-5 text-blue-100/80">
+              {t(noteKey)}
+            </p>
+          </div>
+        </aside>
+
+        <section className="col-span-8 flex min-h-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900/60 p-5">
+          <div className="flex shrink-0 items-center gap-3">
+            <div className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950/35 px-3 py-2">
+              <Search className="h-4 w-4 shrink-0 text-zinc-500" strokeWidth={1.75} />
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={t('market.filter')}
+                className="min-w-0 flex-1 bg-transparent text-sm text-zinc-100 outline-none placeholder:text-zinc-600"
+              />
+            </div>
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setCatOpen((o) => !o)}
+                className="flex min-h-10 min-w-36 items-center justify-between gap-2 rounded-lg border border-zinc-800 bg-zinc-950/35 px-3 text-sm text-zinc-200 outline-none hover:border-zinc-700 focus:border-blue-500"
+              >
+                <span className="truncate">{category ? catLabel(category) : t('market.allCategories')}</span>
+                <SlidersHorizontal className="h-4 w-4 shrink-0 text-zinc-500" strokeWidth={1.75} />
+              </button>
+              {catOpen && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setCatOpen(false)} />
+                  <div className="no-scrollbar absolute right-0 z-50 mt-1 max-h-64 overflow-y-auto rounded-lg border border-zinc-700 bg-zinc-900 p-1 shadow-xl">
                     <button
-                      key={id}
                       type="button"
                       onClick={() => {
-                        setCategory(id)
+                        setCategory('')
                         setCatOpen(false)
                       }}
                       className={`block w-full whitespace-nowrap rounded px-3 py-1 text-left text-sm ${
-                        category === id
-                          ? 'bg-blue-600/20 text-blue-300'
-                          : 'text-zinc-300 hover:bg-zinc-800'
+                        category === '' ? 'bg-blue-600/20 text-blue-300' : 'text-zinc-300 hover:bg-zinc-800'
                       }`}
                     >
-                      {catLabel(id)}
+                      {t('market.allCategories')}
                     </button>
-                  ))}
-              </div>
-            </>
+                    {kindCategories.map((id) => (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() => {
+                          setCategory(id)
+                          setCatOpen(false)
+                        }}
+                        className={`block w-full whitespace-nowrap rounded px-3 py-1 text-left text-sm ${
+                          category === id
+                            ? 'bg-blue-600/20 text-blue-300'
+                            : 'text-zinc-300 hover:bg-zinc-800'
+                        }`}
+                      >
+                        {catLabel(id)}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+            <select
+              value={sort}
+              onChange={(e) => {
+                setSort(e.target.value as SortKey)
+                setShuffleKey(0)
+              }}
+              className="min-h-10 rounded-lg border border-zinc-800 bg-zinc-950/35 px-3 text-sm text-zinc-200 outline-none focus:border-blue-500"
+            >
+              <option value="stars">{t('market.sortStars')}</option>
+              <option value="new">{t('market.sortNew')}</option>
+              <option value="name">{t('market.sortName')}</option>
+            </select>
+            <button
+              onClick={() => setShuffleKey((k) => k + 1)}
+              title="Shuffle (random order)"
+              className="flex h-10 w-10 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-950/35 text-zinc-300 hover:border-blue-500/50 hover:text-blue-300"
+            >
+              <Shuffle className="h-4 w-4" strokeWidth={1.75} />
+            </button>
+          </div>
+
+          <div className="mt-4 flex shrink-0 items-center justify-between text-xs text-zinc-500">
+            <span className="font-medium text-zinc-300">{t(KIND_LABEL[activeKind])}</span>
+            <span>
+              {query.trim() || category
+                ? t('market.matches', { n: filtered.length })
+                : t('market.total', { n: filtered.length })}
+              {shown.length < filtered.length ? t('market.showing', { n: shown.length }) : ''}
+            </span>
+          </div>
+
+          {registryError && (
+            <div className="mt-4 rounded-lg border border-blue-500/25 bg-blue-500/10 px-4 py-3 text-sm text-blue-200">
+              {t('market.loadFailed')}{' '}
+              <button
+                className="font-semibold underline underline-offset-2"
+                onClick={() => void loadRegistry()}
+              >
+                {t('market.retry')}
+              </button>
+            </div>
           )}
-        </div>
-        <select
-          value={sort}
-          onChange={(e) => {
-            setSort(e.target.value as SortKey)
-            setShuffleKey(0)
-          }}
-          className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-blue-500"
-        >
-          <option value="stars">{t('market.sortStars')}</option>
-          <option value="new">{t('market.sortNew')}</option>
-          <option value="name">{t('market.sortName')}</option>
-        </select>
-        <button
-          onClick={() => setShuffleKey((k) => k + 1)}
-          title="Shuffle (random order)"
-          className="rounded-lg border border-blue-600 px-2.5 py-1.5 text-sm font-medium text-blue-300 hover:bg-blue-600/10"
-        >
-          {t('market.shuffle')}
-        </button>
+
+          {!registry && !registryError && (
+            <p className="flex flex-1 items-center justify-center text-sm text-zinc-500">
+              {t('market.loading')}
+            </p>
+          )}
+
+          {registry && (
+            <div className="mt-4 min-h-0 flex-1 overflow-y-auto pr-1">
+              <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+                {shown.map((p) => {
+                  const key = pluginKey(p)
+                  if ((p.kind ?? 'plugin') === 'skill') {
+                    return (
+                      <SkillCard
+                        key={key}
+                        plugin={p}
+                        installed={installedSkills.includes(key)}
+                        job={installJobs[key]}
+                        busy={busy}
+                        install={installMarketEntry}
+                        remove={uninstallSkill}
+                      />
+                    )
+                  }
+                  if ((p.kind ?? 'plugin') === 'mcp') {
+                    return (
+                      <McpCard
+                        key={key}
+                        plugin={p}
+                        installed={installedMcps.includes(key)}
+                        job={installJobs[key]}
+                        busy={busy}
+                        install={installMarketEntry}
+                        remove={uninstallMcp}
+                      />
+                    )
+                  }
+                  if ((p.kind ?? 'plugin') === 'bundle') {
+                    return <BundleCard key={key} plugin={p} findItem={findItem} importBundle={importBundle} />
+                  }
+                  if ((p.kind ?? 'plugin') === 'theme') {
+                    return (
+                      <SkinCard
+                        key={key}
+                        plugin={p}
+                        installed={skinInstalled(p)}
+                        job={installJobs[pluginKey(p)]}
+                        busy={busy}
+                        install={installMarketEntry}
+                        remove={uninstallPlugin}
+                        onPreview={(urls) => setPreview({ urls, index: 0 })}
+                      />
+                    )
+                  }
+                  return (
+                    <PluginCard
+                      key={key}
+                      plugin={p}
+                      installed={match(p)}
+                      update={match(p) ? updateFor(match(p)!.name) : undefined}
+                      job={installJobs[pluginKey(p)]}
+                      busy={busy}
+                      install={installMarketEntry}
+                      remove={uninstallPlugin}
+                      toggle={togglePlugin}
+                      updateAction={updatePlugin}
+                      onPreview={(urls) => setPreview({ urls, index: 0 })}
+                    />
+                  )
+                })}
+              </div>
+              {shown.length < filtered.length && (
+                <div className="mt-4 text-center">
+                  <button
+                    onClick={() => setVisible((v) => v + 60)}
+                    className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800"
+                  >
+                    {t('market.loadMore', { n: filtered.length - shown.length })}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </section>
       </div>
-
-      {registryError && (
-        <div className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
-          {t('market.loadFailed')}{' '}
-          <button
-            className="font-semibold underline underline-offset-2"
-            onClick={() => void loadRegistry()}
-          >
-            {t('market.retry')}
-          </button>
-        </div>
-      )}
-
-      {!registry && !registryError && (
-        <p className="text-sm text-zinc-500">{t('market.loading')}</p>
-      )}
-
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        {shown.map((p) => {
-          const key = pluginKey(p)
-          if ((p.kind ?? 'plugin') === 'skill') {
-            return (
-              <SkillCard
-                key={key}
-                plugin={p}
-                installed={installedSkills.includes(key)}
-                busy={busy}
-                install={installSkill}
-                remove={uninstallSkill}
-              />
-            )
-          }
-          if ((p.kind ?? 'plugin') === 'mcp') {
-            return (
-              <McpCard
-                key={key}
-                plugin={p}
-                installed={installedMcps.includes(key)}
-                busy={busy}
-                install={installMcp}
-                remove={uninstallMcp}
-              />
-            )
-          }
-          if ((p.kind ?? 'plugin') === 'bundle') {
-            return <BundleCard key={key} plugin={p} findItem={findItem} importBundle={importBundle} />
-          }
-          return (
-            <PluginCard
-              key={key}
-              plugin={p}
-              installed={match(p)}
-              update={match(p) ? updateFor(match(p)!.name) : undefined}
-              busy={busy}
-              install={installPlugin}
-              remove={uninstallPlugin}
-              toggle={togglePlugin}
-              updateAction={updatePlugin}
-              onPreview={(urls) => setPreview({ urls, index: 0 })}
-            />
-          )
-        })}
-      </div>
-      {shown.length < filtered.length && (
-        <div className="mt-4 text-center">
-          <button
-            onClick={() => setVisible((v) => v + 60)}
-            className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800"
-          >
-            {t('market.loadMore', { n: filtered.length - shown.length })}
-          </button>
-        </div>
-      )}
-      {registry && (
-        <p className="mt-3 text-center text-xs text-zinc-600">
-          {query.trim() || category
-            ? t('market.matches', { n: filtered.length })
-            : t('market.total', { n: filtered.length })}
-          {shown.length < filtered.length ? t('market.showing', { n: shown.length }) : ''}
-        </p>
-      )}
 
       {preview && (
         <div
@@ -557,7 +673,7 @@ function BundleCard({
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-4">
       <div className="mb-1 flex items-center gap-2">
-        <span className="rounded bg-purple-600/20 px-2 py-0.5 text-xs font-bold text-purple-300">
+        <span className="rounded bg-blue-600/20 px-2 py-0.5 text-xs font-bold text-blue-300">
           {t(KIND_LABEL.bundle)}
         </span>
         <span className="font-semibold text-zinc-100">{p.name}</span>
@@ -590,15 +706,83 @@ function BundleCard({
   )
 }
 
+function SkinCard({
+  plugin: p,
+  installed,
+  job,
+  busy,
+  install,
+  remove,
+  onPreview,
+}: {
+  plugin: RegistryPlugin
+  installed: InstalledPlugin | undefined
+  job?: InstallJob
+  busy: boolean
+  install: (entry: RegistryPlugin) => Promise<boolean>
+  remove: (name: string) => Promise<boolean>
+  onPreview: (urls: string[]) => void
+}) {
+  const t = useT()
+  const desc = p.description.en || p.description.zh || ''
+  const shots = p.screenshots.length > 0 ? p.screenshots : p.preview ? [p.preview] : []
+  return (
+    <div className="flex flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/40">
+      {/* Skins are visual — the preview IS the product. Full-bleed hero. */}
+      {shots.length > 0 && (
+        <button onClick={() => onPreview(shots)} className="relative block aspect-video overflow-hidden">
+          <SmartImg src={shots[0]} className="h-full w-full object-cover transition-transform hover:scale-105" loading="lazy" />
+          <span className="absolute bottom-2 right-2 rounded-full bg-blue-500 px-2 py-0.5 text-[10px] font-semibold text-white">
+            {t('market.preview')}
+          </span>
+        </button>
+      )}
+      <div className="flex flex-1 flex-col p-4">
+        <div className="mb-1 flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="truncate font-semibold text-zinc-100">{p.name}</div>
+            <div className="truncate font-mono text-[11px] text-zinc-500">{pluginKey(p)}</div>
+          </div>
+          <span className="shrink-0 rounded-full bg-blue-500/10 px-2 py-0.5 text-[10px] font-medium text-blue-300">
+            SKIN
+          </span>
+        </div>
+        <p className="mb-3 line-clamp-2 text-xs text-zinc-400">{desc}</p>
+        <div className="mt-auto flex items-center gap-2">
+          {installed ? (
+            <button
+              onClick={() => void remove(installed.name)}
+              disabled={busy}
+              className="ml-auto rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:border-red-500/50 hover:text-red-400 disabled:opacity-40"
+            >
+              {t('market.remove')}
+            </button>
+          ) : (
+            <button
+              onClick={() => void install(p)}
+              disabled={!!job || busy || !p.spec}
+              className="ml-auto rounded-lg bg-blue-500 px-3 py-1 text-xs font-medium text-white hover:bg-blue-400 disabled:opacity-40"
+            >
+              {job ? t(`market.install.${job.status}`) : t('market.install')}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function SkillCard({
   plugin: p,
   installed,
+  job,
   busy,
   install,
   remove,
 }: {
   plugin: RegistryPlugin
   installed: boolean
+  job?: InstallJob
   busy: boolean
   install: (entry: RegistryPlugin) => Promise<boolean>
   remove: (id: string) => Promise<boolean>
@@ -629,10 +813,10 @@ function SkillCard({
         ) : (
           <button
             onClick={() => void install(p)}
-            disabled={busy || !p.fetch}
+            disabled={!!job || busy || !p.fetch}
             className="ml-auto rounded-lg bg-blue-500 px-3 py-1 text-xs font-medium text-white hover:bg-blue-400 disabled:opacity-40"
           >
-            {t('market.install')}
+            {job ? t(`market.install.${job.status}`) : t('market.install')}
           </button>
         )}
       </div>
@@ -643,12 +827,14 @@ function SkillCard({
 function McpCard({
   plugin: p,
   installed,
+  job,
   busy,
   install,
   remove,
 }: {
   plugin: RegistryPlugin
   installed: boolean
+  job?: InstallJob
   busy: boolean
   install: (entry: RegistryPlugin) => Promise<boolean>
   remove: (entry: RegistryPlugin) => Promise<boolean>
@@ -687,10 +873,10 @@ function McpCard({
         ) : installable ? (
           <button
             onClick={() => void install(p)}
-            disabled={busy}
+            disabled={!!job || busy}
             className="ml-auto rounded-lg bg-blue-500 px-3 py-1 text-xs font-medium text-white hover:bg-blue-400 disabled:opacity-40"
           >
-            {t('market.install')}
+            {job ? t(`market.install.${job.status}`) : t('market.install')}
           </button>
         ) : (
           <a
@@ -711,6 +897,7 @@ function PluginCard({
   plugin: p,
   installed,
   update,
+  job,
   busy,
   install,
   remove,
@@ -721,8 +908,9 @@ function PluginCard({
   plugin: RegistryPlugin
   installed: InstalledPlugin | undefined
   update: PluginUpdate | undefined
+  job?: InstallJob
   busy: boolean
-  install: (spec: string) => Promise<boolean>
+  install: (entry: RegistryPlugin) => Promise<boolean>
   remove: (name: string) => Promise<boolean>
   toggle: (name: string, enabled: boolean) => Promise<boolean>
   updateAction: (name: string) => Promise<boolean>
@@ -764,18 +952,20 @@ function PluginCard({
       <div className="mt-auto flex flex-wrap items-center gap-2">
         {installed ? (
           <>
-            <button
-              onClick={() => void toggle(installed.name, !installed.enabled)}
-              disabled={busy}
-              className="rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:text-zinc-100 disabled:opacity-40"
-            >
-              {installed.enabled ? t('market.disable') : t('market.enable')}
-            </button>
+            {installed.toggleable && (
+              <button
+                onClick={() => void toggle(installed.name, !installed.enabled)}
+                disabled={busy}
+                className="rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:text-zinc-100 disabled:opacity-40"
+              >
+                {installed.enabled ? t('market.disable') : t('market.enable')}
+              </button>
+            )}
             {update && update.updatable && (
               <button
                 onClick={() => void updateAction(installed.name)}
                 disabled={busy}
-                className="rounded-lg border border-amber-600/60 px-2.5 py-1 text-xs text-amber-300 hover:bg-amber-600/10 disabled:opacity-40"
+                className="rounded-lg border border-blue-500/40 px-2.5 py-1 text-xs text-blue-300 hover:bg-blue-500/10 disabled:opacity-40"
               >
                 {t('market.update', { from: update.installed, to: update.latest })}
               </button>
@@ -790,11 +980,11 @@ function PluginCard({
           </>
         ) : (
           <button
-            onClick={() => p.spec && void install(p.spec)}
-            disabled={busy || !p.spec}
+            onClick={() => void install(p)}
+            disabled={!!job || busy || !p.spec}
             className="ml-auto rounded-lg bg-blue-500 px-3 py-1 text-xs font-medium text-white hover:bg-blue-400 disabled:opacity-40"
           >
-            {t('market.install')}
+            {job ? t(`market.install.${job.status}`) : t('market.install')}
           </button>
         )}
       </div>

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::{AppSettings, ChildHandle, InstanceManifest, LogSink, ResolvedProvider};
+use crate::{AppSettings, ChildHandle, ExitSink, InstanceManifest, LogSink, ResolvedProvider};
 
 /// The detected facts about a runtime installation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,5 +43,6 @@ pub trait RuntimeAdapter: Send + Sync {
         instance: &InstanceManifest,
         env: &HashMap<String, String>,
         on_log: LogSink,
+        on_exit: Option<ExitSink>,
     ) -> Result<ChildHandle>;
 }

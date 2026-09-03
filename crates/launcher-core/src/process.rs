@@ -67,6 +67,7 @@ pub struct LogLine {
 /// Callback invoked once per streamed line. Clone-heavy on purpose: each read
 /// task holds its own copy.
 pub type LogSink = Arc<dyn Fn(LogLine) + Send + Sync>;
+pub type ExitSink = Arc<dyn Fn(ProcessState) + Send + Sync>;
 
 /// A Windows Job Object that kills its whole process tree on `terminate()` —
 /// and, as a belt-and-suspenders, whenever the last handle closes
@@ -289,7 +290,17 @@ impl ChildHandle {
 }
 
 /// Spawn `cmd`, wire up log streaming + exit watching, and hand back a handle.
-pub async fn spawn_child(mut cmd: tokio::process::Command, on_log: LogSink) -> Result<ChildHandle> {
+pub async fn spawn_child(cmd: tokio::process::Command, on_log: LogSink) -> Result<ChildHandle> {
+    spawn_child_with_exit(cmd, on_log, None).await
+}
+
+/// Spawn with an optional backend-owned lifecycle callback. This lets GUI
+/// shells subscribe to process exits without front-end polling.
+pub async fn spawn_child_with_exit(
+    mut cmd: tokio::process::Command,
+    on_log: LogSink,
+    on_exit: Option<ExitSink>,
+) -> Result<ChildHandle> {
     #[cfg(windows)]
     let job = match WindowsJob::new() {
         Ok(j) => {
@@ -386,6 +397,7 @@ pub async fn spawn_child(mut cmd: tokio::process::Command, on_log: LogSink) -> R
 
     let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
     let wstate = state.clone();
+    let exit_sink = on_exit.clone();
     #[cfg(windows)]
     let wjob = job.clone();
     let watcher = tokio::spawn(async move {
@@ -408,6 +420,9 @@ pub async fn spawn_child(mut cmd: tokio::process::Command, on_log: LogSink) -> R
                         s.exit_code = None;
                         s.status = ProcessStatus::Stopped;
                     }
+                    if let Some(sink) = exit_sink.as_ref() {
+                        sink(wstate.lock().map(|s| s.clone()).unwrap_or_else(|_| ProcessState::stopped()));
+                    }
                     break;
                 }
                 _ = tick.tick() => {
@@ -420,6 +435,9 @@ pub async fn spawn_child(mut cmd: tokio::process::Command, on_log: LogSink) -> R
                                 } else {
                                     s.status = ProcessStatus::Stopped;
                                 }
+                            }
+                            if let Some(sink) = exit_sink.as_ref() {
+                                sink(wstate.lock().map(|s| s.clone()).unwrap_or_else(|_| ProcessState::stopped()));
                             }
                             break;
                         }

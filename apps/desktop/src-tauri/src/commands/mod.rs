@@ -1,8 +1,11 @@
 pub mod content;
 pub mod diagnostics;
+pub mod environment;
 pub mod history;
 pub mod instance;
+pub mod language;
 pub mod market;
+pub mod paths;
 pub mod plugins;
 pub mod process;
 pub mod provider;
@@ -10,3 +13,4 @@ pub mod runtimes;
 pub mod settings;
 pub mod system;
 pub mod theme;
+pub mod usage;

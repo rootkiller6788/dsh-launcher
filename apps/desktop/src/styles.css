@@ -46,6 +46,8 @@ html[data-theme='light'] {
   --color-zinc-800: #e1e5ee;
   --color-zinc-900: #f9fafb;
   --color-zinc-950: #ffffff;
+  --color-blue-100: #1e3a8a;
+  --color-blue-200: #1d4ed8;
   --color-blue-300: #1d4ed8;
   --color-red-200: #dc2626;
   --color-red-300: #b91c1c;
@@ -93,4 +95,13 @@ body {
 .no-scrollbar {
   scrollbar-width: none;
   -ms-overflow-style: none;
+}
+
+@keyframes manageIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }

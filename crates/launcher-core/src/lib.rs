@@ -6,6 +6,7 @@
 //! small `RuntimeAdapter` contract that DSH-specific behavior plugs into.
 
 pub mod bundle;
+pub mod capabilities;
 pub mod diagnostics;
 pub mod history;
 pub mod instance;
@@ -15,16 +16,22 @@ pub mod process;
 pub mod provider;
 pub mod runtime;
 pub mod settings;
+pub mod usage;
 
 pub use bundle::{BundleItemResult, BundleManifest, BundleSummary};
+pub use capabilities::{
+    capability_for, CacheSource, ContentCapability, InstallAuthority, StateAuthority,
+    CONTENT_CAPABILITIES,
+};
 pub use history::{LaunchHistory, LaunchSession};
 pub use instance::{InstanceManifest, RuntimeRef};
 pub use market::{RecommendPlan, RecommendResult, Registry, RegistryPlugin};
 pub use paths::AppPaths;
-pub use process::{ChildHandle, LogLine, LogSink, LogStream, ProcessState, ProcessStatus};
+pub use process::{ChildHandle, ExitSink, LogLine, LogSink, LogStream, ProcessState, ProcessStatus};
 pub use provider::{ProviderPreset, ProviderProfile, ProviderVault, ResolvedProvider};
 pub use runtime::{RuntimeAdapter, RuntimeInfo};
 pub use settings::AppSettings;
+pub use usage::{NewUsageRecord, UsageBucket, UsageLedger, UsageModelTotal, UsageRecord, UsageSummary};
 
 /// Atomically write a JSON value to disk (temp file + rename).
 pub fn write_json_atomic(path: &std::path::Path, value: &serde_json::Value) -> anyhow::Result<()> {

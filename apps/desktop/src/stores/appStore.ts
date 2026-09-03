@@ -7,8 +7,12 @@ import type {
   BundleManifest,
   BundleSummary,
   DiagnosticsReport,
+  EnvironmentExportResult,
+  EnvironmentImportResult,
   InstanceManifest,
   InstalledPlugin,
+  LibraryInventoryDetail,
+  LibraryInventorySummary,
   Lang,
   LaunchSession,
   LogLine,
@@ -21,9 +25,31 @@ import type {
   RecommendResult,
   Registry,
   RegistryPlugin,
+  ShellMode,
   SystemInfo,
+  SystemStats,
   Theme,
+  UsageSummary,
 } from '../lib/types'
+
+type InstallJobStatus = 'queued' | 'downloading' | 'dshInstalling' | 'inventorySync' | 'classifying' | 'done' | 'failed'
+type InstallJobAction =
+  | { type: 'market'; entry: RegistryPlugin }
+  | { type: 'plugin'; target: string; entry?: RegistryPlugin | null }
+  | { type: 'skill'; entry: RegistryPlugin }
+  | { type: 'mcp'; entry: RegistryPlugin }
+
+export interface InstallJob {
+  status: InstallJobStatus
+  label: string
+  instanceId: string
+  kind?: RegistryPlugin['kind']
+  progress: number
+  logs: string[]
+  detail?: string
+  action?: InstallJobAction
+  updatedAt: number
+}
 
 /**
  * Last time the *user* (or a DSH-side adopt) wrote the theme, for the poll's
@@ -32,13 +58,69 @@ import type {
  * needless round-trips.
  */
 let lastThemeWriteAt = 0
+let themeSyncInFlight = false
+
+/** Same cooldown for the language poll (`dsh_language` / `syncLanguage`). */
+let lastLanguageWriteAt = 0
+
+let pluginInventoryInFlight = false
+let lastPluginInventoryInstance: string | null = null
+let lastPluginInventorySignature = ''
+
+function matchesStopped(status: ProcessState['status']) {
+  return status === 'stopped' || status === 'crashed'
+}
+
+const portFromUrl = (url: string | null): number | null => {
+  if (!url) return null
+  try {
+    const parsed = new URL(url)
+    const port = Number(parsed.port)
+    return Number.isFinite(port) && port > 0 ? port : null
+  } catch {
+    return null
+  }
+}
+
+function jobLabel(entry: RegistryPlugin) {
+  return entry.owner ? `${entry.owner}/${entry.name}` : entry.name
+}
+
+function pushInstallJob(
+  current: Record<string, InstallJob>,
+  key: string,
+  patch: Partial<InstallJob>,
+): Record<string, InstallJob> {
+  const previous = current[key]
+  const nextLog = patch.detail
+    ? [...(previous?.logs ?? []), patch.detail].slice(-8)
+    : previous?.logs ?? []
+  return {
+    ...current,
+    [key]: {
+      status: patch.status ?? previous?.status ?? 'queued',
+      label: patch.label ?? previous?.label ?? key,
+      instanceId: patch.instanceId ?? previous?.instanceId ?? '',
+      kind: patch.kind ?? previous?.kind,
+      progress: patch.progress ?? previous?.progress ?? 0,
+      logs: patch.logs ?? nextLog,
+      detail: patch.detail ?? previous?.detail,
+      action: patch.action ?? previous?.action,
+      updatedAt: Date.now(),
+    },
+  }
+}
 
 interface AppStore {
   page: Page
+  shellMode: ShellMode
+  dshUrl: string | null
   instances: InstanceManifest[]
   activeId: string | null
   activeInstance: InstanceManifest | null
   system: SystemInfo | null
+  systemStats: SystemStats | null
+  systemHistory: SystemStats[]
   provider: ProviderView | null
   presets: ProviderPreset[]
   settings: AppSettings | null
@@ -47,12 +129,16 @@ interface AppStore {
   processState: ProcessState | null
   runningId: string | null
   history: LaunchSession[]
+  usageSummary: UsageSummary | null
   logs: LogLine[]
   registry: Registry | null
   registryError: string | null
   installedPlugins: InstalledPlugin[]
   installedSkills: string[]
   installedMcps: string[]
+  libraryInventory: Record<string, LibraryInventorySummary>
+  libraryDetail: LibraryInventoryDetail | null
+  installJobs: Record<string, InstallJob>
   recommendations: RecommendResult | null
   searching: boolean
   updates: PluginUpdate[]
@@ -61,13 +147,21 @@ interface AppStore {
   error: string | null
 
   setPage: (p: Page) => void
+  setShellMode: (m: ShellMode) => void
   setError: (e: string | null) => void
+  clearInstallJob: (key: string) => void
+  retryInstallJob: (key: string) => Promise<boolean>
+  openInstallJobInLibrary: (key: string) => void
+  revealInstallWorkspace: (key: string) => Promise<void>
+  revealInstallConfig: (key: string) => Promise<void>
   bootstrap: () => void
   refresh: () => Promise<void>
   refreshSystem: () => Promise<void>
+  refreshSystemStats: () => Promise<void>
   refreshProvider: () => Promise<void>
   refreshState: () => Promise<void>
   refreshHistory: () => Promise<void>
+  refreshUsage: () => Promise<void>
   appendLog: (l: LogLine) => void
   clearLogs: () => void
   createInstance: (name: string) => Promise<boolean>
@@ -80,13 +174,19 @@ interface AppStore {
   setLanguage: (lang: Lang) => Promise<boolean>
   setTheme: (t: Theme) => void
   syncTheme: () => Promise<void>
+  syncLanguage: () => Promise<void>
   removeProviderKey: () => Promise<void>
   launch: (id: string) => Promise<void>
   stop: () => Promise<void>
+  restart: () => Promise<void>
   loadRegistry: () => Promise<void>
   refreshInstalledPlugins: () => Promise<void>
+  refreshLibraryInventory: () => Promise<void>
+  refreshLibraryDetail: () => Promise<void>
+  reconcileLibraryInventory: () => Promise<void>
   recommend: (need: string) => Promise<void>
-  installPlugin: (target: string) => Promise<boolean>
+  installMarketEntry: (entry: RegistryPlugin) => Promise<boolean>
+  installPlugin: (target: string, entry?: RegistryPlugin | null) => Promise<boolean>
   uninstallPlugin: (name: string) => Promise<boolean>
   togglePlugin: (name: string, enabled: boolean) => Promise<boolean>
   installSkill: (entry: RegistryPlugin) => Promise<boolean>
@@ -96,17 +196,24 @@ interface AppStore {
   uninstallMcp: (entry: RegistryPlugin) => Promise<boolean>
   refreshInstalledMcps: () => Promise<void>
   importBundle: (manifest: BundleManifest) => Promise<BundleSummary | null>
+  exportEnvironment: () => Promise<EnvironmentExportResult | null>
+  importEnvironment: (path: string, name?: string | null) => Promise<EnvironmentImportResult | null>
+  importEnvironmentPackage: (bytes: number[], name?: string | null) => Promise<EnvironmentImportResult | null>
   refreshUpdates: () => Promise<void>
   updatePlugin: (name: string) => Promise<boolean>
   refreshDiagnostics: () => Promise<void>
 }
 
 export const useAppStore = create<AppStore>((set, get) => ({
-  page: 'home',
+  page: 'overview',
+  shellMode: 'manage',
+  dshUrl: null,
   instances: [],
   activeId: null,
   activeInstance: null,
   system: null,
+  systemStats: null,
+  systemHistory: [],
   provider: null,
   presets: [],
   settings: null,
@@ -115,12 +222,16 @@ export const useAppStore = create<AppStore>((set, get) => ({
   processState: null,
   runningId: null,
   history: [],
+  usageSummary: null,
   logs: [],
   registry: null,
   registryError: null,
   installedPlugins: [],
   installedSkills: [],
   installedMcps: [],
+  libraryInventory: {},
+  libraryDetail: null,
+  installJobs: {},
   recommendations: null,
   searching: false,
   updates: [],
@@ -129,25 +240,122 @@ export const useAppStore = create<AppStore>((set, get) => ({
   error: null,
 
   setPage: (page) => set({ page }),
+  setShellMode: (shellMode) => {
+    set({ shellMode })
+  },
   setError: (error) => set({ error }),
+  openInstallJobInLibrary: () => set({ shellMode: 'manage', page: 'library' }),
+  revealInstallWorkspace: async (key) => {
+    const job = get().installJobs[key]
+    const id = job?.instanceId ?? get().activeId
+    if (!id) return
+    try {
+      await ipc.revealInstanceWorkspace(id)
+    } catch (e) {
+      set({ error: String(e) })
+    }
+  },
+  revealInstallConfig: async (key) => {
+    const job = get().installJobs[key]
+    const id = job?.instanceId ?? get().activeId
+    if (!id) return
+    try {
+      await ipc.revealInstanceConfig(id)
+    } catch (e) {
+      set({ error: String(e) })
+    }
+  },
+  clearInstallJob: (key) =>
+    set((s) => {
+      const next = { ...s.installJobs }
+      delete next[key]
+      return { installJobs: next }
+    }),
+  retryInstallJob: async (key) => {
+    const job = get().installJobs[key]
+    const action = job?.action
+    if (!action) return false
+    if (action.type === 'market') return get().installMarketEntry(action.entry)
+    if (action.type === 'plugin') return get().installPlugin(action.target, action.entry)
+    if (action.type === 'skill') return get().installSkill(action.entry)
+    if (action.type === 'mcp') return get().installMcp(action.entry)
+    return false
+  },
 
   bootstrap: () => {
     listen<LogLine>('logs', (event) => get().appendLog(event.payload)).catch(() => {})
+    listen<string>('dsh-url', (event) => {
+      set({ dshUrl: event.payload, shellMode: 'workspace' })
+    }).catch(() => {})
+    listen<ProcessState>('process-state', (event) => {
+      set((state) => ({
+        processState: event.payload,
+        dshUrl: matchesStopped(event.payload.status) ? null : state.dshUrl,
+      }))
+    }).catch(() => {})
+    listen('usage-recorded', () => {
+      const state = get()
+      if (state.shellMode === 'manage' && (state.page === 'overview' || state.page === 'activity')) {
+        void state.refreshUsage()
+      }
+    }).catch(() => {})
+    listen<string>('library-inventory-updated', (event) => {
+      const state = get()
+      if (
+        event.payload === state.activeId &&
+        state.shellMode === 'manage' &&
+        (state.page === 'library' || state.page === 'market')
+      ) {
+        void state.refreshInstalledPlugins()
+        void state.refreshLibraryDetail()
+      }
+      void state.refreshLibraryInventory()
+    }).catch(() => {})
     const poll = () => {
+      if (get().shellMode === 'workspace') return
       ipc
         .processState()
-        .then((s) => set({ processState: s }))
+        .then((s) => {
+          set((state) => ({
+            processState: s,
+            dshUrl: matchesStopped(s.status) ? null : state.dshUrl,
+          }))
+          if (!matchesStopped(s.status) && !get().dshUrl) {
+            void ipc
+              .currentDshUrl()
+              .then((url) => {
+                set({ dshUrl: url })
+              })
+              .catch(() => {})
+          }
+        })
         .catch(() => {})
       ipc
         .runningInstance()
         .then((id) => set({ runningId: id }))
         .catch(() => {})
-      // Pull the running DSH's theme back into the launcher (one lamp).
-      void get().syncTheme()
+      const state = get()
+      if (state.shellMode === 'manage' && (state.page === 'overview' || state.page === 'activity')) {
+        // Resource sampler for the visible dashboard only; the Workspace iframe
+        // should not pay for hidden Manage-page charts.
+        void state.refreshSystemStats()
+      }
     }
     poll()
     window.setInterval(poll, 1500)
-    window.setInterval(() => get().refreshHistory(), 3000)
+    window.setInterval(() => {
+      const state = get()
+      if (!state.dshUrl || state.shellMode !== 'manage') return
+      if (state.page !== 'settings') return
+      void state.syncTheme()
+    }, 1000)
+    window.setInterval(() => {
+      const state = get()
+      if (state.shellMode !== 'manage') return
+      if (state.page !== 'overview' && state.page !== 'activity') return
+      void state.refreshHistory()
+      void state.refreshUsage()
+    }, 3000)
     void get().refresh()
   },
 
@@ -177,6 +385,20 @@ export const useAppStore = create<AppStore>((set, get) => ({
       theme: settingsValue?.theme ? (settingsValue.theme as Theme) : get().theme,
       system: system.status === 'fulfilled' ? system.value : null,
     })
+    // Read the per-instance inventory snapshots. Deep DSH reconciliation is
+    // reserved for launch background work, installs, and explicit Refresh.
+    void get().refreshLibraryInventory()
+    if (get().shellMode === 'manage' && (get().page === 'library' || get().page === 'market')) {
+      void get().refreshInstalledPlugins()
+    }
+    if (get().shellMode === 'manage' && get().page === 'library') {
+      void get().refreshLibraryDetail()
+    }
+    if (get().shellMode === 'manage') {
+      if (get().page === 'overview' || get().page === 'activity') {
+        void get().refreshUsage()
+      }
+    }
   },
 
   refreshSystem: async () => {
@@ -184,6 +406,19 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set({ system: await ipc.systemInfo() })
     } catch (e) {
       set({ error: String(e) })
+    }
+  },
+  refreshSystemStats: async () => {
+    try {
+      const sample = await ipc.systemStats()
+      set((s) => ({
+        systemStats: sample,
+        // Ring buffer capped at ~3 min of 1.5s samples — enough for a readable
+        // sparkline without unbounded growth.
+        systemHistory: [...s.systemHistory.slice(-119), sample],
+      }))
+    } catch {
+      /* non-fatal */
     }
   },
   refreshProvider: async () => {
@@ -211,8 +446,34 @@ export const useAppStore = create<AppStore>((set, get) => ({
       /* non-fatal */
     }
   },
+  refreshUsage: async () => {
+    try {
+      const activeId = get().activeId
+      const now = Math.floor(Date.now() / 1000)
+      const start = new Date()
+      start.setHours(0, 0, 0, 0)
+      set({ usageSummary: await ipc.usageSummary(activeId, Math.floor(start.getTime() / 1000), now + 1) })
+    } catch {
+      /* non-fatal */
+    }
+  },
 
-  appendLog: (line) => set((s) => ({ logs: [...s.logs.slice(-1999), line] })),
+  appendLog: (line) =>
+    set((s) => {
+      const installJobs = { ...s.installJobs }
+      const text = line.line
+      for (const [key, job] of Object.entries(installJobs)) {
+        if (job.status === 'done' || job.status === 'failed') continue
+        if (!text.includes(job.instanceId) && !text.toLowerCase().includes(job.label.toLowerCase())) continue
+        installJobs[key] = {
+          ...job,
+          logs: [...job.logs, text].slice(-8),
+          detail: text,
+          updatedAt: Date.now(),
+        }
+      }
+      return { logs: [...s.logs.slice(-1999), line], installJobs }
+    }),
   clearLogs: () => set({ logs: [] }),
 
   createInstance: async (name) => {
@@ -314,15 +575,33 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   setLanguage: async (lang) => {
-    set({ language: lang })
+    lastLanguageWriteAt = Date.now()
+    set((s) => ({
+      language: lang,
+      settings: s.settings ? { ...s.settings, language: lang } : s.settings,
+    }))
     try {
-      const cur = get().settings ?? {}
-      const saved = await ipc.setSettings({ ...cur, language: lang })
-      set({ settings: saved })
+      // Rust persists `settings.language` + pushes to the running DSH's
+      // `locale.preference`. Non-fatal — the launcher keeps its own language
+      // when no harness is up.
+      await ipc.setLanguage(lang)
       return true
     } catch (e) {
       set({ error: String(e) })
       return false
+    }
+  },
+
+  syncLanguage: async () => {
+    // Give a just-pushed write time to land before reading DSH back.
+    if (Date.now() - lastLanguageWriteAt < 2500) return
+    try {
+      const lang = await ipc.dshLanguage()
+      if (lang && lang !== get().language) {
+        get().setLanguage(lang as Lang)
+      }
+    } catch {
+      /* non-fatal */
     }
   },
 
@@ -343,15 +622,27 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   syncTheme: async () => {
-    // Give a just-pushed write time to land before reading DSH back.
+    // Give a just-pushed launcher write time to land before reading DSH back.
     if (Date.now() - lastThemeWriteAt < 2500) return
+    if (themeSyncInFlight) return
+    themeSyncInFlight = true
     try {
       const pref = await ipc.dshTheme()
-      if (pref && pref !== get().theme) {
-        get().setTheme(pref as Theme)
+      if (pref !== 'light' && pref !== 'dark' && pref !== 'system') return
+      if (pref === get().theme) return
+      set((s) => ({
+        theme: pref,
+        settings: s.settings ? { ...s.settings, theme: pref } : s.settings,
+      }))
+      applyTheme(pref)
+      const settings = get().settings
+      if (settings) {
+        void ipc.setSettings(settings).catch(() => {})
       }
     } catch {
       /* non-fatal */
+    } finally {
+      themeSyncInFlight = false
     }
   },
 
@@ -371,7 +662,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
   launch: async (id) => {
     set({ busy: true, error: null })
     try {
-      set({ processState: await ipc.launch(id) })
+      const processState = await ipc.launch(id)
+      const dshUrl = await ipc.currentDshUrl().catch(() => get().dshUrl)
+      set({ processState, dshUrl, shellMode: 'workspace' })
+      void get().refreshLibraryInventory()
     } catch (e) {
       set({ error: String(e) })
     } finally {
@@ -382,8 +676,28 @@ export const useAppStore = create<AppStore>((set, get) => ({
   stop: async () => {
     set({ busy: true, error: null })
     try {
-      set({ processState: await ipc.stop() })
+      set({ processState: await ipc.stop(), dshUrl: null })
       await get().refreshHistory()
+    } catch (e) {
+      set({ error: String(e) })
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  // Restart = the same stop-then-launch path the user would do by hand; composes
+  // the existing IPC instead of duplicating the process management.
+  restart: async () => {
+    const id = get().activeId
+    if (!id) return
+    set({ busy: true, error: null })
+    try {
+      await ipc.stop()
+      await get().refreshHistory()
+      const processState = await ipc.launch(id)
+      const dshUrl = await ipc.currentDshUrl().catch(() => get().dshUrl)
+      set({ processState, dshUrl, shellMode: 'workspace' })
+      void get().refreshLibraryInventory()
     } catch (e) {
       set({ error: String(e) })
     } finally {
@@ -403,13 +717,74 @@ export const useAppStore = create<AppStore>((set, get) => ({
   refreshInstalledPlugins: async () => {
     const id = get().activeId
     if (!id) {
+      lastPluginInventoryInstance = null
+      lastPluginInventorySignature = ''
       set({ installedPlugins: [] })
       return
     }
+    if (pluginInventoryInFlight) return
+    pluginInventoryInFlight = true
     try {
-      set({ installedPlugins: await ipc.pluginsList(id) })
+      const installedPlugins = await ipc.pluginsList(id, portFromUrl(get().dshUrl))
+      const signature = JSON.stringify(
+        installedPlugins.map((plugin) => [
+          plugin.name,
+          plugin.enabled,
+          plugin.source,
+          plugin.fiberPhase ?? '',
+        ]),
+      )
+      if (id !== lastPluginInventoryInstance || signature !== lastPluginInventorySignature) {
+        lastPluginInventoryInstance = id
+        lastPluginInventorySignature = signature
+        set({ installedPlugins })
+      }
     } catch {
       /* non-fatal */
+    } finally {
+      pluginInventoryInFlight = false
+    }
+  },
+
+  refreshLibraryInventory: async () => {
+    try {
+      const summaries = await ipc.libraryInventorySummaries()
+      set({
+        libraryInventory: Object.fromEntries(
+          summaries.map((summary) => [summary.instanceId, summary]),
+        ),
+      })
+    } catch {
+      /* non-fatal */
+    }
+  },
+
+  refreshLibraryDetail: async () => {
+    const id = get().activeId
+    if (!id) {
+      set({ libraryDetail: null })
+      return
+    }
+    try {
+      set({ libraryDetail: await ipc.libraryInventoryDetail(id) })
+    } catch {
+      /* non-fatal */
+    }
+  },
+
+  reconcileLibraryInventory: async () => {
+    const id = get().activeId
+    if (!id) {
+      set({ libraryDetail: null })
+      return
+    }
+    try {
+      const detail = await ipc.libraryInventoryRefresh(id)
+      set({ libraryDetail: detail })
+      await get().refreshLibraryInventory()
+      await get().refreshInstalledPlugins()
+    } catch (e) {
+      set({ error: String(e) })
     }
   },
 
@@ -424,16 +799,132 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
-  installPlugin: async (target) => {
+  installMarketEntry: async (entry) => {
     const id = get().activeId
     if (!id) return false
-    set({ busy: true, error: null })
+    const key = jobLabel(entry)
+    set((s) => ({
+      busy: true,
+      error: null,
+      installJobs: pushInstallJob(s.installJobs, key, {
+        status: 'downloading',
+        label: key,
+        instanceId: id,
+        kind: entry.kind,
+        progress: 18,
+        detail: 'Download / manifest resolution started',
+        action: { type: 'market', entry },
+      }),
+    }))
     try {
-      await ipc.pluginInstall(id, target)
-      await get().refreshInstalledPlugins()
+      set((s) => ({
+        installJobs: pushInstallJob(s.installJobs, key, {
+          status: 'dshInstalling',
+          progress: 45,
+          detail: 'Installing through DSH',
+        }),
+      }))
+      await ipc.marketInstall(id, entry)
+      set((s) => ({
+        installJobs: pushInstallJob(s.installJobs, key, {
+          status: 'inventorySync',
+          progress: 74,
+          detail: 'Syncing DSH Inventory snapshot',
+        }),
+      }))
+      if (entry.kind === 'skill') {
+        await get().refreshInstalledSkills()
+      } else if (entry.kind === 'mcp') {
+        await get().refreshInstalledMcps()
+      } else {
+        await get().refreshInstalledPlugins()
+      }
+      await get().refreshLibraryInventory()
+      set((s) => ({
+        installJobs: pushInstallJob(s.installJobs, key, {
+          status: 'classifying',
+          progress: 88,
+          detail: 'Classifying Library metadata',
+        }),
+      }))
+      await get().refreshLibraryDetail()
+      set((s) => ({
+        installJobs: pushInstallJob(s.installJobs, key, {
+          status: 'done',
+          progress: 100,
+          detail: 'Ready in Library',
+        }),
+      }))
       return true
     } catch (e) {
-      set({ error: String(e) })
+      set((s) => ({
+        error: String(e),
+        installJobs: pushInstallJob(s.installJobs, key, {
+          status: 'failed',
+          progress: 100,
+          detail: String(e),
+        }),
+      }))
+      return false
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  installPlugin: async (target, entry = null) => {
+    const id = get().activeId
+    if (!id) return false
+    const jobKey = entry?.kind === 'theme' && entry.owner ? `${entry.owner}/${entry.name}` : target
+    set((s) => ({
+      busy: true,
+      error: null,
+      installJobs: pushInstallJob(s.installJobs, jobKey, {
+        status: 'dshInstalling',
+        label: jobKey,
+        instanceId: id,
+        kind: entry?.kind ?? 'plugin',
+        progress: 40,
+        detail: 'Installing through DSH',
+        action: { type: 'plugin', target, entry },
+      }),
+    }))
+    try {
+      await ipc.pluginInstall(id, target, entry)
+      set((s) => ({
+        installJobs: pushInstallJob(s.installJobs, jobKey, {
+          status: 'inventorySync',
+          progress: 74,
+          detail: 'Syncing DSH Inventory snapshot',
+        }),
+      }))
+      await get().refresh()
+      await get().refreshInstalledPlugins()
+      await get().refreshLibraryInventory()
+      set((s) => ({
+        installJobs: pushInstallJob(s.installJobs, jobKey, {
+          status: 'classifying',
+          progress: 88,
+          detail: 'Classifying Library metadata',
+        }),
+      }))
+      await get().refreshLibraryDetail()
+      set((s) => ({
+        installJobs: pushInstallJob(s.installJobs, jobKey, {
+          status: 'done',
+          progress: 100,
+          detail: 'Ready in Library',
+        }),
+      }))
+      return true
+    } catch (e) {
+      set((s) => ({
+        error: String(e),
+        installJobs: pushInstallJob(s.installJobs, jobKey, {
+          status: 'failed',
+          progress: 100,
+          detail: String(e),
+        }),
+      }))
       return false
     } finally {
       set({ busy: false })
@@ -447,6 +938,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       await ipc.pluginUninstall(id, name)
       await get().refreshInstalledPlugins()
+      await get().refreshLibraryInventory()
+      await get().refreshLibraryDetail()
       return true
     } catch (e) {
       set({ error: String(e) })
@@ -463,6 +956,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       await ipc.pluginToggle(id, name, enabled)
       await get().refreshInstalledPlugins()
+      await get().refreshLibraryInventory()
+      await get().refreshLibraryDetail()
       return true
     } catch (e) {
       set({ error: String(e) })
@@ -488,13 +983,56 @@ export const useAppStore = create<AppStore>((set, get) => ({
   installSkill: async (entry) => {
     const id = get().activeId
     if (!id) return false
-    set({ busy: true, error: null })
+    const key = jobLabel(entry)
+    set((s) => ({
+      busy: true,
+      error: null,
+      installJobs: pushInstallJob(s.installJobs, key, {
+        status: 'downloading',
+        label: key,
+        instanceId: id,
+        kind: entry.kind,
+        progress: 22,
+        detail: 'Downloading skill files',
+        action: { type: 'skill', entry },
+      }),
+    }))
     try {
       await ipc.skillInstall(id, entry)
+      set((s) => ({
+        installJobs: pushInstallJob(s.installJobs, key, {
+          status: 'inventorySync',
+          progress: 74,
+          detail: 'Refreshing Library snapshot',
+        }),
+      }))
       await get().refreshInstalledSkills()
+      await get().refreshLibraryInventory()
+      set((s) => ({
+        installJobs: pushInstallJob(s.installJobs, key, {
+          status: 'classifying',
+          progress: 88,
+          detail: 'Classifying skill metadata',
+        }),
+      }))
+      await get().refreshLibraryDetail()
+      set((s) => ({
+        installJobs: pushInstallJob(s.installJobs, key, {
+          status: 'done',
+          progress: 100,
+          detail: 'Ready in Library',
+        }),
+      }))
       return true
     } catch (e) {
-      set({ error: String(e) })
+      set((s) => ({
+        error: String(e),
+        installJobs: pushInstallJob(s.installJobs, key, {
+          status: 'failed',
+          progress: 100,
+          detail: String(e),
+        }),
+      }))
       return false
     } finally {
       set({ busy: false })
@@ -508,6 +1046,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       await ipc.skillUninstall(id, skill)
       await get().refreshInstalledSkills()
+      await get().refreshLibraryInventory()
+      await get().refreshLibraryDetail()
       return true
     } catch (e) {
       set({ error: String(e) })
@@ -533,13 +1073,56 @@ export const useAppStore = create<AppStore>((set, get) => ({
   installMcp: async (entry) => {
     const id = get().activeId
     if (!id) return false
-    set({ busy: true, error: null })
+    const key = jobLabel(entry)
+    set((s) => ({
+      busy: true,
+      error: null,
+      installJobs: pushInstallJob(s.installJobs, key, {
+        status: 'dshInstalling',
+        label: key,
+        instanceId: id,
+        kind: entry.kind,
+        progress: 42,
+        detail: 'Writing MCP profile configuration',
+        action: { type: 'mcp', entry },
+      }),
+    }))
     try {
       await ipc.mcpInstall(id, entry)
+      set((s) => ({
+        installJobs: pushInstallJob(s.installJobs, key, {
+          status: 'inventorySync',
+          progress: 74,
+          detail: 'Refreshing Library snapshot',
+        }),
+      }))
       await get().refreshInstalledMcps()
+      await get().refreshLibraryInventory()
+      set((s) => ({
+        installJobs: pushInstallJob(s.installJobs, key, {
+          status: 'classifying',
+          progress: 88,
+          detail: 'Classifying MCP metadata',
+        }),
+      }))
+      await get().refreshLibraryDetail()
+      set((s) => ({
+        installJobs: pushInstallJob(s.installJobs, key, {
+          status: 'done',
+          progress: 100,
+          detail: 'Ready in Library',
+        }),
+      }))
       return true
     } catch (e) {
-      set({ error: String(e) })
+      set((s) => ({
+        error: String(e),
+        installJobs: pushInstallJob(s.installJobs, key, {
+          status: 'failed',
+          progress: 100,
+          detail: String(e),
+        }),
+      }))
       return false
     } finally {
       set({ busy: false })
@@ -553,6 +1136,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       await ipc.mcpUninstall(id, entry)
       await get().refreshInstalledMcps()
+      await get().refreshLibraryInventory()
+      await get().refreshLibraryDetail()
       return true
     } catch (e) {
       set({ error: String(e) })
@@ -572,7 +1157,63 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await get().refreshInstalledPlugins()
       await get().refreshInstalledSkills()
       await get().refreshInstalledMcps()
+      await get().refreshLibraryInventory()
+      await get().refreshLibraryDetail()
       return summary
+    } catch (e) {
+      set({ error: String(e) })
+      return null
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  exportEnvironment: async () => {
+    const id = get().activeId
+    if (!id) return null
+    set({ busy: true, error: null })
+    try {
+      return await ipc.environmentExport(id)
+    } catch (e) {
+      set({ error: String(e) })
+      return null
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  importEnvironment: async (path, name) => {
+    set({ busy: true, error: null })
+    try {
+      const result = await ipc.environmentImport(path, name)
+      await get().refresh()
+      await get().switchInstance(result.instance.id)
+      await get().refreshInstalledPlugins()
+      await get().refreshInstalledSkills()
+      await get().refreshInstalledMcps()
+      await get().refreshLibraryInventory()
+      await get().refreshLibraryDetail()
+      return result
+    } catch (e) {
+      set({ error: String(e) })
+      return null
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  importEnvironmentPackage: async (bytes, name) => {
+    set({ busy: true, error: null })
+    try {
+      const result = await ipc.environmentImportPackage(bytes, name)
+      await get().refresh()
+      await get().switchInstance(result.instance.id)
+      await get().refreshInstalledPlugins()
+      await get().refreshInstalledSkills()
+      await get().refreshInstalledMcps()
+      await get().refreshLibraryInventory()
+      await get().refreshLibraryDetail()
+      return result
     } catch (e) {
       set({ error: String(e) })
       return null
@@ -601,7 +1242,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       await ipc.pluginUpdate(id, name)
       await get().refreshInstalledPlugins()
-      await get().refreshUpdates()
+      await get().refreshLibraryInventory()
+      await get().refreshLibraryDetail()
       return true
     } catch (e) {
       set({ error: String(e) })
@@ -619,8 +1261,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
     try {
       set({ diagnostics: await ipc.profileDiagnostics(id) })
-    } catch (e) {
-      set({ error: String(e) })
+    } catch {
+      // Non-fatal: a diagnostics read failure shouldn't surface as a red error
+      // banner in the middle of an install.
+      set({ diagnostics: null })
     }
   },
 }))

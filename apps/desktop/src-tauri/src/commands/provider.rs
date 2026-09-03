@@ -28,7 +28,10 @@ pub fn get_provider(state: State<'_, AppState>) -> Result<ProviderView, AppError
 #[tauri::command]
 pub fn list_providers(state: State<'_, AppState>) -> Result<Vec<ProviderView>, AppError> {
     let profiles = state.vault.list()?;
-    Ok(profiles.into_iter().map(|p| view(&state.vault, p)).collect())
+    Ok(profiles
+        .into_iter()
+        .map(|p| view(&state.vault, p))
+        .collect())
 }
 
 /// The built-in preset library (~20 OpenAI-compatible providers + local).

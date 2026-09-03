@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use dsh_adapter::runtimes::{NodeInfo, Runtimes, RuntimeEntry, VerifyReport};
+use dsh_adapter::runtimes::{NodeInfo, RuntimeEntry, Runtimes, VerifyReport};
 use launcher_core::AppSettings;
 use tauri::State;
 
@@ -85,19 +85,14 @@ pub async fn runtime_install(
 ) -> Result<RuntimeEntry, AppError> {
     let mgr = manager(&state);
     let src = PathBuf::from(source.trim());
-    tauri::async_runtime::spawn_blocking(move || {
-        mgr.install_from_source(&src, version.as_deref())
-    })
-    .await
-    .map_err(|e| AppError::msg(format!("install task failed: {e}")))?
-    .map_err(Into::into)
+    tauri::async_runtime::spawn_blocking(move || mgr.install_from_source(&src, version.as_deref()))
+        .await
+        .map_err(|e| AppError::msg(format!("install task failed: {e}")))?
+        .map_err(Into::into)
 }
 
 #[tauri::command]
-pub fn runtime_set_active(
-    state: State<'_, AppState>,
-    version: String,
-) -> Result<(), AppError> {
+pub fn runtime_set_active(state: State<'_, AppState>, version: String) -> Result<(), AppError> {
     manager(&state).set_active(&version)?;
     Ok(())
 }

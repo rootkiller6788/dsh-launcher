@@ -32,6 +32,8 @@ pub struct InstanceManifest {
     pub skills: Vec<String>,
     #[serde(default)]
     pub mcp: Vec<String>,
+    #[serde(default)]
+    pub skins: Vec<String>,
     /// The instance's isolated `$DSH_HOME` (profiles/config live here).
     pub workspace: String,
 }
@@ -50,6 +52,7 @@ impl InstanceManifest {
             plugins: Vec::new(),
             skills: Vec::new(),
             mcp: Vec::new(),
+            skins: Vec::new(),
             workspace: instances_root
                 .join(&id)
                 .join("workspace")
@@ -157,6 +160,26 @@ impl InstanceManifest {
     pub fn remove_mcp(paths: &AppPaths, id: &str, server: &str) -> Result<Self> {
         let mut m = Self::get(paths, id)?;
         m.mcp.retain(|s| s != server);
+        m.save(&paths.instance_file(id))?;
+        Ok(m)
+    }
+
+    /// Append an installed skin id (canonical `owner/name`) if not present.
+    /// Skins install through DSH's plugin mechanism, but Library presents them
+    /// as visual assets owned by the Market skin catalog.
+    pub fn add_skin(paths: &AppPaths, id: &str, skin: &str) -> Result<Self> {
+        let mut m = Self::get(paths, id)?;
+        if !m.skins.iter().any(|s| s == skin) {
+            m.skins.push(skin.to_string());
+            m.save(&paths.instance_file(id))?;
+        }
+        Ok(m)
+    }
+
+    /// Remove an installed skin id, then persist.
+    pub fn remove_skin(paths: &AppPaths, id: &str, skin: &str) -> Result<Self> {
+        let mut m = Self::get(paths, id)?;
+        m.skins.retain(|s| s != skin);
         m.save(&paths.instance_file(id))?;
         Ok(m)
     }
