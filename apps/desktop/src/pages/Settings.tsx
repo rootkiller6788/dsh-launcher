@@ -1,17 +1,18 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
+import {
+  Archive,
+  Cpu,
+  FileCheck2,
+  RotateCw,
+  Save,
+  ServerCog,
+  ShieldCheck,
+  Terminal,
+} from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
 import { useT } from '../lib/i18n'
 import { ipc } from '../lib/ipc'
-import type { RuntimeManagerView, Theme, VerifyReport } from '../lib/types'
-
-const DEFAULT_BASE_URL = 'https://api.deepseek.com'
-
-/** Mirrors DSH's Appearance row: 深色 / 浅色 / 跟随系统. */
-const THEMES: { value: Theme; label: string }[] = [
-  { value: 'dark', label: 'settings.themeDark' },
-  { value: 'light', label: 'settings.themeLight' },
-  { value: 'system', label: 'settings.themeSystem' },
-]
+import type { RuntimeManagerView, VerifyReport } from '../lib/types'
 
 function Field({
   label,
@@ -20,7 +21,7 @@ function Field({
 }: {
   label: string
   hint?: string
-  children: React.ReactNode
+  children: ReactNode
 }) {
   return (
     <div>
@@ -31,306 +32,182 @@ function Field({
   )
 }
 
+function PreferenceCard({
+  icon: Icon,
+  title,
+  subtitle,
+  children,
+}: {
+  icon: typeof ServerCog
+  title: string
+  subtitle?: string
+  children: ReactNode
+}) {
+  return (
+    <section className="min-h-0 rounded-lg border border-zinc-800 bg-zinc-900/60 p-5">
+      <div className="mb-4 flex items-start gap-3">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-500/10 text-blue-300">
+          <Icon className="h-4 w-4" strokeWidth={1.75} />
+        </div>
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold text-zinc-100">{title}</h2>
+          {subtitle && <p className="mt-0.5 text-xs leading-5 text-zinc-500">{subtitle}</p>}
+        </div>
+      </div>
+      {children}
+    </section>
+  )
+}
+
 type Flash = 'saving' | 'saved' | 'failed' | null
 
 export function Settings() {
   const t = useT()
-  const provider = useAppStore((s) => s.provider)
-  const presets = useAppStore((s) => s.presets)
   const settings = useAppStore((s) => s.settings)
   const system = useAppStore((s) => s.system)
   const busy = useAppStore((s) => s.busy)
-  const language = useAppStore((s) => s.language)
-  const setLanguage = useAppStore((s) => s.setLanguage)
-  const theme = useAppStore((s) => s.theme)
-  const setTheme = useAppStore((s) => s.setTheme)
-  const saveProvider = useAppStore((s) => s.saveProvider)
   const saveSettings = useAppStore((s) => s.saveSettings)
-  const removeProviderKey = useAppStore((s) => s.removeProviderKey)
-  const refreshProvider = useAppStore((s) => s.refreshProvider)
   const refreshSystem = useAppStore((s) => s.refreshSystem)
+  const exportEnvironment = useAppStore((s) => s.exportEnvironment)
 
-  const [name, setName] = useState('')
-  const [apiKey, setApiKey] = useState('')
-  const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE_URL)
-  const [models, setModels] = useState('')
-  const [presetId, setPresetId] = useState('deepseek')
   const [dshPath, setDshPath] = useState('')
   const [flash, setFlash] = useState<Flash>(null)
+  const [exportedPath, setExportedPath] = useState<string | null>(null)
 
   useEffect(() => {
-    if (provider) {
-      setName(provider.profile.name)
-      setBaseUrl(provider.profile.baseUrl ?? DEFAULT_BASE_URL)
-      setModels((provider.profile.models ?? []).join(', '))
-    }
     if (settings) setDshPath(settings.dshPath ?? '')
-  }, [provider, settings])
-
-  // Load the preset library once on mount — presets aren't fetched by the
-  // global `refresh()`, so the dropdown would otherwise render empty.
-  useEffect(() => {
-    void refreshProvider()
-  }, [refreshProvider])
-
-  const applyPreset = (id: string) => {
-    setPresetId(id)
-    const p = presets.find((x) => x.id === id)
-    if (!p) return
-    setName(p.name)
-    setBaseUrl(p.baseUrl)
-    setModels(p.models.join(', '))
-  }
+  }, [settings])
 
   const save = async () => {
     setFlash('saving')
-    const modelList = models.split(',').map((m) => m.trim()).filter(Boolean)
-    const okProvider = await saveProvider(
-      {
-        id: 'default',
-        name,
-        baseUrl: baseUrl.trim() || null,
-        model: modelList[0] ?? null,
-        models: modelList,
-      },
-      apiKey || null,
-    )
+    const current = useAppStore.getState()
     const okSettings = await saveSettings({
       dshPath: dshPath.trim() || null,
-      lastInstance: useAppStore.getState().settings?.lastInstance ?? null,
-      language,
-      theme: useAppStore.getState().theme,
+      lastInstance: current.settings?.lastInstance ?? null,
+      language: current.language,
+      theme: current.theme,
     })
-    await refreshProvider()
-    setFlash(okProvider && okSettings ? 'saved' : 'failed')
-    if (okProvider && okSettings) setApiKey('')
+    setFlash(okSettings ? 'saved' : 'failed')
   }
 
-  const clearKey = async () => {
-    await removeProviderKey()
-    await refreshProvider()
-    setFlash('saved')
+  const readyCount = Number(!!system?.node?.present) + Number(!!system?.git?.present) + Number(!!system?.dsh)
+  const runtimeLabel = system?.dsh?.version ?? (system?.dshError ? t('settings.notChecked') : t('settings.loading'))
+  const exportCurrentEnvironment = async () => {
+    setExportedPath(null)
+    const result = await exportEnvironment()
+    if (result) setExportedPath(result.path)
   }
 
   return (
-    <div className="mx-auto max-w-2xl p-8">
-      <h1 className="mb-6 text-2xl font-bold">{t('settings.title')}</h1>
-
-      {/* Appearance — same three choices as DSH, synced with the DSH window */}
-      <section className="mb-8 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-6">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <h2 className="text-base font-semibold text-zinc-100">{t('settings.appearance')}</h2>
-            <p className="text-[11px] text-zinc-500">{t('settings.appearanceHint')}</p>
-          </div>
-          <div className="flex rounded-lg border border-zinc-700 bg-zinc-950 p-1">
-            {THEMES.map((th) => (
-              <button
-                key={th.value}
-                onClick={() => void setTheme(th.value)}
-                className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-                  theme === th.value ? 'bg-blue-500 text-white' : 'text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                {t(th.label)}
-              </button>
-            ))}
-          </div>
+    <div className="flex h-full min-h-0 flex-col gap-5 overflow-hidden p-6">
+      <div className="flex shrink-0 items-end justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-zinc-50">{t('settings.title')}</h1>
+          <p className="mt-0.5 text-sm text-zinc-500">{t('settings.subtitle')}</p>
         </div>
-      </section>
+        <button
+          onClick={() => void save()}
+          disabled={busy}
+          className={`flex min-h-10 items-center gap-2 rounded-lg px-4 text-sm font-semibold text-white transition-colors disabled:opacity-50 ${
+            flash === 'failed' ? 'bg-red-600' : 'bg-blue-600 hover:bg-blue-500'
+          }`}
+        >
+          <Save className="h-4 w-4" strokeWidth={1.75} />
+          {flash === 'saving' ? t('settings.saving') : flash === 'saved' ? t('settings.saved') : t('settings.save')}
+        </button>
+      </div>
 
-      {/* Language */}
-      <section className="mb-8 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-6">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <h2 className="text-base font-semibold text-zinc-100">{t('settings.language')}</h2>
-            <p className="text-[11px] text-zinc-500">{t('settings.languageHint')}</p>
-          </div>
-          <div className="flex rounded-lg border border-zinc-700 bg-zinc-950 p-1">
-            <button
-              onClick={() => void setLanguage('en')}
-              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-                language === 'en' ? 'bg-blue-500 text-white' : 'text-zinc-400 hover:text-zinc-200'
-              }`}
-            >
-              English
-            </button>
-            <button
-              onClick={() => void setLanguage('zh')}
-              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-                language === 'zh' ? 'bg-blue-500 text-white' : 'text-zinc-400 hover:text-zinc-200'
-              }`}
-            >
-              中文
-            </button>
-          </div>
-        </div>
-      </section>
-
-      {/* Provider */}
-      <section className="mb-8 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-6">
-        <h2 className="mb-4 text-base font-semibold text-zinc-100">{t('settings.provider')}</h2>
-        <div className="space-y-4">
-          <Field label={t('settings.providerPreset')} hint={t('settings.providerPresetHint')}>
-            <select
-              value={presetId}
-              onChange={(e) => applyPreset(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 outline-none focus:border-blue-500"
-            >
-              {presets.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label={t('settings.name')}>
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 outline-none focus:border-blue-500"
-            />
-          </Field>
-          <Field
-            label={t('settings.apiKey')}
-            hint={provider?.hasKey ? t('settings.keyStored') : t('settings.keyHint')}
-          >
-            <input
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder={provider?.hasKey ? t('settings.stored') : t('settings.sk')}
-              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-zinc-100 outline-none focus:border-blue-500"
-            />
-          </Field>
-          <Field label={t('settings.baseUrl')} hint={t('settings.baseUrlHint')}>
-            <input
-              value={baseUrl}
-              onChange={(e) => setBaseUrl(e.target.value)}
-              placeholder={DEFAULT_BASE_URL}
-              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-zinc-100 outline-none focus:border-blue-500"
-            />
-          </Field>
-          <Field label={t('settings.models')} hint={t('settings.modelsHint')}>
-            <input
-              value={models}
-              onChange={(e) => setModels(e.target.value)}
-              placeholder="gpt-4o, gpt-4o-mini"
-              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-100 outline-none focus:border-blue-500"
-            />
-          </Field>
-        </div>
-      </section>
-
-      {/* Provider list — what's actually saved */}
-      <section className="mb-8 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-6">
-        <h2 className="mb-4 text-base font-semibold text-zinc-100">{t('settings.savedProviders')}</h2>
-        {provider ? (
-          <div className="flex items-start justify-between gap-4 rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="font-semibold text-zinc-100">{provider.profile.name}</span>
-                <KeyBadge hasKey={provider.hasKey} />
-              </div>
-              <dl className="mt-2 space-y-1 text-xs text-zinc-400">
-                <div className="flex gap-2">
-                  <dt className="w-16 shrink-0 text-zinc-500">{t('settings.baseUrl')}</dt>
-                  <dd className="truncate font-mono">
-                    {provider.profile.baseUrl ?? t('settings.default')}
-                  </dd>
-                </div>
-                <div className="flex gap-2">
-                  <dt className="w-16 shrink-0 text-zinc-500">{t('settings.models')}</dt>
-                  <dd className="truncate font-mono">
-                    {(provider.profile.models ?? []).join(', ') || t('settings.default')}
-                  </dd>
-                </div>
-              </dl>
+      <div className="grid min-h-0 flex-1 grid-cols-12 gap-5">
+        <aside className="col-span-4 flex min-h-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900/60 p-5">
+          <div className="flex items-center gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-blue-500/10 text-blue-300">
+              <ServerCog className="h-5 w-5" strokeWidth={1.75} />
             </div>
-            {provider.hasKey && (
-              <button
-                onClick={() => void clearKey()}
-                disabled={busy}
-                className="shrink-0 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:border-red-500/50 hover:text-red-400 disabled:opacity-50"
-              >
-                {t('settings.clearKey')}
-              </button>
-            )}
+            <div>
+              <h2 className="text-sm font-semibold text-zinc-100">{t('settings.infrastructure')}</h2>
+              <p className="mt-0.5 text-xs text-zinc-500">{t('settings.infrastructureHint')}</p>
+            </div>
           </div>
-        ) : (
-          <p className="text-sm text-zinc-500">{t('settings.nothingSaved')}</p>
-        )}
-      </section>
 
-      {/* Runtime */}
-      <section className="mb-8 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-6">
-        <h2 className="mb-4 text-base font-semibold text-zinc-100">{t('settings.runtime')}</h2>
-        <Field label={t('settings.dshPath')} hint={t('settings.dshHint')}>
-          <input
-            value={dshPath}
-            onChange={(e) => setDshPath(e.target.value)}
-            placeholder="…/deepseek-harness-master/apps/cli/lib/bin.js"
-            className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-100 outline-none focus:border-blue-500"
-          />
-        </Field>
-        <RuntimePanel />
-      </section>
+          <div className="mt-5 grid grid-cols-2 gap-3">
+            <div className="rounded-lg border border-zinc-800/70 bg-zinc-950/25 p-4">
+              <div className="text-[11px] uppercase tracking-wide text-zinc-500">{t('settings.readiness')}</div>
+              <div className="mt-1 text-2xl font-semibold tabular-nums text-zinc-100">{readyCount}/3</div>
+            </div>
+            <div className="rounded-lg border border-zinc-800/70 bg-zinc-950/25 p-4">
+              <div className="text-[11px] uppercase tracking-wide text-zinc-500">{t('settings.runtime')}</div>
+              <div className="mt-2 truncate font-mono text-xs text-zinc-300">{runtimeLabel}</div>
+            </div>
+          </div>
 
-      {/* Environment */}
-      <section className="mb-8 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-6">
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-base font-semibold text-zinc-100">{t('settings.environment')}</h2>
-          <button
-            onClick={() => void refreshSystem()}
-            className="rounded-lg bg-zinc-800 px-3 py-1 text-xs font-medium text-zinc-300 hover:bg-zinc-700"
-          >
-            {t('settings.recheck')}
-          </button>
-        </div>
-        <ul className="space-y-2 text-sm">
-          <EnvRow name="Node" item={system?.node} />
-          <EnvRow name="Git" item={system?.git} />
-          <EnvRow
-            name="DSH"
-            item={
-              system?.dsh
-                ? { present: true, version: system.dsh.version, note: system.dsh.binPath }
-                : { present: false, version: null, note: system?.dshError ?? t('settings.notChecked') }
-            }
-          />
-        </ul>
-      </section>
+          <div className="mt-5 space-y-2 rounded-lg border border-zinc-800/70 bg-zinc-950/25 p-4">
+            <EnvRow name="Node" item={system?.node} />
+            <EnvRow name="Git" item={system?.git} />
+            <EnvRow
+              name="DSH"
+              item={
+                system?.dsh
+                  ? { present: true, version: system.dsh.version, note: system.dsh.binPath }
+                  : { present: false, version: null, note: system?.dshError ?? t('settings.notChecked') }
+              }
+            />
+          </div>
 
-      <button
-        onClick={() => void save()}
-        disabled={busy}
-        className={`w-full rounded-lg py-3 font-semibold text-white transition-colors disabled:opacity-50 ${
-          flash === 'failed' ? 'bg-red-600' : 'bg-blue-500 hover:bg-blue-400'
-        }`}
-      >
-        {flash === 'saving' ? t('settings.saving') : flash === 'saved' ? t('settings.saved') : t('settings.save')}
-      </button>
-      {flash === 'saved' && (
-        <p className="mt-2 text-center text-xs text-emerald-400">{t('settings.savedMsg')}</p>
-      )}
-      {flash === 'failed' && (
-        <p className="mt-2 text-center text-xs text-red-400">{t('settings.failedMsg')}</p>
-      )}
+          <div className="mt-auto rounded-lg border border-blue-500/20 bg-blue-500/10 p-4">
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-blue-300">
+              <ShieldCheck className="h-3.5 w-3.5" strokeWidth={1.75} />
+              {t('settings.scope')}
+            </div>
+            <p className="mt-3 text-xs leading-5 text-blue-100/80">{t('settings.scopeHint')}</p>
+          </div>
+        </aside>
+
+        <section className="col-span-8 min-h-0 overflow-y-auto pr-1">
+          <div className="grid gap-5">
+            <PreferenceCard icon={Archive} title={t('settings.environmentPackage')} subtitle={t('settings.environmentPackageHint')}>
+              <div className="flex items-center justify-between gap-4 rounded-lg border border-zinc-800/70 bg-zinc-950/35 p-4">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 text-sm font-medium text-zinc-200">
+                    <FileCheck2 className="h-4 w-4 text-blue-300" strokeWidth={1.75} />
+                    {t('settings.environmentPackageTitle')}
+                  </div>
+                  <p className="mt-1 text-xs leading-5 text-zinc-500">{t('settings.environmentPackageCopy')}</p>
+                  {exportedPath && (
+                    <p className="mt-3 truncate font-mono text-[11px] text-emerald-400">
+                      {t('settings.exportedTo', { path: exportedPath })}
+                    </p>
+                  )}
+                </div>
+                <button
+                  onClick={() => void exportCurrentEnvironment()}
+                  disabled={busy}
+                  className="shrink-0 rounded-lg bg-blue-500 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-400 disabled:opacity-40"
+                >
+                  {busy ? t('settings.rtBusy') : t('settings.exportEnvironment')}
+                </button>
+              </div>
+            </PreferenceCard>
+
+            <PreferenceCard icon={Terminal} title={t('settings.runtime')} subtitle={t('settings.runtimeConsoleHint')}>
+              <Field label={t('settings.dshPath')} hint={t('settings.dshHint')}>
+                <input value={dshPath} onChange={(e) => setDshPath(e.target.value)} placeholder=".../deepseek-harness-master/apps/cli/lib/bin.js" className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-100 outline-none focus:border-blue-500" />
+              </Field>
+              <RuntimePanel />
+            </PreferenceCard>
+
+            <PreferenceCard icon={Cpu} title={t('settings.environment')} subtitle={t('settings.environmentHint')}>
+              <button onClick={() => void refreshSystem()} className="flex items-center gap-2 rounded-lg bg-zinc-800 px-3 py-2 text-xs font-medium text-zinc-300 hover:bg-zinc-700">
+                <RotateCw className="h-3.5 w-3.5" strokeWidth={1.75} />
+                {t('settings.recheck')}
+              </button>
+            </PreferenceCard>
+
+            {flash === 'saved' && <p className="text-center text-xs text-emerald-400">{t('settings.savedMsg')}</p>}
+            {flash === 'failed' && <p className="text-center text-xs text-red-400">{t('settings.failedMsg')}</p>}
+          </div>
+        </section>
+      </div>
     </div>
-  )
-}
-
-function KeyBadge({ hasKey }: { hasKey: boolean }) {
-  const t = useT()
-  return (
-    <span
-      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${
-        hasKey ? 'bg-emerald-500/15 text-emerald-400' : 'bg-amber-500/15 text-amber-400'
-      }`}
-    >
-      <span className={`h-1.5 w-1.5 rounded-full ${hasKey ? 'bg-emerald-400' : 'bg-amber-400'}`} />
-      {hasKey ? t('settings.keyStoredBadge') : t('settings.noKeyBadge')}
-    </span>
   )
 }
 

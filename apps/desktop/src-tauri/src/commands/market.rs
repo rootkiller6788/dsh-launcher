@@ -7,12 +7,7 @@ use crate::state::AppState;
 /// Load (or return the cached) registry, fetching from the network on first use
 /// and falling back to the on-disk cache when unreachable.
 async fn ensure_registry(state: &AppState) -> Result<Registry, AppError> {
-    if let Some(r) = state
-        .registry
-        .lock()
-        .ok()
-        .and_then(|g| g.as_ref().cloned())
-    {
+    if let Some(r) = state.registry.lock().ok().and_then(|g| g.as_ref().cloned()) {
         return Ok(r);
     }
     let reg = market::fetch_registry(&state.paths).await?;
@@ -26,12 +21,7 @@ async fn ensure_registry(state: &AppState) -> Result<Registry, AppError> {
 /// from the hosted endpoint on first use and falling back to the bundled
 /// snapshots when a kind is unreachable.
 async fn ensure_content(state: &AppState) -> Result<Registry, AppError> {
-    if let Some(c) = state
-        .content
-        .lock()
-        .ok()
-        .and_then(|g| g.as_ref().cloned())
-    {
+    if let Some(c) = state.content.lock().ok().and_then(|g| g.as_ref().cloned()) {
         return Ok(c);
     }
     let content = market::fetch_content().await?;

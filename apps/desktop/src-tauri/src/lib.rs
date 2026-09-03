@@ -1,6 +1,8 @@
 mod commands;
 mod error;
+mod jobs;
 mod state;
+mod usage_proxy;
 
 use std::path::Path;
 
@@ -26,6 +28,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::system::system_info,
+            commands::system::system_stats,
             commands::instance::list_instances,
             commands::instance::get_instance,
             commands::instance::create_instance,
@@ -36,6 +39,9 @@ pub fn run() {
             commands::market::market_registry,
             commands::market::market_recommend,
             commands::plugins::plugins_list,
+            commands::plugins::library_inventory_summaries,
+            commands::plugins::library_inventory_detail,
+            commands::plugins::library_inventory_refresh,
             commands::plugins::plugin_install,
             commands::plugins::plugin_uninstall,
             commands::plugins::plugin_toggle,
@@ -47,7 +53,12 @@ pub fn run() {
             commands::content::mcp_list,
             commands::content::mcp_install,
             commands::content::mcp_uninstall,
+            commands::content::market_install,
             commands::content::bundle_import,
+            commands::environment::environment_export,
+            commands::environment::environment_preview,
+            commands::environment::environment_import,
+            commands::environment::environment_import_package,
             commands::diagnostics::profile_diagnostics,
             commands::provider::get_provider,
             commands::provider::list_providers,
@@ -63,13 +74,24 @@ pub fn run() {
             commands::runtimes::runtime_repair,
             commands::process::launch,
             commands::process::stop,
+            commands::process::open_dsh,
+            commands::process::open_dsh_external,
+            commands::paths::reveal_instance_workspace,
+            commands::paths::reveal_instance_config,
+            commands::process::current_dsh_url,
             commands::process::process_state,
             commands::process::running_instance,
             commands::history::recent_sessions,
+            commands::usage::usage_recent,
+            commands::usage::usage_summary,
+            commands::usage::usage_record,
+            commands::usage::usage_export,
             commands::settings::get_settings,
             commands::settings::set_settings,
             commands::theme::set_theme,
             commands::theme::dsh_theme,
+            commands::language::set_language,
+            commands::language::dsh_language,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -80,18 +102,42 @@ pub fn run() {
 fn init_logging(log_path: &Path) {
     if let Some(dir) = log_path.parent() {
         let _ = std::fs::create_dir_all(dir);
-    }
-    let file = tracing_appender::rolling::never(log_path.parent().unwrap_or(log_path), "launcher.log");
-    let (writer, guard) = tracing_appender::non_blocking(file);
-    // Keep the writer guard alive for the process lifetime.
-    std::mem::forget(guard);
+        match tracing_appender::rolling::RollingFileAppender::builder()
+            .filename_prefix("launcher")
+            .filename_suffix("log")
+            .build(dir)
+        {
+            Ok(file) => {
+                let (writer, guard) = tracing_appender::non_blocking(file);
+                // Keep the writer guard alive for the process lifetime.
+                std::mem::forget(guard);
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("info,ai_harness_launcher_lib=debug,launcher_core=debug,dsh_adapter=debug,dsh=info")
-    });
+                tracing_subscriber::fmt()
+                    .with_env_filter(logging_filter())
+                    .with_writer(writer)
+                    .with_ansi(false)
+                    .init();
+                return;
+            }
+            Err(e) => {
+                eprintln!(
+                    "launcher file logging disabled: failed to create log file at {} ({e})",
+                    log_path.display()
+                );
+            }
+        }
+    }
+
     tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(writer)
+        .with_env_filter(logging_filter())
         .with_ansi(false)
         .init();
+}
+
+fn logging_filter() -> EnvFilter {
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(
+            "info,ai_harness_launcher_lib=debug,launcher_core=debug,dsh_adapter=debug,dsh=info",
+        )
+    })
 }

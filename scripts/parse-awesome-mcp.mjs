@@ -24,7 +24,18 @@ const BULK = resolve(__dirname, 'data/mcp-bulk.json')
 const CLONES = 'D:/Opencode/dsh-plugin'
 
 const md = readFileSync(resolve(CLONES, 'awesome-mcp-servers/README.md'), 'utf8')
-const lines = md.split('\n').filter((l) => /^-\s*\[/.test(l))
+
+// The README groups servers under `### <a name="..."></a>Category Name` headings
+// (Databases, Developer Tools, Search & Data Extraction, …). Preserve that
+// section so the Market's per-kind category filter has a real, useful axis
+// instead of one flat "mcp" bucket.
+function sectionName(line) {
+  let s = line.slice(3).trim() // strip "###"
+  s = s.replace(/<a[^>]*>.*?<\/a>/g, ' ') // drop the inline <a name=…></a> anchor
+  s = s.replace(/^[^\x20-\x7E]+/, '') // drop the leading emoji/pictograph
+  s = s.trim()
+  return s || 'Other'
+}
 
 function sanitize(s) {
   const out = String(s)
@@ -105,12 +116,19 @@ const curatedPkgs = new Set(curated.map((c) => (c.args || []).join(' ')))
 
 const entries = []
 const seen = new Set()
-for (const line of lines) {
+let section = 'Other'
+for (const line of md.split('\n')) {
+  if (/^###\s/.test(line)) {
+    section = sectionName(line)
+    continue
+  }
+  if (!/^-\s*\[/.test(line)) continue
   const e = parseEntry(line)
   if (!e) continue
   if (seen.has(e.serverName)) continue
   if (e.args && curatedPkgs.has(e.args.join(' '))) continue
   seen.add(e.serverName)
+  e.category = [section]
   entries.push(e)
 }
 

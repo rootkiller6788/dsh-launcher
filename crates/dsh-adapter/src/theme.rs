@@ -55,7 +55,7 @@ pub async fn get_preference(port: u16) -> Result<Option<String>> {
 pub(crate) async fn host_rpc(port: u16, method: &str, payload: Value) -> Result<Value> {
     let body = json!({
         "type": "client-request",
-        "rpcId": format!("launcher-theme-{}", std::process::id()),
+        "rpcId": format!("launcher-{method}-{}", std::process::id()),
         "method": method,
         "payload": payload,
     });

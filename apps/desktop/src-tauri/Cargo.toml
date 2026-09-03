@@ -20,5 +20,9 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
+sysinfo = "0.38"
+sha2 = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 launcher-core = { path = "../../../crates/launcher-core" }
 dsh-adapter = { path = "../../../crates/dsh-adapter" }

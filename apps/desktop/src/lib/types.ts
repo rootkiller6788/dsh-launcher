@@ -1,7 +1,8 @@
 // Types mirroring the Rust command layer (serde camelCase).
 
 export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'degraded' | 'crashed'
-export type Page = 'home' | 'instances' | 'market' | 'activity' | 'diagnostics' | 'settings'
+export type Page = 'overview' | 'instances' | 'market' | 'library' | 'activity' | 'settings'
+export type ShellMode = 'workspace' | 'manage'
 export type LogStream = 'stdout' | 'stderr'
 export type Lang = 'en' | 'zh'
 /** Theme preference, mirroring DSH's `ui-theme.preference`. */
@@ -28,7 +29,54 @@ export interface InstanceManifest {
   plugins: string[]
   skills: string[]
   mcp: string[]
+  skins: string[]
   workspace: string
+}
+
+export interface LibraryInventorySummary {
+  instanceId: string
+  plugins: number
+  skills: number
+  mcp: number
+  skins: number
+  updatedAt: number
+}
+
+export type LibraryItemSource =
+  | 'dshNative'
+  | 'marketInstalled'
+  | 'localFile'
+  | 'importedEnvironment'
+  | 'unknownDetected'
+
+export type LibraryStateSource = 'dshInventory' | 'dshWorkspaceFiles' | 'launcherSnapshot'
+
+export interface MarketInstallMetadata {
+  key: string
+  kind: ContentKind
+  name: string
+  owner: string
+  installSpec: string
+  installedAt: number
+}
+
+export interface LibraryInventoryItem {
+  id: string
+  kind: ContentKind
+  title: string
+  packageName?: string | null
+  enabled?: boolean | null
+  toggleable: boolean
+  source: LibraryItemSource
+  stateSource: LibraryStateSource
+  detail?: string | null
+  market?: MarketInstallMetadata | null
+}
+
+export interface LibraryInventoryDetail {
+  instanceId: string
+  updatedAt: number
+  items: LibraryInventoryItem[]
 }
 
 export interface ProviderProfile {
@@ -72,6 +120,16 @@ export interface SystemInfo {
   git: EnvItem
   dsh: RuntimeInfo | null
   dshError: string | null
+}
+
+/** One sample from the launcher's own resource sampler (Overview sparklines). */
+export interface SystemStats {
+  /** Global CPU usage, percent (since the previous poll). */
+  cpu: number
+  memoryUsed: number
+  memoryTotal: number
+  diskUsed: number
+  diskTotal: number
 }
 
 export interface AppSettings {
@@ -128,6 +186,55 @@ export interface LaunchSession {
   endedAt: number | null
   exitCode: number | null
   status: 'running' | 'stopped' | 'crashed' | string
+}
+
+export interface UsageRecord {
+  id: number
+  instanceId: string
+  timestamp: number
+  model: string
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  cost: number
+  apiKeyAlias: string
+  requestId?: string | null
+}
+
+export interface UsageBucket {
+  timestamp: number
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  requests: number
+  cost: number
+}
+
+export interface UsageModelTotal {
+  model: string
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  requests: number
+  cost: number
+}
+
+export interface UsageSummary {
+  records: UsageRecord[]
+  totalTokens: number
+  inputTokens: number
+  outputTokens: number
+  requests: number
+  totalCost: number
+  byHour: UsageBucket[]
+  byDay: UsageBucket[]
+  byModel: UsageModelTotal[]
+}
+
+export interface UsageExportResult {
+  path: string
+  format: string
+  records: number
 }
 
 export type ContentKind = 'plugin' | 'theme' | 'skill' | 'mcp' | 'bundle'
@@ -199,6 +306,30 @@ export interface BundleSummary {
   results: BundleItemResult[]
 }
 
+export interface EnvironmentExportResult {
+  path: string
+  checksum: string
+  itemCount: number
+}
+
+export interface EnvironmentPreviewResult {
+  name: string
+  description: string
+  checksum: string
+  itemCount: number
+  plugins: number
+  skins: number
+  skills: number
+  mcps: number
+  exportedAt: number
+}
+
+export interface EnvironmentImportResult {
+  instance: InstanceManifest
+  checksum: string
+  summary: BundleSummary
+}
+
 export interface PlanItem {
   name: string
   kind: ContentKind
@@ -221,6 +352,11 @@ export interface RecommendResult {
 export interface InstalledPlugin {
   name: string
   enabled: boolean
+  toggleable: boolean
+  kind: 'plugin' | 'theme' | 'client'
+  source: 'profile' | 'inventory'
+  entryId?: string | null
+  fiberPhase?: string | null
 }
 
 export interface PluginUpdate {

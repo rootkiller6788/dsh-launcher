@@ -29,6 +29,118 @@ function toDescription(desc) {
   return CJK.test(d) ? { zh: d } : { en: d }
 }
 
+// Extract a human category name from a `### …` section heading. Skill/MCP
+// READMEs group entries under headings like `### Python Skills` or
+// `### <a name="databases"></a>Databases`; this keeps that grouping so the
+// Market's per-kind category filter has a real axis.
+function sectionName(line) {
+  let s = line.replace(/^#+\s*/, '') // strip leading #'s
+  s = s.replace(/<a[^>]*>.*?<\/a>/g, ' ') // drop inline <a name=…></a> anchor
+  s = s.replace(/^[^\x20-\x7E]+/, '') // drop leading emoji/pictograph
+  s = s.trim()
+  return s || ''
+}
+
+// Category label → 中文. Functional domains and language groups get a real
+// translation; vendor names stay in latin. Anything not covered falls back to
+// a rule or the english name.
+const CATEGORY_ZH = {
+  // skill groups
+  '.NET Skills': '.NET 技能',
+  'Core Skills': '核心技能',
+  'Java Skills': 'Java 技能',
+  'Python Skills': 'Python 技能',
+  'Rust Skills': 'Rust 技能',
+  'TypeScript Skills': 'TypeScript 技能',
+  'Context Engineering': '上下文工程',
+  'Development and Testing': '开发与测试',
+  Advertising: '广告',
+  Marketing: '营销',
+  'Product Manager': '产品经理',
+  'Productivity and Collaboration': '效率与协作',
+  'Specialized Domains': '专业领域',
+  'Vector Databases': '向量数据库',
+  'n8n Automation': 'n8n 自动化',
+  'video-search-and-summarization': '视频搜索与总结',
+  'Official Claude Skills': 'Claude 官方 Skills',
+  // mcp functional domains
+  Accessibility: '无障碍',
+  'Aerospace & Astrodynamics': '航空航天',
+  Aggregators: '聚合器',
+  'Agreements & Coordination': '协议与协作',
+  'Architecture & Design': '架构与设计',
+  'Art & Culture': '艺术与文化',
+  'Biology, Medicine and Bioinformatics': '生物医药',
+  'Browser Automation': '浏览器自动化',
+  'Cloud Platforms': '云平台',
+  'Code Execution': '代码执行',
+  'Coding Agents': '编码代理',
+  'Command Line': '命令行',
+  Communication: '通信',
+  'Conversational AI': '对话式 AI',
+  Cryptography: '密码学',
+  Curated: '精选',
+  'Customer Data Platforms': '客户数据平台',
+  'Data Platforms': '数据平台',
+  'Data Science Tools': '数据科学工具',
+  'Data Visualization': '数据可视化',
+  Databases: '数据库',
+  Delivery: '交付',
+  'Developer Tools': '开发工具',
+  'E-Commerce': '电商',
+  Education: '教育',
+  'Embedded System': '嵌入式系统',
+  'Environment & Nature': '环境与自然',
+  'File Systems': '文件系统',
+  'Finance & Fintech': '金融科技',
+  Gaming: '游戏',
+  'Health & Wellness': '健康',
+  'Home Automation': '智能家居',
+  'Industrial & IoT': '工业物联网',
+  'Knowledge & Memory': '知识记忆',
+  Legal: '法律',
+  'Location Services': '位置服务',
+  Monitoring: '监控',
+  'Multimedia Process': '多媒体处理',
+  'OS Automation': '系统自动化',
+  'Other Tools and Integrations': '其他工具与集成',
+  Podcasts: '播客',
+  'Product Management': '产品管理',
+  'Real Estate': '房地产',
+  Research: '研究',
+  'Search & Data Extraction': '搜索与数据提取',
+  Security: '安全',
+  'Social Media': '社交媒体',
+  'Speech-to-Text': '语音转文字',
+  'Spirituality & Esoterica': '灵性',
+  Sports: '运动',
+  'Support & Service Management': '支持与服务管理',
+  'Text-to-Speech': '文字转语音',
+  'Translation Services': '翻译服务',
+  'Travel & Transportation': '出行交通',
+  'Version Control': '版本控制',
+  'Workplace & Productivity': '办公与效率',
+  'end to end RAG platforms': '端到端 RAG 平台',
+}
+
+// Localize a category id. Vendor groups ("Skills by X") keep the vendor name
+// but get a 团队 suffix; "X Skills by Y" flips to "Y 的 X".
+function zhLabel(en) {
+  if (CATEGORY_ZH[en]) return CATEGORY_ZH[en]
+  let m = en.match(/^Skills by (.+)$/)
+  if (m) {
+    const v = m[1]
+      .replace(/\bTeam\b/gi, '')
+      .replace(/[—-]/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim()
+    return v ? `${v} 团队` : en
+  }
+  m = en.match(/^(.+?) Skills by (.+)$/)
+  if (m) return `${m[2]} 的 ${zhLabel(m[1])}`
+  return en
+}
+
 function genThemes() {
   const raw = JSON.parse(
     readFileSync(resolve(CLONES, 'awesome-dsh-themes/data/themes.json'), 'utf8'),
@@ -59,10 +171,21 @@ function genThemes() {
         gist: t.gist ?? null,
       }
     })
+  // Skins ship a handful of real `category` values; label them all instead of
+  // leaving three of the four to fall back to a bare english token.
+  const SKIN_LABEL = {
+    skin: { en: 'Skins', zh: '皮肤' },
+    tokens: { en: 'Tokens', zh: '配色' },
+    fun: { en: 'Fun', zh: '趣味' },
+    companion: { en: 'Companion', zh: '陪伴' },
+  }
+  const catSet = new Set(skins.map((t) => t.category[0]))
+  const categories = {}
+  for (const c of catSet) categories[c] = SKIN_LABEL[c] || { en: c, zh: c }
   const out = {
     updated: raw.updated || '',
     count: skins.length,
-    categories: { skin: { en: 'Skins', zh: '皮肤' } },
+    categories,
     plugins: skins,
   }
   mkdirSync(dataDir, { recursive: true })
@@ -137,7 +260,35 @@ function genSkills() {
   const md = readFileSync(resolve(CLONES, 'awesome-agent-skills/README.md'), 'utf8')
   const seen = new Set()
   const skills = []
+  const cats = new Set()
+  let section = 'General'
+  // Vendor blocks are `<details><summary><h3>Skills by X</h3></summary>…</details>`.
+  // Their nested `### Product` subheadings (NVIDIA's 17 products, Microsoft's
+  // sub-docs) are sub-groupings, not catalog categories — fold them under the
+  // block title instead of promoting each to a top-level category.
+  let inDetails = false
   for (const raw of md.split('\n')) {
+    if (/^<\/details>/.test(raw)) {
+      inDetails = false
+      continue
+    }
+    if (/^<details/.test(raw)) {
+      inDetails = true
+      continue
+    }
+    // Vendor groups use an HTML heading: `<summary><h3 …>Title</h3></summary>`.
+    const h3 = raw.match(/<h3[^>]*>([^<]+)<\/h3>/)
+    if (h3) {
+      section = h3[1].trim()
+      continue
+    }
+    if (/^###\s/.test(raw)) {
+      if (!inDetails) {
+        const name = sectionName(raw)
+        if (name) section = name
+      }
+      continue
+    }
     const m = raw.match(/^\s*-\s*\*\*\[([^\]]+)\]\(([^)]+)\)\*\*([\s\S]*)$/)
     if (!m) continue
     const [, , url, rest] = m
@@ -146,13 +297,14 @@ function genSkills() {
     const id = `${resolved.owner}/${resolved.name}`
     if (seen.has(id)) continue
     seen.add(id)
+    cats.add(section)
     const dashIdx = rest.search(/[-–—]/)
     const desc = (dashIdx === -1 ? rest : rest.slice(dashIdx + 1)).trim().slice(0, 200)
     skills.push({
       name: resolved.name,
       owner: resolved.owner,
       url: resolved.repo,
-      category: ['skill'],
+      category: [section],
       description: toDescription(desc),
       npm: null,
       tarball: null,
@@ -167,15 +319,17 @@ function genSkills() {
       fetch: resolved.fetch,
     })
   }
+  const categories = {}
+  for (const c of [...cats].sort()) categories[c] = { en: c, zh: zhLabel(c) }
   const out = {
     updated: '',
     count: skills.length,
-    categories: { skill: { en: 'Skills', zh: 'Skill' } },
+    categories,
     plugins: skills,
   }
   mkdirSync(dataDir, { recursive: true })
   writeFileSync(resolve(dataDir, 'content-skills.json'), JSON.stringify(out, null, 2))
-  console.log(`content-skills.json: ${skills.length} skills`)
+  console.log(`content-skills.json: ${skills.length} skills in ${Object.keys(categories).length} categories`)
 }
 
 // MCP servers ship from two lists: a hand-maintained curated set (verified npm
@@ -191,39 +345,49 @@ function genMcps() {
   const bulk = JSON.parse(
     readFileSync(resolve(__dirname, 'data/mcp-bulk.json'), 'utf8'),
   )
-  const mcps = [...overrides, ...bulk].map((o) => ({
-    name: o.name,
-    owner: o.owner,
-    url: o.url,
-    category: ['mcp'],
-    description: toDescription(o.description),
-    npm: null,
-    tarball: null,
-    screenshots: [],
-    stars: null,
-    downloads: null,
-    install: '',
-    added: '',
-    deprecated: null,
-    replacement: null,
-    kind: 'mcp',
-    serverName: o.serverName ?? null,
-    transport: o.transport ?? null,
-    command: o.command ?? null,
-    args: o.args ?? null,
-    env: o.env ?? null,
-    mcpUrl: o.mcpUrl ?? null,
-    headers: o.headers ?? null,
-  }))
+  const cats = new Set()
+  // Curated overrides are hand-picked; bulk entries carry their README section
+  // (assigned by parse-awesome-mcp.mjs). Anything else falls back to 'mcp'.
+  const curated = overrides.map((o) => ({ ...o, category: ['Curated'] }))
+  const mcps = [...curated, ...bulk].map((o) => {
+    const cat = o.category && o.category.length ? o.category : ['mcp']
+    cat.forEach((c) => cats.add(c))
+    return {
+      name: o.name,
+      owner: o.owner,
+      url: o.url,
+      category: cat,
+      description: toDescription(o.description),
+      npm: null,
+      tarball: null,
+      screenshots: [],
+      stars: null,
+      downloads: null,
+      install: '',
+      added: '',
+      deprecated: null,
+      replacement: null,
+      kind: 'mcp',
+      serverName: o.serverName ?? null,
+      transport: o.transport ?? null,
+      command: o.command ?? null,
+      args: o.args ?? null,
+      env: o.env ?? null,
+      mcpUrl: o.mcpUrl ?? null,
+      headers: o.headers ?? null,
+    }
+  })
+  const categories = {}
+  for (const c of [...cats].sort()) categories[c] = { en: c, zh: zhLabel(c) }
   const out = {
     updated: '',
     count: mcps.length,
-    categories: { mcp: { en: 'MCP Servers', zh: 'MCP' } },
+    categories,
     plugins: mcps,
   }
   mkdirSync(dataDir, { recursive: true })
   writeFileSync(resolve(dataDir, 'content-mcps.json'), JSON.stringify(out, null, 2))
-  console.log(`content-mcps.json: ${mcps.length} MCP servers`)
+  console.log(`content-mcps.json: ${mcps.length} MCP servers in ${Object.keys(categories).length} categories`)
 }
 
 // Bundles are curated cross-kind combinations. Each entry is a composite that

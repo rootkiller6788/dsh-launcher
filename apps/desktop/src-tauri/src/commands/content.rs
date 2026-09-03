@@ -5,9 +5,14 @@ use launcher_core::{
 };
 use tauri::{AppHandle, State};
 
-use crate::commands::plugins::ensure_not_running;
+use crate::commands::plugins::{
+    ensure_not_running, reconcile_library_inventory_after_market_change,
+    record_install_metadata_with_source, record_market_install_metadata,
+    resolve_plugin_install_target, LibraryItemSource,
+};
 use crate::commands::process::{emit_log, make_sink};
 use crate::error::AppError;
+use crate::jobs::{run_instance_job, HeavyJobKind};
 use crate::state::AppState;
 
 /// Installed skills for an instance (from its manifest — skills are plain files
@@ -26,14 +31,20 @@ pub async fn skill_install(
     id: String,
     entry: RegistryPlugin,
 ) -> Result<(), AppError> {
-    ensure_not_running(&state, &id).await?;
-    let instance = InstanceManifest::get(&state.paths, &id)?;
-    let skill = content_adapter::skill_id(&entry);
-    emit_log(&app, &format!("{id} · installing skill {skill}…"));
-    content_adapter::install_skill(&instance, &entry).await?;
-    InstanceManifest::add_skill(&state.paths, &id, &skill)?;
-    emit_log(&app, &format!("{id} · installed skill {skill}"));
-    Ok(())
+    let job_id = id.clone();
+    run_instance_job(&state, &app, &job_id, HeavyJobKind::Install, || async {
+        ensure_not_running(&state, &id).await?;
+        let instance = InstanceManifest::get(&state.paths, &id)?;
+        let skill = content_adapter::skill_id(&entry);
+        emit_log(&app, &format!("{id} · installing skill {skill}…"));
+        content_adapter::install_skill(&instance, &entry).await?;
+        InstanceManifest::add_skill(&state.paths, &id, &skill)?;
+        record_market_install_metadata(&state, &id, &entry)?;
+        emit_log(&app, &format!("{id} · installed skill {skill}"));
+        reconcile_library_inventory_after_market_change(&state, &app, &id, "skill install").await?;
+        Ok(())
+    })
+    .await
 }
 
 /// Uninstall a skill: remove its directory and drop it from the manifest.
@@ -44,13 +55,19 @@ pub async fn skill_uninstall(
     id: String,
     skill: String,
 ) -> Result<(), AppError> {
-    ensure_not_running(&state, &id).await?;
-    let instance = InstanceManifest::get(&state.paths, &id)?;
-    emit_log(&app, &format!("{id} · removing skill {skill}…"));
-    content_adapter::uninstall_skill(&instance, &skill)?;
-    InstanceManifest::remove_skill(&state.paths, &id, &skill)?;
-    emit_log(&app, &format!("{id} · removed skill {skill}"));
-    Ok(())
+    let job_id = id.clone();
+    run_instance_job(&state, &app, &job_id, HeavyJobKind::Uninstall, || async {
+        ensure_not_running(&state, &id).await?;
+        let instance = InstanceManifest::get(&state.paths, &id)?;
+        emit_log(&app, &format!("{id} · removing skill {skill}…"));
+        content_adapter::uninstall_skill(&instance, &skill)?;
+        InstanceManifest::remove_skill(&state.paths, &id, &skill)?;
+        emit_log(&app, &format!("{id} · removed skill {skill}"));
+        reconcile_library_inventory_after_market_change(&state, &app, &id, "skill uninstall")
+            .await?;
+        Ok(())
+    })
+    .await
 }
 
 /// Installed MCP servers for an instance (from its manifest — MCP is a cordis
@@ -70,14 +87,20 @@ pub async fn mcp_install(
     id: String,
     entry: RegistryPlugin,
 ) -> Result<(), AppError> {
-    ensure_not_running(&state, &id).await?;
-    let instance = InstanceManifest::get(&state.paths, &id)?;
-    let mcp = content_adapter::mcp_id(&entry);
-    emit_log(&app, &format!("{id} · installing MCP {mcp}…"));
-    content_adapter::install_mcp(&instance, &entry)?;
-    InstanceManifest::add_mcp(&state.paths, &id, &mcp)?;
-    emit_log(&app, &format!("{id} · installed MCP {mcp}"));
-    Ok(())
+    let job_id = id.clone();
+    run_instance_job(&state, &app, &job_id, HeavyJobKind::Install, || async {
+        ensure_not_running(&state, &id).await?;
+        let instance = InstanceManifest::get(&state.paths, &id)?;
+        let mcp = content_adapter::mcp_id(&entry);
+        emit_log(&app, &format!("{id} · installing MCP {mcp}…"));
+        content_adapter::install_mcp(&instance, &entry)?;
+        InstanceManifest::add_mcp(&state.paths, &id, &mcp)?;
+        record_market_install_metadata(&state, &id, &entry)?;
+        emit_log(&app, &format!("{id} · installed MCP {mcp}"));
+        reconcile_library_inventory_after_market_change(&state, &app, &id, "MCP install").await?;
+        Ok(())
+    })
+    .await
 }
 
 /// Uninstall an MCP server: remove its insert row and drop it from the manifest.
@@ -88,14 +111,19 @@ pub async fn mcp_uninstall(
     id: String,
     entry: RegistryPlugin,
 ) -> Result<(), AppError> {
-    ensure_not_running(&state, &id).await?;
-    let instance = InstanceManifest::get(&state.paths, &id)?;
-    let mcp = content_adapter::mcp_id(&entry);
-    emit_log(&app, &format!("{id} · removing MCP {mcp}…"));
-    content_adapter::uninstall_mcp(&instance, &entry)?;
-    InstanceManifest::remove_mcp(&state.paths, &id, &mcp)?;
-    emit_log(&app, &format!("{id} · removed MCP {mcp}"));
-    Ok(())
+    let job_id = id.clone();
+    run_instance_job(&state, &app, &job_id, HeavyJobKind::Uninstall, || async {
+        ensure_not_running(&state, &id).await?;
+        let instance = InstanceManifest::get(&state.paths, &id)?;
+        let mcp = content_adapter::mcp_id(&entry);
+        emit_log(&app, &format!("{id} · removing MCP {mcp}…"));
+        content_adapter::uninstall_mcp(&instance, &entry)?;
+        InstanceManifest::remove_mcp(&state.paths, &id, &mcp)?;
+        emit_log(&app, &format!("{id} · removed MCP {mcp}"));
+        reconcile_library_inventory_after_market_change(&state, &app, &id, "MCP uninstall").await?;
+        Ok(())
+    })
+    .await
 }
 
 fn kind_label(kind: ContentKind) -> &'static str {
@@ -111,13 +139,14 @@ fn kind_label(kind: ContentKind) -> &'static str {
 /// Install one bundle item via its kind's installer. Plugin/skin items go
 /// through `dsh plugin add`; skill and MCP items reuse the content installers
 /// and then update the manifest index.
-async fn install_bundle_item(
+pub(crate) async fn install_bundle_item(
     state: &AppState,
     app: &AppHandle,
     id: &str,
     instance: &InstanceManifest,
     settings: &AppSettings,
     item: &RegistryPlugin,
+    source: LibraryItemSource,
 ) -> Result<(), AppError> {
     let key = item.key();
     let label = kind_label(item.kind);
@@ -128,23 +157,38 @@ async fn install_bundle_item(
                 return Err(AppError::msg("no install spec (npm/tarball/url)"));
             }
             emit_log(app, &format!("{id} · installing {label} {spec}…"));
+            let install_target =
+                resolve_plugin_install_target(state, app, id, &spec, Some(item)).await;
             let code = state
                 .adapter
-                .run_plugin_command(settings, instance, &["add".to_string(), spec], make_sink(app.clone()))
+                .run_plugin_command(
+                    settings,
+                    instance,
+                    &["add".to_string(), install_target],
+                    make_sink(app.clone()),
+                )
                 .await?;
             if code != 0 {
-                return Err(AppError::msg(format!("dsh plugin add exited with code {code}")));
+                return Err(AppError::msg(format!(
+                    "dsh plugin add exited with code {code}"
+                )));
             }
+            if item.kind == ContentKind::Theme {
+                InstanceManifest::add_skin(&state.paths, id, &key)?;
+            }
+            record_install_metadata_with_source(state, id, item, source)?;
         }
         ContentKind::Skill => {
             emit_log(app, &format!("{id} · installing skill {key}…"));
             content_adapter::install_skill(instance, item).await?;
             InstanceManifest::add_skill(&state.paths, id, &key)?;
+            record_install_metadata_with_source(state, id, item, source)?;
         }
         ContentKind::Mcp => {
             emit_log(app, &format!("{id} · installing MCP {key}…"));
             content_adapter::install_mcp(instance, item)?;
             InstanceManifest::add_mcp(&state.paths, id, &key)?;
+            record_install_metadata_with_source(state, id, item, source)?;
         }
         ContentKind::Bundle => {
             return Err(AppError::msg("nested bundles are not supported"));
@@ -162,57 +206,114 @@ pub async fn bundle_import(
     id: String,
     manifest: BundleManifest,
 ) -> Result<BundleSummary, AppError> {
-    ensure_not_running(&state, &id).await?;
-    let instance = InstanceManifest::get(&state.paths, &id)?;
-    let settings = state
-        .settings
-        .lock()
-        .map_err(|_| AppError::msg("settings lock poisoned"))?
-        .clone();
+    let job_id = id.clone();
+    run_instance_job(&state, &app, &job_id, HeavyJobKind::Install, || async {
+        ensure_not_running(&state, &id).await?;
+        let instance = InstanceManifest::get(&state.paths, &id)?;
+        let settings = state
+            .settings
+            .lock()
+            .map_err(|_| AppError::msg("settings lock poisoned"))?
+            .clone();
 
-    emit_log(
-        &app,
-        &format!(
-            "{id} · importing bundle \"{}\" ({} items)…",
-            manifest.name,
-            manifest.items.len()
-        ),
-    );
+        emit_log(
+            &app,
+            &format!(
+                "{id} · importing bundle \"{}\" ({} items)…",
+                manifest.name,
+                manifest.items.len()
+            ),
+        );
 
-    let mut summary = BundleSummary::default();
-    for item in &manifest.items {
-        let key = item.key();
-        let label = kind_label(item.kind).to_string();
-        match install_bundle_item(&state, &app, &id, &instance, &settings, item).await {
-            Ok(()) => {
-                summary.installed += 1;
-                emit_log(&app, &format!("{id} · installed {label} {key}"));
-                summary.results.push(BundleItemResult {
-                    name: key,
-                    kind: label,
-                    ok: true,
-                    error: None,
-                });
-            }
-            Err(e) => {
-                summary.failed += 1;
-                emit_log(&app, &format!("{id} · FAILED {label} {key}: {e}"));
-                summary.results.push(BundleItemResult {
-                    name: key,
-                    kind: label,
-                    ok: false,
-                    error: Some(e.to_string()),
-                });
+        let mut summary = BundleSummary::default();
+        for item in &manifest.items {
+            let key = item.key();
+            let label = kind_label(item.kind).to_string();
+            match install_bundle_item(
+                &state,
+                &app,
+                &id,
+                &instance,
+                &settings,
+                item,
+                LibraryItemSource::MarketInstalled,
+            )
+            .await
+            {
+                Ok(()) => {
+                    summary.installed += 1;
+                    emit_log(&app, &format!("{id} · installed {label} {key}"));
+                    summary.results.push(BundleItemResult {
+                        name: key,
+                        kind: label,
+                        ok: true,
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    summary.failed += 1;
+                    emit_log(&app, &format!("{id} · FAILED {label} {key}: {e}"));
+                    summary.results.push(BundleItemResult {
+                        name: key,
+                        kind: label,
+                        ok: false,
+                        error: Some(e.to_string()),
+                    });
+                }
             }
         }
-    }
 
-    emit_log(
-        &app,
-        &format!(
-            "{id} · bundle \"{}\" done: {} installed, {} failed",
-            manifest.name, summary.installed, summary.failed
-        ),
-    );
-    Ok(summary)
+        emit_log(
+            &app,
+            &format!(
+                "{id} · bundle \"{}\" done: {} installed, {} failed",
+                manifest.name, summary.installed, summary.failed
+            ),
+        );
+        reconcile_library_inventory_after_market_change(&state, &app, &id, "bundle import").await?;
+        Ok(summary)
+    })
+    .await
+}
+
+/// Unified Market install entrypoint. The Market calls this for every leaf item
+/// so install ordering is consistent: write through DSH or a DSH-recognized
+/// workspace location first, then record Launcher metadata and refresh the
+/// Library snapshot.
+#[tauri::command]
+pub async fn market_install(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    id: String,
+    entry: RegistryPlugin,
+) -> Result<(), AppError> {
+    let job_id = id.clone();
+    run_instance_job(&state, &app, &job_id, HeavyJobKind::Install, || async {
+        ensure_not_running(&state, &id).await?;
+        let instance = InstanceManifest::get(&state.paths, &id)?;
+        let settings = state
+            .settings
+            .lock()
+            .map_err(|_| AppError::msg("settings lock poisoned"))?
+            .clone();
+
+        let label = kind_label(entry.kind);
+        let key = entry.key();
+        emit_log(&app, &format!("{id} · Market installing {label} {key}…"));
+        install_bundle_item(
+            &state,
+            &app,
+            &id,
+            &instance,
+            &settings,
+            &entry,
+            LibraryItemSource::MarketInstalled,
+        )
+        .await?;
+        emit_log(&app, &format!("{id} · Market installed {label} {key}"));
+        reconcile_library_inventory_after_market_change(&state, &app, &id, "market install")
+            .await?;
+        Ok(())
+    })
+    .await
 }

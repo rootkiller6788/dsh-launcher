@@ -54,7 +54,11 @@ pub fn rename_instance(
     state: State<'_, AppState>,
     request: IdNameRequest,
 ) -> Result<InstanceManifest, AppError> {
-    Ok(InstanceManifest::rename(&state.paths, &request.id, &request.name)?)
+    Ok(InstanceManifest::rename(
+        &state.paths,
+        &request.id,
+        &request.name,
+    )?)
 }
 
 #[tauri::command]
@@ -62,7 +66,11 @@ pub fn clone_instance(
     state: State<'_, AppState>,
     request: IdNameRequest,
 ) -> Result<InstanceManifest, AppError> {
-    Ok(InstanceManifest::clone(&state.paths, &request.id, &request.name)?)
+    Ok(InstanceManifest::clone(
+        &state.paths,
+        &request.id,
+        &request.name,
+    )?)
 }
 
 #[tauri::command]
@@ -95,7 +103,10 @@ pub async fn delete_instance(state: State<'_, AppState>, id: String) -> Result<(
 }
 
 #[tauri::command]
-pub fn switch_instance(state: State<'_, AppState>, id: String) -> Result<InstanceManifest, AppError> {
+pub fn switch_instance(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<InstanceManifest, AppError> {
     // Verify it exists first.
     let manifest = InstanceManifest::get(&state.paths, &id)?;
     let mut guard = state
@@ -107,7 +118,10 @@ pub fn switch_instance(state: State<'_, AppState>, id: String) -> Result<Instanc
     Ok(manifest)
 }
 
-pub(crate) fn active_instance(state: &AppState, explicit: Option<&str>) -> Result<InstanceManifest, AppError> {
+pub(crate) fn active_instance(
+    state: &AppState,
+    explicit: Option<&str>,
+) -> Result<InstanceManifest, AppError> {
     if let Some(id) = explicit {
         return Ok(InstanceManifest::get(&state.paths, id)?);
     }

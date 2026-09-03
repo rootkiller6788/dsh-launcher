@@ -13,12 +13,13 @@
     "windows": [
       {
         "title": "DeepSeek-Harness-Launcher",
-        "width": 1100,
-        "height": 740,
-        "minWidth": 820,
-        "minHeight": 600,
+        "width": 1280,
+        "height": 810,
+        "minWidth": 900,
+        "minHeight": 640,
         "resizable": true,
-        "center": true
+        "center": true,
+        "decorations": false
       }
     ],
     "security": {

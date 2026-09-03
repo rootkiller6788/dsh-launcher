@@ -6,8 +6,8 @@
 //! `llm-deepseek` and are resolved *per request* (a change reaches the very
 //! next request without restart). `baseURL` and the key already flow through
 //! the `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` env vars the launcher sets; the
-//! one thing env can't carry is the model catalog, so the launcher writes it
-//! here once the harness is up.
+//! The launcher also stamps `baseURL` after boot when it needs to route traffic
+//! through the local usage proxy.
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -25,6 +25,17 @@ pub async fn set_models(port: u16, models: &[String]) -> Result<()> {
     let payload = json!({
         "ns": "llm-deepseek",
         "ops": [{ "op": "set", "path": ["models"], "value": catalog }],
+    });
+    let value = host_rpc(port, "settings.mutate", payload).await?;
+    ensure_ok(&value, "settings.mutate")
+}
+
+/// Set `llm-deepseek.baseURL` so DSH resolves the next request through the
+/// launcher's local usage proxy instead of a persisted provider URL.
+pub async fn set_base_url(port: u16, base_url: &str) -> Result<()> {
+    let payload = json!({
+        "ns": "llm-deepseek",
+        "ops": [{ "op": "set", "path": ["baseURL"], "value": base_url }],
     });
     let value = host_rpc(port, "settings.mutate", payload).await?;
     ensure_ok(&value, "settings.mutate")

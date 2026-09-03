@@ -5,6 +5,18 @@
     "skin": {
       "en": "Skins",
       "zh": "皮肤"
+    },
+    "tokens": {
+      "en": "Tokens",
+      "zh": "配色"
+    },
+    "fun": {
+      "en": "Fun",
+      "zh": "趣味"
+    },
+    "companion": {
+      "en": "Companion",
+      "zh": "陪伴"
     }
   },
   "plugins": [
