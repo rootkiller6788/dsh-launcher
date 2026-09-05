@@ -34,50 +34,50 @@
 
 ### DSH-first 阶段 8 — Install Center 后端持久化
 
-- [ ] **后端 Job Store**：把 install job 从纯前端 Zustand 状态下沉到 Rust/SQLite；应用重载、窗口刷新后仍能恢复任务记录。
-- [ ] **真实下载进度事件**：下载、git shallow clone、pnpm/dsh install、inventory sync、metadata merge 都从后端发结构化 progress event，而不是前端估算阶段。
-- [ ] **任务历史与错误详情**：记录开始/结束时间、exit code、stderr 摘要、失败原因、可重试参数。
-- [ ] **Retry 从后端恢复**：Retry 使用保存的 install plan，不依赖当前页面仍保留原始 `RegistryPlugin` 对象。
-- [ ] **取消/排队可见性**：Install Center 能显示 waiting / running / failed / done，并支持取消尚未开始的 queued job。
+- [x] **后端 Job Store**：把 install job 从纯前端 Zustand 状态下沉到 Rust/SQLite；应用重载、窗口刷新后仍能恢复任务记录。
+- [x] **真实下载进度事件**：下载、git shallow clone、pnpm/dsh install、inventory sync、metadata merge 都从后端发结构化 progress event，而不是前端估算阶段。
+- [x] **任务历史与错误详情**：记录开始/结束时间、exit code、stderr 摘要、失败原因、可重试参数。
+- [x] **Retry 从后端恢复**：Retry 使用保存的 install plan，不依赖当前页面仍保留原始 `RegistryPlugin` 对象。
+- [x] **取消/排队可见性**：Install Center 能显示 waiting / running / failed / done，并支持取消尚未开始的 queued job。
 
 ### DSH-first 阶段 9 — Skills / MCP / Skins 真实可见性闭环
 
-- [ ] **Skills DSH discovery check**：运行中实例能区分“文件已下载”与“DSH/agent 实际已发现并可用”。
-- [ ] **MCP DSH config validation**：校验 MCP patch/config 是否被 DSH 认可，缺 token / command / transport 时给出结构化提示。
-- [ ] **Skins activation model**：皮肤安装后要能明确 installed / active / disabled，而不是只靠分类归档。
-- [ ] **Market 分类来源锁定**：从哪个 Market tab 安装，就在 Library 中稳定归到对应分类；DSH Inventory 只提供真实运行状态。
-- [ ] **Library row explainability**：每一项显示“为什么它在这里”：DSH inventory、manifest、market metadata、local file、import source。
+- [x] **Skills DSH discovery check**：运行中实例能区分“文件已下载”与“DSH/agent 实际已发现并可用”。
+- [x] **MCP DSH config validation**：校验 MCP patch/config 是否被 DSH 认可，缺 token / command / transport 时给出结构化提示。
+- [x] **Skins activation model**：皮肤安装后要能明确 installed / active / disabled，而不是只靠分类归档。
+- [x] **Market 分类来源锁定**：从哪个 Market tab 安装，就在 Library 中稳定归到对应分类；DSH Inventory 只提供真实运行状态。
+- [x] **Library row explainability**：每一项显示“为什么它在这里”：DSH inventory、manifest、market metadata、local file、import source。
 
 ### DSH-first 阶段 10 — Usage 真实账本收尾
 
-- [ ] **流式 / 非 JSON 响应覆盖**：继续硬化 usage proxy，对 SSE、chunked、provider 变体 usage 字段做兼容测试。
-- [ ] **成本模型表**：按 provider/model 维护价格表，无法定价时明确显示 unknown，不混用估算。
-- [ ] **统计维度补齐**：Today / 7 days / Month / Year / All，按 model、instance、provider、api key alias 过滤。
-- [ ] **导出与诊断**：Usage CSV/JSON 导出、异常费用提示、模型排行、请求峰值分析。
-- [ ] **可视化验收**：Overview snapshot 与 Monitor usage 图表均来自真实 ledger，不再使用启动历史估算。
+- [x] **流式 / 非 JSON 响应覆盖**：继续硬化 usage proxy，对 SSE、chunked、provider 变体 usage 字段做兼容测试。
+- [x] **成本模型表**：按 provider/model 维护价格表，无法定价时明确显示 unknown，不混用估算。
+- [x] **统计维度补齐**：Today / 7 days / Month / Year / All，按 model、instance、provider、api key alias 过滤。
+- [x] **导出与诊断**：Usage CSV/JSON 导出、异常费用提示、模型排行、请求峰值分析。
+- [x] **可视化验收**：Overview snapshot 与 Monitor usage 图表均来自真实 ledger，不再使用启动历史估算。
 
 ### DSH-first 阶段 11 — 性能验收与遥测日志
 
-- [ ] **启动耗时分段日志**：记录 launch spawn、DSH URL ready、Workspace first paint、proxy inject、inventory sync 各阶段耗时。
+- [x] **启动耗时分段日志**：记录 launch spawn、DSH URL ready、Workspace first paint、proxy inject、inventory sync 各阶段耗时。
 - [ ] **页面切换性能 gate**：连续切 Workspace / Manage / Overview / Library / Market，确认不触发 hidden scan，不出现明显卡顿。
-- [ ] **后台任务节流审计**：确认没有 5 秒轮询 inventory、没有页面打开自动 diagnostics/update-check、没有隐藏页面渲染 161 插件明细。
+- [x] **后台任务节流审计**：确认没有 5 秒轮询 inventory、没有页面打开自动 diagnostics/update-check、没有隐藏页面渲染 161 插件明细。
 - [ ] **大实例压测**：以 161+ 插件 inventory、多个 skills/mcp/skins 的实例做 Library/Overview/Instances 加载测试。
-- [ ] **Activity 日志降噪**：队列状态、usage proxy、inventory sync 日志分级，用户默认只看到可行动错误。
+- [x] **Activity 日志降噪**：队列状态、usage proxy、inventory sync 日志分级，用户默认只看到可行动错误。
 
 ### DSH-first 阶段 12 — 环境包导入/导出增强
 
-- [ ] **`.dshenv` manifest schema 固化**：schema version、资源类型、来源、版本、checksum、兼容 DSH 版本写入规范。
-- [ ] **导入预览 UI 完整化**：展示将安装的 Plugins / Skins / Skills / MCP、潜在冲突、缺失 token、预计下载来源。
-- [ ] **导入任务接 Install Center**：environment-import 每个 leaf 资源都显示独立阶段和失败/重试结果。
-- [ ] **导入后 Library 校准**：创建新 instance 后立即写 snapshot，并在首次 launch 后用 DSH Inventory 校准。
-- [ ] **安全排除验证**：API key、本地日志、node_modules、workspace 私有状态必须不能进入 `.dshenv`。
+- [x] **`.dshenv` manifest schema 固化**：schema version、资源类型、来源、版本、checksum、兼容 DSH 版本写入规范。
+- [x] **导入预览 UI 完整化**：展示将安装的 Plugins / Skins / Skills / MCP、潜在冲突、缺失 token、预计下载来源。
+- [x] **导入任务接 Install Center**：environment-import 每个 leaf 资源都显示独立阶段和失败/重试结果。
+- [x] **导入后 Library 校准**：创建新 instance 后立即写 snapshot，并在首次 launch 后用 DSH Inventory 校准。
+- [x] **安全排除验证**：API key、本地日志、node_modules、workspace 私有状态必须不能进入 `.dshenv`。
 
 ### DSH-first 阶段 13 — 产品验收与发布前收口
 
 - [ ] **端到端验收脚本**：Create instance → Market install skin/plugin/skill/mcp → Library 可见 → Launch → Usage ledger 记录 → Export/Import。
-- [ ] **回归测试补齐**：后台队列、snapshot cache、Market install、environment package、usage proxy 至少各有一个核心测试。
+- [x] **回归测试补齐**：后台队列、snapshot cache、Market install、environment package、usage proxy 至少各有一个核心测试。
 - [ ] **UI polish pass**：Install Center、Library、Market、Activity、Preferences 在 light/dark 下无对比度问题、无滚动失效、无拥挤/空洞布局。
-- [ ] **错误文案产品化**：pnpm timeout、git clone 失败、DSH plugin bundle 缺失、MCP token 缺失等错误给出下一步动作。
+- [x] **错误文案产品化**：pnpm timeout、git clone 失败、DSH plugin bundle 缺失、MCP token 缺失等错误给出下一步动作。
 - [ ] **发布工程衔接**：确认下方 P2–P6 的 CI、更新、签名、crash reporting、portable 模式进入 release milestone。
 
 ---
@@ -87,11 +87,11 @@
 > **验收**：一条 `git tag` 从零出安装包，CI 全绿，产物可下载、可回溯、可复现。
 > 管线：`tag 触发 → 四道 gate → 出安装包 → 冒烟`。
 
-- [ ] **流水线骨架**：新建 `.github/workflows/release.yml`（`windows-latest`），以 `v0.x.x` tag 触发；`pnpm install` + 环境准备 — [#201](https://github.com/ai-harness/ai-harness-launcher/issues/201)
-- [ ] **Gate 1**：`cargo test --workspace` — [#202](https://github.com/ai-harness/ai-harness-launcher/issues/202)
-- [ ] **Gate 2**：`cargo clippy --all-targets -- -D warnings` — [#203](https://github.com/ai-harness/ai-harness-launcher/issues/203)
-- [ ] **Gate 3**：前端类型门 `npx tsc --noEmit`（apps/desktop）— [#204](https://github.com/ai-harness/ai-harness-launcher/issues/204)
-- [ ] **Gate 4**：`instance_system` 集成测试（多实例隔离不互相污染）— [#205](https://github.com/ai-harness/ai-harness-launcher/issues/205)
+- [x] **流水线骨架**：新建 `.github/workflows/release.yml`（`windows-latest`），以 `v0.x.x` tag 触发；`pnpm install` + 环境准备 — [#201](https://github.com/ai-harness/ai-harness-launcher/issues/201)
+- [x] **Gate 1**：`cargo test --workspace` — [#202](https://github.com/ai-harness/ai-harness-launcher/issues/202)
+- [x] **Gate 2**：`cargo clippy --all-targets -- -D warnings` — [#203](https://github.com/ai-harness/ai-harness-launcher/issues/203)
+- [x] **Gate 3**：前端类型门 `npx tsc --noEmit`（apps/desktop）— [#204](https://github.com/ai-harness/ai-harness-launcher/issues/204)
+- [x] **Gate 4**：`instance_system` 集成测试（多实例隔离不互相污染）— [#205](https://github.com/ai-harness/ai-harness-launcher/issues/205)
 - [ ] **出安装包**：四门全绿后 `pnpm --filter desktop tauri build --release` — [#206](https://github.com/ai-harness/ai-harness-launcher/issues/206)
 - [ ] **安装包冒烟**：静默装到 `%TEMP%` → 启动 exe → 断言窗口存在 → 卸载；任一失败即 job 失败 — [#207](https://github.com/ai-harness/ai-harness-launcher/issues/207)
 - [ ] **产物发布**：`DeepSeek-Harness-Launcher-<tag>-setup.exe` + updater 元数据上传 GitHub Releases；命名、SHA-256、可回溯性规范 — [#208](https://github.com/ai-harness/ai-harness-launcher/issues/208)
@@ -108,10 +108,10 @@
 
 > **验收**：三个「重构护栏」——发版前全绿，且每阶段至少 1 个集成测试守护核心链路（Launch → 窗口 → Stop）。
 
-- [ ] Rust · `detect()` 解析链单测（settings → bundled → managed → dev，四层各一例）— [#401](https://github.com/ai-harness/ai-harness-launcher/issues/401)
-- [ ] Rust · 进程树 teardown 测试（含连续 10 轮 stop/start 无残留）— [#402](https://github.com/ai-harness/ai-harness-launcher/issues/402)
-- [ ] Rust · 市场 `reconcilePlugins` 幂等测试（enable/disable 往返）— [#403](https://github.com/ai-harness/ai-harness-launcher/issues/403)
-- [ ] 前端 · `npx tsc --noEmit` + 关键 store 单测（主题 sync、市场状态机）— [#404](https://github.com/ai-harness/ai-harness-launcher/issues/404)
+- [x] Rust · `detect()` 解析链单测（settings → bundled → managed → dev，四层各一例）— [#401](https://github.com/ai-harness/ai-harness-launcher/issues/401)
+- [x] Rust · 进程树 teardown 测试（含连续 10 轮 stop/start 无残留）— [#402](https://github.com/ai-harness/ai-harness-launcher/issues/402)
+- [x] Rust · 市场 `reconcilePlugins` 幂等测试（enable/disable 往返）— [#403](https://github.com/ai-harness/ai-harness-launcher/issues/403)
+- [x] 前端 · `npx tsc --noEmit` + 关键 store 单测（主题 sync、市场状态机）— [#404](https://github.com/ai-harness/ai-harness-launcher/issues/404)
 - [ ] E2E（可选后置）· `tauri-driver` 启动真窗口点 Launch — [#405](https://github.com/ai-harness/ai-harness-launcher/issues/405)
 
 ## P5 — 代码签名 ⏳
@@ -126,10 +126,10 @@
 
 > 不成独立阶段，随各阶段带走。
 
-- [ ] **Crash reporting**：panic hook → `%LOCALAPPDATA%/…/logs/crash-*.txt` — [#601](https://github.com/ai-harness/ai-harness-launcher/issues/601)
-- [ ] **Telemetry opt-in**：默认关；只上报「崩溃 + 版本号」，绝不包含会话内容 — [#602](https://github.com/ai-harness/ai-harness-launcher/issues/602)
-- [ ] **Download resume**：reqwest 断点续传 + SHA-256 校验和（安装/市场已用）— [#603](https://github.com/ai-harness/ai-harness-launcher/issues/603)
-- [ ] **Portable 模式**：绿色版，runtimes 放 exe 同目录 — [#604](https://github.com/ai-harness/ai-harness-launcher/issues/604)
+- [x] **Crash reporting**：panic hook → `%LOCALAPPDATA%/…/logs/crash-*.txt` — [#601](https://github.com/ai-harness/ai-harness-launcher/issues/601)
+- [x] **Telemetry opt-in**：默认关；只上报「崩溃 + 版本号」，绝不包含会话内容 — [#602](https://github.com/ai-harness/ai-harness-launcher/issues/602)
+- [x] **Download resume**：reqwest 断点续传 + SHA-256 校验和（`launcher-core::download`，npm 目录 tarball 已用）— [#603](https://github.com/ai-harness/ai-harness-launcher/issues/603)
+- [x] **Portable 模式**：绿色版，数据根（含 runtimes）落 exe 同目录（`AHL_PORTABLE`/`portable` 标记，`launcher-core::paths`）— [#604](https://github.com/ai-harness/ai-harness-launcher/issues/604)
 
 ---
 

@@ -1,0 +1,128 @@
+name: release
+
+# P2 — CI 发布流水线。
+#
+# 触发：打 `v*` tag（或手动 `workflow_dispatch`）→ 四道 gate → 出 NSIS 安装包 →
+# 静默安装/启动/卸载冒烟 → 上传 GitHub Releases。
+#
+# 验收口径见 plan.md 第二十一节。签名（P5）与自动更新元数据（P3）在后续阶段
+# 接入本流水线；当前产物为未签名 setup.exe。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write # 供 softprops/action-gh-release 上传产物
+
+jobs:
+  build:
+    name: build-and-smoke
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tag 触发需要完整历史生成 release notes
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.18.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      # --- 四道 gate ---
+
+      - name: Gate 1 — cargo test
+        run: cargo test --workspace
+
+      - name: Gate 2 — cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Gate 3 — tsc
+        working-directory: apps/desktop
+        run: npx tsc --noEmit
+
+      - name: Gate 4 — instance_system 集成测试
+        run: cargo test -p launcher-core --test instance_system
+
+      # --- 出安装包 ---
+
+      - name: Build NSIS installer
+        run: pnpm --filter desktop tauri build --release
+        env:
+          CI: 'true'
+
+      # --- 冒烟：静默安装 → 启动 → 断言存活 → 卸载 ---
+
+      - name: Locate installer
+        id: locate
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem -Path "apps/desktop/src-tauri/target", "target" -Recurse -Filter "*-setup.exe" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch 'node_modules' } |
+            Select-Object -First 1
+          if (-not $setup) { throw "setup.exe not found after tauri build" }
+          Write-Output "installer=$($setup.FullName)"
+          "installer=$($setup.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Smoke — install, launch, uninstall
+        shell: pwsh
+        run: |
+          $installer = "${{ steps.locate.outputs.installer }}"
+          # 静默安装到独立临时目录（/D 必须是最后一个参数且不带引号）
+          $instDir = Join-Path $env:TEMP "dshl-smoke"
+          $exe = Join-Path $instDir "DeepSeek-Harness-Launcher.exe"
+          Start-Process -FilePath $installer -ArgumentList "/S", "/D=$instDir" -Wait
+
+          if (-not (Test-Path $exe)) { throw "installed exe not found: $exe" }
+
+          # 启动 → 等待窗口/进程稳定 → 断言未崩溃退出
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 15
+          if ($p.HasExited) { throw "launcher exited early with code $($p.ExitCode)" }
+
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+
+          $un = Join-Path $instDir "uninstall.exe"
+          if (Test-Path $un) { Start-Process -FilePath $un -ArgumentList "/S" -Wait }
+
+      # --- 产物发布 ---
+
+      - name: Rename artifact to release convention
+        id: artifact
+        shell: pwsh
+        run: |
+          $src = "${{ steps.locate.outputs.installer }}"
+          $dest = "DeepSeek-Harness-Launcher-${{ github.ref_name }}-setup.exe"
+          Copy-Item -LiteralPath $src -Destination $dest
+          Write-Output "artifact=$dest"
+          "artifact=$dest" >> $env:GITHUB_OUTPUT
+
+      - name: Upload release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: ${{ steps.artifact.outputs.artifact }}

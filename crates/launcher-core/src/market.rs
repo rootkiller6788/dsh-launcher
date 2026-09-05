@@ -11,11 +11,13 @@
 //! the OS credential vault), so nothing here needs its own key.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::download::download_file;
 use crate::{write_json_atomic, AppPaths, ResolvedProvider};
 
 /// Catalog sources, mirroring dsh-market's region routing (src/regions.ts):
@@ -387,7 +389,7 @@ pub async fn fetch_registry(paths: &AppPaths) -> Result<Registry> {
     for src in sources {
         let result = match src {
             CatalogSource::Url(url) => fetch_url_catalog(&client, &url).await,
-            CatalogSource::Npm(registry) => fetch_npm_catalog(&client, &registry).await,
+            CatalogSource::Npm(registry) => fetch_npm_catalog(&client, &registry, &paths.cache).await,
         };
         match result {
             Ok(reg) => {
@@ -462,7 +464,17 @@ async fn fetch_url_catalog(client: &reqwest::Client, url: &str) -> Result<Regist
 /// Read the catalog from the published `dsh-plugin-catalog` npm package: fetch
 /// its metadata, follow `dist.tarball`, and pull `package/plugins.json` out of
 /// the gzipped tar. This is the China-safe route (mirrors carry the package).
-async fn fetch_npm_catalog(client: &reqwest::Client, registry: &str) -> Result<Registry> {
+///
+/// The tarball goes through [`download_file`] into the download cache rather
+/// than a one-shot `bytes()`, so a mid-body drop from a flaky mirror resumes
+/// from the partial instead of restarting, and an unchanged catalog version is
+/// served from the cached file on later refreshes (the URL is version-pinned,
+/// so a cached artifact can never go stale).
+async fn fetch_npm_catalog(
+    client: &reqwest::Client,
+    registry: &str,
+    cache: &Path,
+) -> Result<Registry> {
     let base = registry.trim_end_matches('/');
     let meta_url = format!("{base}/{CATALOG_PACKAGE}/latest");
     let resp = client
@@ -477,15 +489,40 @@ async fn fetch_npm_catalog(client: &reqwest::Client, registry: &str) -> Result<R
     let tarball = meta["dist"]["tarball"]
         .as_str()
         .ok_or_else(|| anyhow!("catalog metadata names no tarball"))?;
-    let tar_resp = client.get(tarball).send().await.context("catalog tarball")?;
-    if !tar_resp.status().is_success() {
-        return Err(anyhow!("catalog tarball HTTP {}", tar_resp.status()));
+
+    let cached = npm_tarball_cache_path(cache, tarball);
+    if !cached.is_file() {
+        // `download_file` verifies nothing here — npm's own metadata is the
+        // authority, and only a fully-received file is promoted out of `.part`.
+        // Callers that know a trusted hash pass it to the same function.
+        download_file(client, tarball, &cached, None)
+            .await
+            .map_err(|e| anyhow!("catalog tarball: {e:#}"))?;
     }
-    let bytes = tar_resp.bytes().await.context("read catalog tarball")?;
+    let bytes = std::fs::read(&cached).context("read cached catalog tarball")?;
     let json_bytes = file_from_tarball(&bytes, "package/plugins.json")
         .ok_or_else(|| anyhow!("catalog tarball carries no plugins.json"))?;
     let reg: Registry = serde_json::from_slice(&json_bytes).context("parse catalog JSON")?;
     Ok(hydrate(reg))
+}
+
+/// The download-cache path for a version-pinned npm tarball URL. Sanitizing the
+/// URL keeps one artifact per registry × version and leaves the file name
+/// readable (`…/downloads/registry.npmjs.org_npm_dsh-plugin-catalog_-_…-1.2.3.tgz`).
+fn npm_tarball_cache_path(cache: &Path, tarball: &str) -> PathBuf {
+    let sanitized: String = tarball
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    cache.join("downloads").join(sanitized)
 }
 
 /// Extract one file's bytes from a gzipped tar (512-byte headers, npm-style
@@ -509,7 +546,7 @@ fn file_from_tarball(gz: &[u8], wanted: &str) -> Option<Vec<u8>> {
         if (type_byte == b'0' || type_byte == 0) && name == wanted {
             return Some(buf[offset..offset + size].to_vec());
         }
-        offset += (size + 511) / 512 * 512;
+        offset += size.div_ceil(512) * 512;
     }
     None
 }
@@ -553,8 +590,8 @@ pub async fn npm_latest(registry: &str, pkg: &str) -> Result<String> {
 pub fn version_newer(a: &str, b: &str) -> bool {
     fn num(s: &str) -> Vec<u64> {
         s.trim()
-            .trim_start_matches(|c: char| c == 'v' || c == 'V')
-            .split(|c: char| c == '-' || c == '+')
+            .trim_start_matches(['v', 'V'])
+            .split(['-', '+'])
             .next()
             .unwrap_or("")
             .split('.')
@@ -1138,8 +1175,8 @@ mod tests {
         tar.extend_from_slice(&header);
         tar.extend_from_slice(content);
         let pad = (512 - (content.len() % 512)) % 512;
-        tar.extend(std::iter::repeat(0u8).take(pad));
-        tar.extend(std::iter::repeat(0u8).take(1024)); // two zero blocks
+        tar.extend(std::iter::repeat_n(0u8, pad));
+        tar.extend(std::iter::repeat_n(0u8, 1024)); // two zero blocks
 
         let mut enc = GzEncoder::new(Vec::new(), Compression::default());
         enc.write_all(&tar).unwrap();

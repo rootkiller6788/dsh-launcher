@@ -342,7 +342,7 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
         // Robocopy skipped the junctions; recreate them so the copied tree's
         // node_modules resolve into its own .pnpm store.
         restore_junctions(src, dst)?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(windows))]
     {

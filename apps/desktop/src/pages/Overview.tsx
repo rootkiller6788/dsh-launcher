@@ -232,13 +232,19 @@ function UsageSnapshot({ summary, locale }: { summary: UsageSummary | null; loca
       tokens: bucket?.totalTokens ?? 0,
     }
   })
-  const todayTokens = summary?.totalTokens ?? 0
+  const todayStart = (() => {
+    const d = new Date()
+    d.setHours(0, 0, 0, 0)
+    return Math.floor(d.getTime() / 1000)
+  })()
+  const todayTokens = summary?.byDay.find((b) => b.timestamp === todayStart)?.totalTokens ?? 0
   const requests = summary?.requests ?? 0
   const cost = summary?.totalCost ?? 0
+  const unknownCost = summary?.unknownCostRecords ?? 0
   const topModel = summary?.byModel[0]?.model ?? '-'
   const max = Math.max(...days.map((d) => d.tokens), 1)
   return (
-    <section className="flex min-h-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900/60 p-5 xl:col-span-3">
+    <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900/60 p-5 dense:col-span-3">
       <div className="flex items-start justify-between gap-4">
         <div>
           <h2 className="text-sm font-semibold text-zinc-200">{t('overview.usageSnapshot')}</h2>
@@ -248,24 +254,32 @@ function UsageSnapshot({ summary, locale }: { summary: UsageSummary | null; loca
           <BarChart3 className="h-4 w-4 text-zinc-500" strokeWidth={1.75} />
         </div>
       </div>
-      <div className="mt-4 grid grid-cols-2 gap-2">
-        <SignalRow label={t('overview.todayTokens')} value={fmtTokens(todayTokens)} accent={todayTokens > 0} />
-        <SignalRow label={t('overview.requests')} value={requests} accent={requests > 0} />
-        <SignalRow label={t('overview.estimatedCost')} value={`$${cost.toFixed(3)}`} accent={cost > 0} />
-        <SignalRow label={t('overview.topModel')} value={topModel} accent={todayTokens > 0} />
-      </div>
-      <div className="mt-auto flex h-20 items-end gap-2">
-        {days.map((d, i) => (
-          <div key={`${d.label}-${i}`} className="flex min-w-0 flex-1 flex-col items-center gap-2">
-            <div className="flex h-14 w-full items-end">
-              <div
-                className={`w-full rounded-sm ${d.tokens > 0 ? 'bg-blue-400/85' : 'bg-zinc-800/70'}`}
-                style={{ height: `${d.tokens > 0 ? Math.max((d.tokens / max) * 100, 12) : 8}%` }}
-              />
-            </div>
-            <span className="truncate text-[10px] text-zinc-600">{d.label}</span>
+      <div className="no-scrollbar mt-4 min-h-0 flex-1 overflow-y-auto">
+        <div className="flex min-h-full flex-col">
+          <div className="grid grid-cols-2 gap-2">
+            <SignalRow label={t('overview.todayTokens')} value={fmtTokens(todayTokens)} accent={todayTokens > 0} />
+            <SignalRow label={t('overview.requests')} value={requests} accent={requests > 0} />
+            <SignalRow
+              label={t('overview.estimatedCost')}
+              value={`$${cost.toFixed(3)}${unknownCost > 0 ? ` · ${t('overview.unpricedHint', { n: unknownCost })}` : ''}`}
+              accent={cost > 0}
+            />
+            <SignalRow label={t('overview.topModel')} value={topModel} accent={todayTokens > 0} />
           </div>
-        ))}
+          <div className="mt-auto flex h-20 items-end gap-2">
+            {days.map((d, i) => (
+              <div key={`${d.label}-${i}`} className="flex min-w-0 flex-1 flex-col items-center gap-2">
+                <div className="flex h-14 w-full items-end">
+                  <div
+                    className={`w-full rounded-sm ${d.tokens > 0 ? 'bg-blue-400/85' : 'bg-zinc-800/70'}`}
+                    style={{ height: `${d.tokens > 0 ? Math.max((d.tokens / max) * 100, 12) : 8}%` }}
+                  />
+                </div>
+                <span className="truncate text-[10px] text-zinc-600">{d.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
     </section>
   )
@@ -280,7 +294,7 @@ function RecentRuns({
 }) {
   const t = useT()
   return (
-    <section className="flex min-h-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900/60 p-5 xl:col-span-3">
+    <section className="flex min-h-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900/60 p-5 dense:col-span-3">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-semibold text-zinc-200">{t('overview.recentActivity')}</h2>
         <Activity className="h-4 w-4 text-zinc-500" strokeWidth={1.75} />
@@ -419,11 +433,6 @@ export function Overview() {
       accent: weekRuns > 0,
     },
     {
-      label: t('overview.resourceFeed'),
-      value: systemHistory.length >= 2 ? t('overview.live') : t('overview.warming'),
-      accent: systemHistory.length >= 2,
-    },
-    {
       label: t('overview.logBuffer'),
       value: logs.length,
       accent: logs.length > 0,
@@ -439,7 +448,7 @@ export function Overview() {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-5 overflow-hidden p-6">
+    <div className="no-scrollbar flex h-full min-h-0 flex-col gap-5 overflow-x-hidden overflow-y-auto p-6">
       <div className="flex shrink-0 items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-zinc-50">{t('overview.title')}</h1>
@@ -451,8 +460,8 @@ export function Overview() {
         </div>
       </div>
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-5 xl:grid-cols-12 xl:grid-rows-[minmax(0,1.08fr)_minmax(0,0.92fr)]">
-        <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900/60 xl:col-span-8">
+      <div className="grid min-h-0 flex-1 auto-rows-min grid-cols-1 gap-5 md:grid-cols-2 dense:auto-rows-auto dense:grid-cols-12 dense:grid-rows-[minmax(0,1.08fr)_minmax(0,0.92fr)]">
+        <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900/60 md:col-span-2 dense:col-span-8">
           <div className="flex min-h-0 flex-1">
             <div className={`w-1.5 shrink-0 ${running ? 'bg-amber-400' : activeInstance ? 'bg-blue-400' : 'bg-zinc-700'}`} />
             <div className="flex min-w-0 flex-1 flex-col p-5">
@@ -495,7 +504,7 @@ export function Overview() {
           </div>
         </section>
 
-        <section className="flex min-h-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900/60 p-5 xl:col-span-4">
+        <section className="flex min-h-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900/60 p-5 md:col-span-2 dense:col-span-4">
           <div className="flex items-start justify-between gap-4">
             <div>
               <h2 className="text-sm font-semibold text-zinc-200">{t('overview.quickActions')}</h2>
@@ -524,19 +533,16 @@ export function Overview() {
             )}
           </div>
 
-          <div className="mt-4 min-h-0 flex-1 divide-y divide-zinc-800/60 overflow-hidden rounded-lg border border-zinc-800/70 bg-zinc-950/20 px-3">
+          <div className="mt-4 flex min-h-0 flex-1 flex-col divide-y divide-zinc-800/60 overflow-hidden rounded-lg border border-zinc-800/70 bg-zinc-950/20 px-3">
             {quickSignals.map((signal) => (
-              <SignalRow
-                key={signal.label}
-                label={signal.label}
-                value={signal.value}
-                accent={signal.accent}
-              />
+              <div key={signal.label} className="flex min-h-0 flex-1 items-center">
+                <SignalRow label={signal.label} value={signal.value} accent={signal.accent} />
+              </div>
             ))}
           </div>
         </section>
 
-        <section className="flex min-h-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900/60 p-5 xl:col-span-3">
+        <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900/60 p-5 dense:col-span-3">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold text-zinc-200">{t('overview.runtimeResources')}</h2>
             <Cpu className="h-4 w-4 text-zinc-500" strokeWidth={1.75} />
@@ -546,21 +552,23 @@ export function Overview() {
               {t('overview.noSystemData')}
             </p>
           ) : (
-            <div className="mt-4 flex min-h-0 flex-1 flex-col gap-3">
-              <ResourceRow icon={Cpu} label={t('overview.cpu')} value={`${(systemStats?.cpu ?? 0).toFixed(0)}%`} values={cpuSeries} color="#34d399" />
-              <ResourceRow icon={MemoryStick} label={t('overview.memory')} value={`${memNow.toFixed(0)}%`} values={memSeries} color="#60a5fa" />
-              <div className="mt-auto">
-                <div className="flex items-center justify-between text-xs text-zinc-400">
-                  <span className="flex items-center gap-2">
-                    <HardDrive className="h-3.5 w-3.5 text-zinc-500" strokeWidth={1.75} />
-                    {t('overview.disk')}
-                  </span>
-                  <span className="font-mono tabular-nums text-zinc-200">
-                    {systemStats ? `${fmtGB(systemStats.diskUsed)} / ${fmtGB(systemStats.diskTotal)} GB` : '-'}
-                  </span>
-                </div>
-                <div className="mt-2 h-2 overflow-hidden rounded-full bg-zinc-800">
-                  <div className="h-full rounded-full bg-zinc-400 transition-[width] duration-500" style={{ width: `${Math.min(diskPct, 100)}%` }} />
+            <div className="no-scrollbar mt-4 min-h-0 flex-1 overflow-y-auto">
+              <div className="flex min-h-full flex-col gap-3">
+                <ResourceRow icon={Cpu} label={t('overview.cpu')} value={`${(systemStats?.cpu ?? 0).toFixed(0)}%`} values={cpuSeries} color="#34d399" />
+                <ResourceRow icon={MemoryStick} label={t('overview.memory')} value={`${memNow.toFixed(0)}%`} values={memSeries} color="#60a5fa" />
+                <div className="mt-auto">
+                  <div className="flex items-center justify-between text-xs text-zinc-400">
+                    <span className="flex items-center gap-2">
+                      <HardDrive className="h-3.5 w-3.5 text-zinc-500" strokeWidth={1.75} />
+                      {t('overview.disk')}
+                    </span>
+                    <span className="font-mono tabular-nums text-zinc-200">
+                      {systemStats ? `${fmtGB(systemStats.diskUsed)} / ${fmtGB(systemStats.diskTotal)} GB` : '-'}
+                    </span>
+                  </div>
+                  <div className="mt-2 h-2 overflow-hidden rounded-full bg-zinc-800">
+                    <div className="h-full rounded-full bg-zinc-400 transition-[width] duration-500" style={{ width: `${Math.min(diskPct, 100)}%` }} />
+                  </div>
                 </div>
               </div>
             </div>
@@ -569,7 +577,7 @@ export function Overview() {
 
         <UsageSnapshot summary={usageSummary} locale={language} />
 
-        <section className="flex min-h-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900/60 p-5 xl:col-span-3">
+        <section className="flex min-h-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900/60 p-5 dense:col-span-3">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold text-zinc-200">{t('overview.health')}</h2>
             <ShieldCheck className={`h-4 w-4 ${blocking > 0 ? 'text-amber-400' : 'text-emerald-400'}`} strokeWidth={1.75} />

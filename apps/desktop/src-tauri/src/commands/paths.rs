@@ -7,6 +7,30 @@ use tauri::State;
 use crate::error::AppError;
 use crate::state::AppState;
 
+/// Where the launcher keeps its data, plus whether it is running as a portable
+/// (green) edition with the data root next to the exe.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppPathsInfo {
+    pub portable: bool,
+    pub root: String,
+}
+
+/// The data root + edition flag for the Settings → Storage card.
+#[tauri::command]
+pub fn app_paths(state: State<'_, AppState>) -> Result<AppPathsInfo, AppError> {
+    Ok(AppPathsInfo {
+        portable: state.paths.portable,
+        root: state.paths.root.display().to_string(),
+    })
+}
+
+/// Open the data root in Explorer/Finder (the whole launcher folder).
+#[tauri::command]
+pub fn reveal_data_dir(state: State<'_, AppState>) -> Result<(), AppError> {
+    reveal_path(&state.paths.root)
+}
+
 #[tauri::command]
 pub fn reveal_instance_workspace(state: State<'_, AppState>, id: String) -> Result<(), AppError> {
     let instance = InstanceManifest::get(&state.paths, &id)?;
@@ -40,7 +64,7 @@ fn reveal_path(path: &Path) -> Result<(), AppError> {
             .arg(arg)
             .spawn()
             .map_err(|e| AppError::msg(format!("open Explorer failed: {e}")))?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]

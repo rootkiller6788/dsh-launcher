@@ -24,7 +24,7 @@ use anyhow::{anyhow, Context, Result};
 use launcher_core::process::{spawn_child_with_exit, ChildHandle, ExitSink, LogSink};
 use launcher_core::runtime::RuntimeInfo;
 use launcher_core::{
-    AppSettings, InstanceManifest, LogLine, LogStream, ResolvedProvider, RuntimeAdapter,
+    AppSettings, InstanceManifest, LogLevel, LogLine, LogStream, ResolvedProvider, RuntimeAdapter,
 };
 use serde::{Deserialize, Serialize};
 use std::process::Stdio;
@@ -32,6 +32,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 pub mod content;
 pub mod diagnostics;
+pub mod events;
 pub mod language;
 pub mod llm;
 pub mod runtimes;
@@ -109,6 +110,12 @@ pub struct DshAdapter {
     /// The app's resource dir, where a bundled `node/` and `dsh/` live in the
     /// packaged install. Set by the Tauri shell once the app handle exists.
     resource_dir: Option<PathBuf>,
+}
+
+impl Default for DshAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DshAdapter {
@@ -479,7 +486,7 @@ impl DshAdapter {
         let ids = inserted_row_ids(&profile_dir, name);
         if ids.is_empty() {
             return Err(anyhow!(
-                "plugin '{name}' has no toggleable bundle rows (it may not declare a dsh.bundle)"
+                "plugin '{name}' has no toggleable bundle rows — its package.json does not declare a `dsh.bundle`, so it cannot be enabled/disabled through the patch layer"
             ));
         }
         let patch_path = profile_dir.join("cordis.patch.yml");
@@ -564,6 +571,7 @@ impl DshAdapter {
                             if !line.is_empty() {
                                 sink(LogLine {
                                     stream: LogStream::Stdout,
+                                    level: LogLevel::Info,
                                     line,
                                 });
                             }
@@ -586,6 +594,7 @@ impl DshAdapter {
                             if !line.is_empty() {
                                 sink(LogLine {
                                     stream: LogStream::Stderr,
+                                    level: LogLevel::Warn,
                                     line,
                                 });
                             }
@@ -843,32 +852,38 @@ fn without_comment_lines(text: &str) -> String {
         .join("\n")
 }
 
-/// Append one top-level patch entry, handling the empty-list `[]` placeholder
-/// the profile template ships (appending after it would produce two top-level
-/// YAML documents — the loader refuses that). Port of dsh-market's
-/// `appendPatchEntry`.
-pub(crate) fn append_patch_entry(patch_path: &Path, block: &str) -> Result<()> {
-    let text = std::fs::read_to_string(patch_path).unwrap_or_default();
+/// Append one top-level patch entry to `text`, handling the empty-list `[]`
+/// placeholder the profile template ships (appending after it would produce two
+/// top-level YAML documents — the loader refuses that). Pure — the disk writers
+/// ([`append_patch_entry`], [`sync_mcp_patch`]) share this core. Port of
+/// dsh-market's `appendPatchEntry`.
+pub(crate) fn append_block_to_text(text: &str, block: &str) -> String {
     let core = text.trim();
     if core.is_empty() {
-        return std::fs::write(patch_path, block)
-            .with_context(|| format!("write {}", patch_path.display()));
+        return block.to_string();
     }
-    let stripped = without_comment_lines(&text).trim().to_string();
+    let stripped = without_comment_lines(text).trim().to_string();
     let mut next = if stripped.is_empty() {
         // comments only — append after them
-        text
+        text.to_string()
     } else if stripped == "[]" || stripped == "[ ]" {
         // comment out the empty-list placeholder and append
-        comment_out_placeholder(&text)
+        comment_out_placeholder(text)
     } else {
-        text
+        text.to_string()
     };
     if !next.ends_with('\n') {
         next.push('\n');
     }
     next.push_str(block);
-    std::fs::write(patch_path, next).with_context(|| format!("write {}", patch_path.display()))
+    next
+}
+
+/// Disk wrapper for [`append_block_to_text`].
+pub(crate) fn append_patch_entry(patch_path: &Path, block: &str) -> Result<()> {
+    let text = std::fs::read_to_string(patch_path).unwrap_or_default();
+    std::fs::write(patch_path, append_block_to_text(&text, block))
+        .with_context(|| format!("write {}", patch_path.display()))
 }
 
 /// Replace the template's top-level `[]` placeholder with a `# []` comment so a
@@ -925,8 +940,10 @@ fn remove_blocks(text: &str, id: &str, values: &[&str]) -> (String, bool) {
 /// the template's placeholder is commented out and the last block is removed,
 /// the file is pure comments — not a top-level array, which DSH refuses to
 /// boot ("must be a top-level YAML array"). Port of dsh-market's
-/// `withPlaceholderRestored`.
-fn restore_placeholder(text: &str) -> String {
+/// `withPlaceholderRestored`. `pub(crate)` so
+/// [`sync_mcp_patch`](crate::content::sync_mcp_patch) can finish a compile
+/// that left no content behind.
+pub(crate) fn restore_placeholder(text: &str) -> String {
     if without_comment_lines(text).trim() != "" {
         return text.to_string();
     }
@@ -998,19 +1015,17 @@ fn remove_row_blocks(patch_path: &Path, ids: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Remove a whole top-level `- insert:` block that contains a row with id
-/// `row_id` — the MCP-uninstall cleanup (each MCP install appends its own
-/// insert block). The block spans from its `- insert:` line to the next
-/// column-0 entry (or EOF). Line-based, like the other patch writers; restores
-/// the `[]` placeholder if that empties the file.
-pub(crate) fn remove_insert_block(patch_path: &Path, row_id: &str) -> Result<()> {
-    let text = std::fs::read_to_string(patch_path).unwrap_or_default();
-    if text.trim().is_empty() {
-        return Ok(());
-    }
+/// Remove every top-level `- insert:` block that inserts a launcher-owned MCP
+/// row — a nested row whose `name:` is `'@deepseek-ai/dsh-mcp-client'` (the
+/// region [`sync_mcp_patch`](crate::content::sync_mcp_patch) recompiles). The
+/// block spans from its `- insert:` line to the next column-0 entry (or EOF).
+/// Pure and line-based, like the other patch writers: plugin `- id:`/`disabled:`
+/// rows, comments, and non-launcher `insert:` blocks pass through untouched,
+/// and line endings survive the split/join. Returns the text unchanged when
+/// there is nothing to remove.
+pub(crate) fn remove_mcp_insert_blocks(text: &str) -> String {
     let lines: Vec<&str> = text.split('\n').collect();
     let mut out: Vec<String> = Vec::new();
-    let mut removed = false;
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i].trim_end_matches('\r');
@@ -1024,12 +1039,16 @@ pub(crate) fn remove_insert_block(patch_path: &Path, row_id: &str) -> Result<()>
                 }
                 end += 1;
             }
-            let contains = (i + 1..end).any(|k| {
-                let inner = lines[k].trim_end_matches('\r').trim_start();
-                parse_id(inner).as_deref() == Some(row_id)
+            let owns_mcp = (i + 1..end).any(|k| {
+                let content = lines[k].trim_end_matches('\r');
+                let content = content.split('#').next().unwrap_or("").trim();
+                let t = content.trim_start_matches('-').trim();
+                let Some(rest) = t.strip_prefix("name:") else {
+                    return false;
+                };
+                rest.trim().trim_matches(['"', '\'']) == "@deepseek-ai/dsh-mcp-client"
             });
-            if contains {
-                removed = true;
+            if owns_mcp {
                 i = end;
                 continue;
             }
@@ -1037,11 +1056,7 @@ pub(crate) fn remove_insert_block(patch_path: &Path, row_id: &str) -> Result<()>
         out.push(lines[i].to_string());
         i += 1;
     }
-    if removed {
-        std::fs::write(patch_path, restore_placeholder(&out.join("\n")))
-            .with_context(|| format!("write {}", patch_path.display()))?;
-    }
-    Ok(())
+    out.join("\n")
 }
 
 #[cfg(test)]
@@ -1063,6 +1078,63 @@ mod tests {
   name: unrelated
 ";
         assert_eq!(parse_inserted_ids(text), vec!["my-plugin", "other"]);
+    }
+
+    #[test]
+    fn remove_mcp_insert_blocks_drops_only_launcher_owned_blocks() {
+        let text = "\
+# comment
+- id: timer
+  disabled: true
+- insert:
+    - id: user-row
+      name: other-plugin
+- insert:
+    - id: mcp-a
+      name: '@deepseek-ai/dsh-mcp-client'
+- insert:
+    - id: mcp-b
+      name: '@deepseek-ai/dsh-mcp-client'
+";
+        let next = remove_mcp_insert_blocks(text);
+        assert!(!next.contains("mcp-a"), "{next}");
+        assert!(!next.contains("mcp-b"), "{next}");
+        assert!(next.contains("# comment"), "{next}");
+        assert!(next.contains("- id: timer\n  disabled: true"), "{next}");
+        assert!(next.contains("user-row"), "{next}");
+        assert_eq!(
+            next.lines().filter(|l| l.starts_with("- insert:")).count(),
+            1,
+            "only the user insert block survives:\n{next}"
+        );
+    }
+
+    #[test]
+    fn remove_mcp_insert_blocks_is_idempotent_without_matches() {
+        let text = "- id: timer\n  disabled: true\n# only comments\n";
+        assert_eq!(remove_mcp_insert_blocks(text), text);
+        assert_eq!(remove_mcp_insert_blocks(""), "");
+    }
+
+    #[test]
+    fn append_block_to_text_comments_out_empty_placeholder() {
+        let next = append_block_to_text("# template\n[]\n", "- insert:\n    - id: x\n");
+        assert!(next.contains("# []"), "{next}");
+        assert!(next.contains("- insert:\n    - id: x\n"), "{next}");
+        assert!(!next.contains("\n[]\n"), "placeholder must not remain active:\n{next}");
+    }
+
+    #[test]
+    fn append_block_to_text_handles_empty_and_comments_only() {
+        assert_eq!(append_block_to_text("", "- insert:\n"), "- insert:\n");
+        let comments = "# just comments\n";
+        let next = append_block_to_text(comments, "- insert:\n");
+        assert!(next.starts_with("# just comments\n"), "{next}");
+        assert!(next.ends_with("- insert:\n"), "{next}");
+        // Content (a plugin row) is left alone and the block appended after.
+        let rows = "- id: timer\n  disabled: true\n";
+        let next = append_block_to_text(rows, "- insert:\n");
+        assert_eq!(next, rows.to_string() + "- insert:\n");
     }
 
     #[test]
@@ -1222,6 +1294,67 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn resolve_bin_prefers_settings_override() {
+        let dir = std::env::temp_dir().join(format!("dsh-adapter-ovr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bin = dir.join("apps/cli/lib/bin.js");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, "// override dsh\n").unwrap();
+
+        let adapter = DshAdapter::new(); // no runtimes / resource dir
+        let settings = AppSettings {
+            dsh_path: Some(bin.display().to_string()),
+            ..Default::default()
+        };
+
+        let (resolved, source) = adapter
+            .resolve_bin(&settings)
+            .expect("settings override resolves");
+        assert_eq!(source, "override", "settings.dsh_path must be the top layer");
+        assert_eq!(resolved, bin);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_bin_resolves_bundled_from_resource_dir() {
+        let dir = std::env::temp_dir().join(format!("dsh-adapter-bndl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let resource_dir = dir.join("resources");
+        let bin = resource_dir.join("dsh/apps/cli/lib/bin.js");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, "// bundled dsh\n").unwrap();
+
+        // Empty managed-runtimes dir → the bundled layer is the first hit.
+        let adapter = DshAdapter::configured(dir.join("runtimes"), Some(resource_dir));
+        let settings = AppSettings::default();
+
+        let (resolved, source) = adapter
+            .resolve_bin(&settings)
+            .expect("bundled bin resolves");
+        assert_eq!(source, "bundled", "resource_dir/dsh must resolve before managed");
+        assert_eq!(resolved, bin);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The dev layer (debug builds only) points at a sibling `deepseek-harness-master`
+    /// checkout. Creating that checkout is intrusive, so assert the candidate list
+    /// shape instead of a full resolve; the priority-over-dev behaviour is proven
+    /// by `detect_resolves_managed_after_synthetic_install` (managed wins).
+    #[test]
+    fn dev_candidates_point_at_sibling_checkout() {
+        let adapter = DshAdapter::new();
+        let cands = adapter.dev_candidates();
+        assert!(!cands.is_empty(), "dev candidates must not be empty");
+        let first = cands[0].to_string_lossy().replace('\\', "/");
+        assert!(
+            first.ends_with("deepseek-harness-master/apps/cli/lib/bin.js"),
+            "first candidate = {first}"
+        );
+    }
+
     /// Real P1 acceptance: boot the *actual* managed DSH and stop it 10 times
     /// in a row, asserting every stop tears the whole tree down (the launcher's
     /// spawned pid — and everything it forked — is gone). `#[ignore]` because
@@ -1275,6 +1408,7 @@ mod tests {
             plugins: vec![],
             skills: vec![],
             mcp: vec![],
+            skins: vec![],
             workspace: ws.display().to_string(),
         };
         let provider = ResolvedProvider {
@@ -1303,7 +1437,7 @@ mod tests {
                     let _ = line_tx.send(text);
                 })
             };
-            let mut handle = match adapter.launch(&settings, &instance, &env, on_log).await {
+            let mut handle = match adapter.launch(&settings, &instance, &env, on_log, None).await {
                 Ok(h) => h,
                 Err(e) => panic!("round {round}: launch failed: {e}"),
             };

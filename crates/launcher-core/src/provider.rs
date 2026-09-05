@@ -27,23 +27,135 @@ pub struct ProviderPreset {
 /// The built-in preset library (~20 OpenAI-compatible providers).
 pub fn provider_presets() -> Vec<ProviderPreset> {
     let mut out = vec![
-        preset("deepseek", "DeepSeek", "https://api.deepseek.com", true, &["deepseek-chat", "deepseek-reasoner"]),
-        preset("openai", "OpenAI", "https://api.openai.com/v1", true, &["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "o3-mini"]),
-        preset("gemini", "Google Gemini (OpenAI-compatible)", "https://generativelanguage.googleapis.com/v1beta/openai", true, &["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]),
-        preset("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", true, &["openai/gpt-4o", "anthropic/claude-3.5-sonnet", "google/gemini-2.5-pro"]),
-        preset("groq", "Groq", "https://api.groq.com/openai/v1", true, &["llama-3.3-70b-versatile", "deepseek-r1-distill-llama-70b"]),
-        preset("mistral", "Mistral AI", "https://api.mistral.ai/v1", true, &["mistral-large-latest", "mistral-small-latest"]),
-        preset("together", "Together AI", "https://api.together.xyz/v1", true, &["meta-llama/Llama-3.3-70B-Instruct-Turbo"]),
-        preset("xai", "xAI Grok", "https://api.x.ai/v1", true, &["grok-2-latest"]),
-        preset("siliconflow", "SiliconFlow", "https://api.siliconflow.cn/v1", true, &["deepseek-ai/DeepSeek-V3", "Qwen/Qwen2.5-72B-Instruct"]),
-        preset("moonshot", "Moonshot Kimi", "https://api.moonshot.cn/v1", true, &["moonshot-v1-8k"]),
-        preset("zhipu", "Zhipu GLM", "https://open.bigmodel.cn/api/paas/v4", true, &["glm-4-plus"]),
-        preset("dashscope", "Alibaba DashScope", "https://dashscope.aliyuncs.com/compatible-mode/v1", true, &["qwen-max", "qwen-plus"]),
-        preset("ollama", "Ollama (local)", "http://localhost:11434/v1", false, &["llama3.2", "qwen2.5"]),
-        preset("vllm", "vLLM (local)", "http://localhost:8000/v1", false, &[]),
-        preset("lmstudio", "LM Studio (local)", "http://localhost:1234/v1", false, &[]),
-        preset("llamacpp", "llama.cpp server (local)", "http://localhost:8080/v1", false, &[]),
-        preset("anthropic", "Anthropic (experimental)", "https://api.anthropic.com/v1", true, &["claude-sonnet-4-5"]),
+        preset(
+            "deepseek",
+            "DeepSeek",
+            "https://api.deepseek.com",
+            true,
+            &["deepseek-chat", "deepseek-reasoner"],
+        ),
+        preset(
+            "openai",
+            "OpenAI",
+            "https://api.openai.com/v1",
+            true,
+            &[
+                "gpt-4o",
+                "gpt-4o-mini",
+                "gpt-4.1",
+                "gpt-4.1-mini",
+                "o3-mini",
+            ],
+        ),
+        preset(
+            "gemini",
+            "Google Gemini (OpenAI-compatible)",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            true,
+            &["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+        ),
+        preset(
+            "openrouter",
+            "OpenRouter",
+            "https://openrouter.ai/api/v1",
+            true,
+            &[
+                "openai/gpt-4o",
+                "anthropic/claude-3.5-sonnet",
+                "google/gemini-2.5-pro",
+            ],
+        ),
+        preset(
+            "groq",
+            "Groq",
+            "https://api.groq.com/openai/v1",
+            true,
+            &["llama-3.3-70b-versatile", "deepseek-r1-distill-llama-70b"],
+        ),
+        preset(
+            "mistral",
+            "Mistral AI",
+            "https://api.mistral.ai/v1",
+            true,
+            &["mistral-large-latest", "mistral-small-latest"],
+        ),
+        preset(
+            "together",
+            "Together AI",
+            "https://api.together.xyz/v1",
+            true,
+            &["meta-llama/Llama-3.3-70B-Instruct-Turbo"],
+        ),
+        preset(
+            "xai",
+            "xAI Grok",
+            "https://api.x.ai/v1",
+            true,
+            &["grok-2-latest"],
+        ),
+        preset(
+            "siliconflow",
+            "SiliconFlow",
+            "https://api.siliconflow.cn/v1",
+            true,
+            &["deepseek-ai/DeepSeek-V3", "Qwen/Qwen2.5-72B-Instruct"],
+        ),
+        preset(
+            "moonshot",
+            "Moonshot Kimi",
+            "https://api.moonshot.cn/v1",
+            true,
+            &["moonshot-v1-8k"],
+        ),
+        preset(
+            "zhipu",
+            "Zhipu GLM",
+            "https://open.bigmodel.cn/api/paas/v4",
+            true,
+            &["glm-4-plus"],
+        ),
+        preset(
+            "dashscope",
+            "Alibaba DashScope",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            true,
+            &["qwen-max", "qwen-plus"],
+        ),
+        preset(
+            "ollama",
+            "Ollama (local)",
+            "http://localhost:11434/v1",
+            false,
+            &["llama3.2", "qwen2.5"],
+        ),
+        preset(
+            "vllm",
+            "vLLM (local)",
+            "http://localhost:8000/v1",
+            false,
+            &[],
+        ),
+        preset(
+            "lmstudio",
+            "LM Studio (local)",
+            "http://localhost:1234/v1",
+            false,
+            &[],
+        ),
+        preset(
+            "llamacpp",
+            "llama.cpp server (local)",
+            "http://localhost:8080/v1",
+            false,
+            &[],
+        ),
+        preset(
+            "anthropic",
+            "Anthropic (experimental)",
+            "https://api.anthropic.com/v1",
+            true,
+            &["claude-sonnet-4-5"],
+        ),
     ];
     out.push(ProviderPreset {
         id: "custom".into(),
@@ -127,7 +239,10 @@ impl ProviderVault {
         }
         let text = std::fs::read_to_string(&file)?;
         let value: serde_json::Value = serde_json::from_str(&text)?;
-        let arr = value.get("providers").cloned().unwrap_or_else(|| serde_json::json!([]));
+        let arr = value
+            .get("providers")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
         Ok(serde_json::from_value(arr)?)
     }
 
@@ -218,7 +333,11 @@ mod tests {
     #[test]
     fn presets_are_unique_and_sane() {
         let presets = provider_presets();
-        assert!(presets.len() >= 15, "expected a rich preset library, got {}", presets.len());
+        assert!(
+            presets.len() >= 15,
+            "expected a rich preset library, got {}",
+            presets.len()
+        );
         let mut ids = std::collections::HashSet::new();
         for p in &presets {
             assert!(ids.insert(p.id.as_str()), "duplicate preset id {}", p.id);
@@ -231,7 +350,10 @@ mod tests {
                 assert!(!p.models.is_empty(), "{} has no models", p.id);
             }
         }
-        assert!(presets.iter().any(|p| p.id == "deepseek"), "deepseek preset missing");
+        assert!(
+            presets.iter().any(|p| p.id == "deepseek"),
+            "deepseek preset missing"
+        );
     }
 
     #[test]

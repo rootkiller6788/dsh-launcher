@@ -9,15 +9,15 @@ import {
   Shuffle,
   SlidersHorizontal,
 } from 'lucide-react'
-import { useAppStore, type InstallJob } from '../stores/appStore'
+import { useAppStore } from '../stores/appStore'
 import { useT } from '../lib/i18n'
+import { Select } from '../components/Select'
 import type {
   BundleManifest,
-  BundleSummary,
   ContentKind,
   InstalledPlugin,
+  Job,
   PluginUpdate,
-  RecommendPlan,
   RegistryPlugin,
 } from '../lib/types'
 
@@ -173,10 +173,8 @@ export function Market() {
   const busy = useAppStore((s) => s.busy)
   const activeInstance = useAppStore((s) => s.activeInstance)
   const activeId = useAppStore((s) => s.activeId)
-  const refreshDiagnostics = useAppStore((s) => s.refreshDiagnostics)
   const loadRegistry = useAppStore((s) => s.loadRegistry)
   const refreshInstalledPlugins = useAppStore((s) => s.refreshInstalledPlugins)
-  const refreshUpdates = useAppStore((s) => s.refreshUpdates)
   const installMarketEntry = useAppStore((s) => s.installMarketEntry)
   const uninstallPlugin = useAppStore((s) => s.uninstallPlugin)
   const togglePlugin = useAppStore((s) => s.togglePlugin)
@@ -184,7 +182,7 @@ export function Market() {
   const uninstallSkill = useAppStore((s) => s.uninstallSkill)
   const refreshInstalledSkills = useAppStore((s) => s.refreshInstalledSkills)
   const installedMcps = useAppStore((s) => s.installedMcps)
-  const installJobs = useAppStore((s) => s.installJobs)
+  const jobs = useAppStore((s) => s.jobs)
   const uninstallMcp = useAppStore((s) => s.uninstallMcp)
   const refreshInstalledMcps = useAppStore((s) => s.refreshInstalledMcps)
   const importBundle = useAppStore((s) => s.importBundle)
@@ -415,18 +413,19 @@ export function Market() {
                 </>
               )}
             </div>
-            <select
+            <Select
               value={sort}
-              onChange={(e) => {
-                setSort(e.target.value as SortKey)
+              onChange={(next: SortKey) => {
+                setSort(next)
                 setShuffleKey(0)
               }}
-              className="min-h-10 rounded-lg border border-zinc-800 bg-zinc-950/35 px-3 text-sm text-zinc-200 outline-none focus:border-blue-500"
-            >
-              <option value="stars">{t('market.sortStars')}</option>
-              <option value="new">{t('market.sortNew')}</option>
-              <option value="name">{t('market.sortName')}</option>
-            </select>
+              options={[
+                { value: 'stars', label: t('market.sortStars') },
+                { value: 'new', label: t('market.sortNew') },
+                { value: 'name', label: t('market.sortName') },
+              ]}
+              triggerClassName="h-10 w-44 shrink-0"
+            />
             <button
               onClick={() => setShuffleKey((k) => k + 1)}
               title="Shuffle (random order)"
@@ -469,13 +468,18 @@ export function Market() {
               <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
                 {shown.map((p) => {
                   const key = pluginKey(p)
+                  // Only an in-flight job (waiting/running) blocks re-install; a
+                  // terminal job leaves the card clickable to enqueue a fresh one.
+                  const job = jobs.find(
+                    (j) => j.key === key && (j.status === 'waiting' || j.status === 'running'),
+                  )
                   if ((p.kind ?? 'plugin') === 'skill') {
                     return (
                       <SkillCard
                         key={key}
                         plugin={p}
-                        installed={installedSkills.includes(key)}
-                        job={installJobs[key]}
+                        installed={installedSkills.some((r) => r.id === key)}
+                        job={job}
                         busy={busy}
                         install={installMarketEntry}
                         remove={uninstallSkill}
@@ -487,8 +491,8 @@ export function Market() {
                       <McpCard
                         key={key}
                         plugin={p}
-                        installed={installedMcps.includes(key)}
-                        job={installJobs[key]}
+                        installed={installedMcps.some((r) => r.id === key)}
+                        job={job}
                         busy={busy}
                         install={installMarketEntry}
                         remove={uninstallMcp}
@@ -504,7 +508,7 @@ export function Market() {
                         key={key}
                         plugin={p}
                         installed={skinInstalled(p)}
-                        job={installJobs[pluginKey(p)]}
+                        job={job}
                         busy={busy}
                         install={installMarketEntry}
                         remove={uninstallPlugin}
@@ -518,7 +522,7 @@ export function Market() {
                       plugin={p}
                       installed={match(p)}
                       update={match(p) ? updateFor(match(p)!.name) : undefined}
-                      job={installJobs[pluginKey(p)]}
+                      job={job}
                       busy={busy}
                       install={installMarketEntry}
                       remove={uninstallPlugin}
@@ -592,65 +596,6 @@ export function Market() {
   )
 }
 
-function PlanCard({
-  plan,
-  findItem,
-  importBundle,
-}: {
-  plan: RecommendPlan
-  findItem: (kind: ContentKind, name: string) => RegistryPlugin | undefined
-  importBundle: (manifest: BundleManifest) => Promise<BundleSummary | null>
-}) {
-  const t = useT()
-  const busy = useAppStore((s) => s.busy)
-  const installAll = async () => {
-    const items = plan.items
-      .map((it) => findItem(it.kind, it.name))
-      .filter((p): p is RegistryPlugin => !!p)
-    if (items.length === 0) return
-    await importBundle({
-      name: plan.title,
-      version: '1.0.0',
-      description: plan.rationale,
-      items,
-    })
-  }
-  return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-4">
-      <div className="mb-1 flex items-center gap-2">
-        <span className="rounded bg-blue-600/20 px-2 py-0.5 text-xs font-bold text-blue-300">
-          {plan.id}
-        </span>
-        <span className="font-semibold text-zinc-100">{plan.title}</span>
-      </div>
-      <p className="mb-3 text-xs text-zinc-400">{plan.rationale}</p>
-      <div className="space-y-2">
-        {plan.items.map((it) => (
-          <div
-            key={`${it.kind}:${it.name}`}
-            className="flex items-center gap-3 rounded-lg bg-zinc-900/60 px-3 py-2"
-          >
-            <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] uppercase text-zinc-400">
-              {t(KIND_LABEL[it.kind])}
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="truncate font-mono text-xs text-zinc-200">{it.name}</div>
-              <div className="truncate text-xs text-zinc-500">{it.reason}</div>
-            </div>
-          </div>
-        ))}
-      </div>
-      <button
-        onClick={() => void installAll()}
-        disabled={busy}
-        className="mt-3 w-full rounded-lg bg-blue-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-400 disabled:opacity-40"
-      >
-        {t('market.installAll')}
-      </button>
-    </div>
-  )
-}
-
 function BundleCard({
   plugin: p,
   findItem,
@@ -658,7 +603,7 @@ function BundleCard({
 }: {
   plugin: RegistryPlugin
   findItem: (kind: ContentKind, name: string) => RegistryPlugin | undefined
-  importBundle: (manifest: BundleManifest) => Promise<BundleSummary | null>
+  importBundle: (manifest: BundleManifest) => Promise<Job | null>
 }) {
   const t = useT()
   const busy = useAppStore((s) => s.busy)
@@ -717,7 +662,7 @@ function SkinCard({
 }: {
   plugin: RegistryPlugin
   installed: InstalledPlugin | undefined
-  job?: InstallJob
+  job?: Job
   busy: boolean
   install: (entry: RegistryPlugin) => Promise<boolean>
   remove: (name: string) => Promise<boolean>
@@ -782,7 +727,7 @@ function SkillCard({
 }: {
   plugin: RegistryPlugin
   installed: boolean
-  job?: InstallJob
+  job?: Job
   busy: boolean
   install: (entry: RegistryPlugin) => Promise<boolean>
   remove: (id: string) => Promise<boolean>
@@ -834,10 +779,10 @@ function McpCard({
 }: {
   plugin: RegistryPlugin
   installed: boolean
-  job?: InstallJob
+  job?: Job
   busy: boolean
   install: (entry: RegistryPlugin) => Promise<boolean>
-  remove: (entry: RegistryPlugin) => Promise<boolean>
+  remove: (id: string) => Promise<boolean>
 }) {
   const t = useT()
   const desc = p.description.en || p.description.zh || ''
@@ -864,7 +809,7 @@ function McpCard({
       <div className="mt-auto flex items-center gap-2">
         {installed ? (
           <button
-            onClick={() => void remove(p)}
+            onClick={() => void remove(pluginKey(p))}
             disabled={busy}
             className="ml-auto rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:border-red-500/50 hover:text-red-400 disabled:opacity-40"
           >
@@ -908,7 +853,7 @@ function PluginCard({
   plugin: RegistryPlugin
   installed: InstalledPlugin | undefined
   update: PluginUpdate | undefined
-  job?: InstallJob
+  job?: Job
   busy: boolean
   install: (entry: RegistryPlugin) => Promise<boolean>
   remove: (name: string) => Promise<boolean>

@@ -1,13 +1,14 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use launcher_core::instance::InstanceManifest;
 use launcher_core::process::{
     sweep_leftover, wait_for_port, PidLedger, ProcessState, ProcessStatus,
 };
-use launcher_core::{ExitSink, LogLine, LogSink, LogStream, NewUsageRecord, RuntimeAdapter};
+use launcher_core::{ExitSink, LogLevel, LogLine, LogSink, LogStream, NewUsageRecord, RuntimeAdapter};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::sync::oneshot;
 
 use crate::commands::plugins::refresh_plugin_inventory_cache;
 use crate::error::AppError;
@@ -17,6 +18,8 @@ use crate::state::AppState;
 const LOG_EVENT: &str = "logs";
 const DSH_URL_EVENT: &str = "dsh-url";
 const PROCESS_STATE_EVENT: &str = "process-state";
+/// Payload is the settings namespace that changed (`ui-theme` | `locale`).
+const SETTINGS_CHANGED_EVENT: &str = "dsh-settings-changed";
 
 /// Launch an instance's harness as a managed child, wait for DSH to report its
 /// web URL, then show the UI in a launcher-owned DSH window. One instance runs
@@ -40,6 +43,7 @@ async fn do_launch(
     app: &AppHandle,
     id: String,
 ) -> Result<ProcessState, AppError> {
+    let launch_start = Instant::now();
     {
         let mut guard = state.child.lock().await;
 
@@ -56,7 +60,7 @@ async fn do_launch(
                     return Ok(running.handle.state());
                 }
                 emit_log(
-                    &app,
+                    app,
                     &format!("Stopping {} to switch to {id}…", running.instance_id),
                 );
                 if let Some(mut r) = guard.take() {
@@ -64,9 +68,12 @@ async fn do_launch(
                     if let Some(shutdown) = r.usage_proxy_shutdown.take() {
                         let _ = shutdown.send(());
                     }
+                    if let Some(shutdown) = r.settings_watch_shutdown.take() {
+                        let _ = shutdown.send(());
+                    }
                     let _ = r.handle.stop().await;
-                    close_session(&state, "stopped");
-                    close_dsh_window(&app);
+                    close_session(state, "stopped");
+                    close_dsh_window(app);
                 }
             }
         }
@@ -92,6 +99,7 @@ async fn do_launch(
         .as_deref()
         .filter(|base| !base.trim().is_empty())
         .unwrap_or("https://api.deepseek.com");
+    let proxy_start = Instant::now();
     let (usage_proxy_base_url, mut usage_proxy) = match crate::usage_proxy::start(
         app.clone(),
         upstream_base.to_string(),
@@ -104,14 +112,18 @@ async fn do_launch(
     {
         Ok(proxy) => {
             env.insert("DEEPSEEK_BASE_URL".into(), proxy.base_url.clone());
-            emit_log(
-                &app,
-                &format!("{id} · usage proxy ready at {}", proxy.base_url),
+            emit_debug(
+                app,
+                &format!(
+                    "{id} · usage proxy ready at {} (+{}ms)",
+                    proxy.base_url,
+                    proxy_start.elapsed().as_millis()
+                ),
             );
             (Some(proxy.base_url), Some(proxy.shutdown))
         }
         Err(e) => {
-            emit_log(&app, &format!("{id} · usage proxy unavailable: {e}"));
+            emit_warn(app, &format!("{id} · usage proxy unavailable: {e}"));
             (None, None)
         }
     };
@@ -190,11 +202,12 @@ async fn do_launch(
     let swept = sweep_leftover(&ledger);
     if swept > 0 {
         emit_log(
-            &app,
+            app,
             &format!("Reaped {swept} leftover process tree(s) from a previous session"),
         );
     }
 
+    let spawn_start = Instant::now();
     let handle = match state
         .adapter
         .launch(&settings, &instance, &env, on_log, Some(on_exit))
@@ -205,19 +218,29 @@ async fn do_launch(
             if let Some(shutdown) = usage_proxy.take() {
                 let _ = shutdown.send(());
             }
-            close_session(&state, "crashed");
+            close_session(state, "crashed");
             return Err(e.into());
         }
     };
     let pid = handle.pid;
     ledger.record(pid);
-    emit_log(&app, &format!("{id} · DSH web starting (pid {pid})…"));
+    emit_log(app, &format!("{id} · DSH web starting (pid {pid})…"));
+    emit_debug(
+        app,
+        &format!("{id} · spawn took {}ms", spawn_start.elapsed().as_millis()),
+    );
 
     // Wait for the ready URL line (or the process to die / the 20s ceiling).
     let url = match tokio::time::timeout(Duration::from_secs(20), url_rx.recv()).await {
         Ok(Some(url)) => Some(url),
         _ => None,
     };
+    if url.is_some() {
+        emit_debug(
+            app,
+            &format!("{id} · DSH URL ready after {}ms", launch_start.elapsed().as_millis()),
+        );
+    }
 
     // The process may have already died while we waited — reflect that.
     let died = matches!(
@@ -232,10 +255,11 @@ async fn do_launch(
             url: None,
             port: None,
             usage_proxy_shutdown: usage_proxy,
+            settings_watch_shutdown: None,
         });
         let st = guard.as_ref().expect("just stored").handle.state();
         if st.status == ProcessStatus::Crashed {
-            close_session(&state, "crashed");
+            close_session(state, "crashed");
         }
         let _ = app.emit(PROCESS_STATE_EVENT, &st);
         return Ok(st);
@@ -243,18 +267,18 @@ async fn do_launch(
 
     let ready_url = url.clone();
     let port = ready_url.as_ref().and_then(|u| url_port(u));
-    match ready_url.as_deref() {
+    let settings_watch = match ready_url.as_deref() {
         Some(url) => {
             finalize_ready(
-                &app,
+                app,
                 &provider,
                 &settings,
                 &instance,
                 &handle,
-                &url,
+                url,
                 usage_proxy_base_url.as_deref(),
             )
-            .await;
+            .await
         }
         None => {
             // The 20s ceiling is too short for a cold first boot (fresh `web`
@@ -264,7 +288,7 @@ async fn do_launch(
             // task that opens the DSH window the moment the URL finally lands.
             handle.set_status(ProcessStatus::Degraded);
             emit_log(
-                &app,
+                app,
                 &format!("{id} · DSH web did not report a URL within 20s — still booting, waiting in background…"),
             );
             let app = app.clone();
@@ -283,7 +307,7 @@ async fn do_launch(
                             if r.handle.pid == pid {
                                 r.port = url_port(&url);
                                 r.url = Some(url.clone());
-                                finalize_ready(
+                                r.settings_watch_shutdown = finalize_ready(
                                     &app,
                                     &provider,
                                     &settings,
@@ -304,8 +328,9 @@ async fn do_launch(
                     }
                 }
             });
+            None
         }
-    }
+    };
     let mut guard = state.child.lock().await;
     *guard = Some(crate::state::RunningChild {
         instance_id: id,
@@ -313,6 +338,7 @@ async fn do_launch(
         url: ready_url,
         port,
         usage_proxy_shutdown: usage_proxy,
+        settings_watch_shutdown: settings_watch,
     });
     let st = guard.as_ref().expect("just stored").handle.state();
     let _ = app.emit(PROCESS_STATE_EVENT, &st);
@@ -385,6 +411,9 @@ pub async fn process_state(
                 if let Some(shutdown) = running.usage_proxy_shutdown.take() {
                     let _ = shutdown.send(());
                 }
+                if let Some(shutdown) = running.settings_watch_shutdown.take() {
+                    let _ = shutdown.send(());
+                }
             }
         }
         close_dsh_window(&app);
@@ -409,6 +438,9 @@ async fn do_stop(state: &AppState, app: &AppHandle) -> Result<ProcessState, AppE
     if let Some(mut running) = running.take() {
         emit_log(app, &format!("Stopping {}…", running.instance_id));
         if let Some(shutdown) = running.usage_proxy_shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(shutdown) = running.settings_watch_shutdown.take() {
             let _ = shutdown.send(());
         }
         let _ = running.handle.stop().await;
@@ -678,7 +710,7 @@ async fn finalize_ready(
     handle: &launcher_core::process::ChildHandle,
     url: &str,
     usage_proxy_base_url: Option<&str>,
-) {
+) -> Option<oneshot::Sender<()>> {
     let port = url_port(url);
     if let Some(port) = port {
         let _ = wait_for_port(port, Duration::from_secs(5)).await;
@@ -686,6 +718,25 @@ async fn finalize_ready(
     handle.set_status(ProcessStatus::Running);
     emit_log(app, &format!("{} · DSH web ready at {url}", instance.id));
     let _ = app.emit(DSH_URL_EVENT, url.to_string());
+    // Subscribe to DSH's host SSE stream so an appearance/language change made
+    // inside the DSH window reaches the launcher immediately (no poll lag). The
+    // sender is handed to the caller to cancel on stop.
+    let mut settings_watch = None;
+    if let Some(port) = port {
+        let (tx, rx) = oneshot::channel::<()>();
+        settings_watch = Some(tx);
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let emitter = app.clone();
+            let res = dsh_adapter::events::watch_settings_changes(port, rx, move |ns| {
+                let _ = emitter.emit(SETTINGS_CHANGED_EVENT, ns.to_string());
+            })
+            .await;
+            if let Err(e) = res {
+                emit_debug(&app, &format!("settings watch ended: {e:#}"));
+            }
+        });
+    }
     if let Some(port) = port {
         let app = app.clone();
         let provider = provider.clone();
@@ -697,11 +748,11 @@ async fn finalize_ready(
             // while cosmetic/catalog maintenance can wait until DSH has hydrated.
             if let Some(base_url) = usage_proxy_base_url.as_deref() {
                 match dsh_adapter::llm::set_base_url(port, base_url).await {
-                    Ok(()) => emit_log(
+                    Ok(()) => emit_debug(
                         &app,
                         &format!("{} · usage proxy injected into DSH settings", instance.id),
                     ),
-                    Err(e) => emit_log(
+                    Err(e) => emit_warn(
                         &app,
                         &format!("{} · usage proxy settings sync failed: {e}", instance.id),
                     ),
@@ -712,6 +763,7 @@ async fn finalize_ready(
 
             let state = app.state::<AppState>();
             let job_id = instance.id.clone();
+            let sync_start = Instant::now();
             let result = run_instance_job(
                 &state,
                 &app,
@@ -723,9 +775,18 @@ async fn finalize_ready(
             )
             .await;
             if let Err(e) = result {
-                emit_log(
+                emit_warn(
                     &app,
                     &format!("{} · DSH inventory cache refresh failed: {e}", instance.id),
+                );
+            } else {
+                emit_debug(
+                    &app,
+                    &format!(
+                        "{} · inventory sync took {}ms",
+                        instance.id,
+                        sync_start.elapsed().as_millis()
+                    ),
                 );
             }
 
@@ -733,7 +794,7 @@ async fn finalize_ready(
 
             if !provider.profile.models.is_empty() {
                 if let Err(e) = dsh_adapter::llm::set_models(port, &provider.profile.models).await {
-                    emit_log(
+                    emit_warn(
                         &app,
                         &format!("{} · model catalog sync failed: {e}", instance.id),
                     );
@@ -760,13 +821,29 @@ async fn finalize_ready(
             }
         });
     }
+    settings_watch
 }
 
 pub(crate) fn emit_log(app: &AppHandle, line: &str) {
+    emit_log_at(app, line, LogLevel::Info);
+}
+
+/// Low-signal bookkeeping (proxy inject, inventory sync, queue progress) —
+/// hidden from Activity's default view, kept for debugging.
+pub(crate) fn emit_debug(app: &AppHandle, line: &str) {
+    emit_log_at(app, line, LogLevel::Debug);
+}
+
+pub(crate) fn emit_warn(app: &AppHandle, line: &str) {
+    emit_log_at(app, line, LogLevel::Warn);
+}
+
+pub(crate) fn emit_log_at(app: &AppHandle, line: &str, level: LogLevel) {
     let _ = app.emit(
         LOG_EVENT,
         LogLine {
             stream: LogStream::Stdout,
+            level,
             line: line.to_string(),
         },
     );
