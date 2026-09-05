@@ -4,6 +4,10 @@
  * (design-platform.css) — DSH's dark theme is a "soft dark" (#151517 base,
  * #232324 surfaces), notably lighter than Tailwind's near-black zinc. */
 @theme {
+  /* Dense desktop breakpoint: keep Overview's wide 2-row mosaic down to ~896px
+   * before it collapses to the stacked layout (the default lg: at 1024 felt
+   * too early when the window is only a bit narrow). */
+  --breakpoint-dense: 56rem;
   --color-zinc-50: #f9fafb;
   --color-zinc-100: #ebeff2;
   --color-zinc-200: #e1e5ee;
@@ -104,4 +108,26 @@ body {
   to {
     opacity: 1;
   }
+}
+
+/* Workspace / manage shell panels crossfade. The workspace iframe stays
+ * mounted (switching back must not reload DSH), so instead of remounting it we
+ * fade it: entering the active side reveals it at once (immediate visibility)
+ * and ramps opacity in; leaving hides it only after the fade has finished
+ * (visibility delayed by the transition duration). */
+.shell-panel {
+  transition:
+    opacity 200ms ease-out,
+    visibility 0s linear 200ms;
+}
+.shell-panel-active {
+  opacity: 1;
+  visibility: visible;
+  transition:
+    opacity 200ms ease-out,
+    visibility 0s;
+}
+.shell-panel-idle {
+  opacity: 0;
+  visibility: hidden;
 }

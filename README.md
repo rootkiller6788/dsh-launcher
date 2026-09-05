@@ -80,10 +80,10 @@ dsh-launcher/
 
 ## Data directory
 
-Everything lives under `%LOCALAPPDATA%/AIHarnessLauncher/`:
+Installed (default) everything lives under `%LOCALAPPDATA%/AIHarnessLauncher/`. In **portable (green) mode** the root is the folder the exe sits in — drop the exe (plus bundled resources) anywhere and every byte stays next to it, so the whole launcher is movable on a USB stick.
 
 ```
-AIHarnessLauncher/
+<root>/
 ├── settings.json             app settings (DSH path override, theme, last instance)
 ├── providers.json            provider metadata (API key is in Credential Manager, never here)
 ├── launcher.db               SQLite launch history
@@ -98,7 +98,12 @@ AIHarnessLauncher/
 | Variable | Purpose |
 | --- | --- |
 | `AHL_HOME` | Override the data root (default `%LOCALAPPDATA%/AIHarnessLauncher`; dev/testing) |
+| `AHL_PORTABLE` | Set to a truthy value (`1`, `yes`, `on`, …) to force portable mode: data root = the exe's own directory |
 | `DSH_CLI_BIN` | Override the DSH CLI entry (`…/apps/cli/lib/bin.js`) |
+
+## Portable (green) mode
+
+Create an empty `portable` file (or `.portable`) next to the launcher exe, and the launcher switches to portable mode on the next start: `runtimes/`, `instances/`, `settings.json`, `cache/`, `logs/` and `launcher.db` all live beside the exe. Remove the marker to go back to the per-user install layout. The mode is surfaced in Settings → Data storage. API keys stay in Windows Credential Manager and never travel with the folder.
 
 ## Architecture
 

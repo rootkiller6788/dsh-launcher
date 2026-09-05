@@ -76,6 +76,18 @@ function sourceLabelKey(source: LibraryInventoryItem['source']) {
   return `library.source.${source}`
 }
 
+/** Version badge text: `#hash` stays as-is (skills), npm versions get a `v`. */
+function versionLabel(v?: string | null): string | null {
+  if (!v) return null
+  return v.startsWith('#') ? v : `v${v}`
+}
+
+/** Trim a full content hash (64 hex) to its `#<8>` prefix for compact display. */
+function shortHashRef(v?: string | null): string | null {
+  if (!v) return null
+  return /^[0-9a-f]{16,}$/.test(v) ? `#${v.slice(0, 8)}` : v
+}
+
 function stateSourceLabelKey(source: LibraryInventoryItem['stateSource']) {
   return `library.stateSource.${source}`
 }
@@ -103,10 +115,13 @@ function AssetRow({
   status,
   source,
   detail,
+  issues,
+  version,
   enabled,
   busy,
   onToggle,
   onUpdate,
+  updateTo,
   onRemove,
 }: {
   kind: LibraryKind
@@ -116,14 +131,19 @@ function AssetRow({
   status: string
   source: string
   detail?: string
+  issues?: string[]
+  version?: string | null
   enabled?: boolean
   busy?: boolean
   onToggle?: () => void
   onUpdate?: () => void
+  updateTo?: string
   onRemove?: () => void
 }) {
   const t = useT()
   const tone = TONES[kind]
+  const versionBadge = versionLabel(version)
+  const isOn = enabled !== false
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 rounded-lg border border-zinc-800/70 bg-zinc-950/25 px-4 py-3">
       <div className="flex min-w-0 items-center gap-3">
@@ -136,16 +156,26 @@ function AssetRow({
             {meta}
             {detail ? ` · ${detail}` : ''}
           </div>
+          {issues && issues.length > 0 && (
+            <div className="mt-0.5 truncate text-[11px] text-amber-400/90">
+              {issues.map((code) => t(`library.issue.${code}`)).join(' · ')}
+            </div>
+          )}
         </div>
       </div>
 
       <div className="flex items-center gap-2">
+        {versionBadge && (
+          <span className="rounded-full border border-zinc-800/80 bg-zinc-950/60 px-2 py-1 font-mono text-[10px] text-zinc-400">
+            {versionBadge}
+          </span>
+        )}
         <span className="rounded-full border border-zinc-800 bg-zinc-950/50 px-2 py-1 text-[10px] font-medium text-zinc-400">
           {source}
         </span>
         <span
           className={`rounded-full px-2 py-1 text-[10px] font-medium uppercase tracking-wide ${
-            enabled === false
+            !isOn
               ? 'bg-zinc-500/15 text-zinc-400'
               : 'bg-emerald-500/10 text-emerald-400'
           }`}
@@ -154,11 +184,21 @@ function AssetRow({
         </span>
         {onToggle && (
           <button
+            type="button"
+            role="switch"
+            aria-checked={isOn}
             onClick={onToggle}
             disabled={busy}
-            className="h-8 rounded-lg border border-zinc-800 px-3 text-xs font-medium text-zinc-300 hover:border-blue-500/40 hover:text-blue-200 disabled:cursor-not-allowed disabled:opacity-45"
+            title={isOn ? t('library.disable') : t('library.enable')}
+            className={`relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
+              isOn ? 'bg-blue-500' : 'bg-zinc-700'
+            }`}
           >
-            {enabled ? t('library.disable') : t('library.enable')}
+            <span
+              className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${
+                isOn ? 'left-[18px]' : 'left-0.5'
+              }`}
+            />
           </button>
         )}
         {onUpdate && (
@@ -169,6 +209,7 @@ function AssetRow({
           >
             <RefreshCw className="h-3.5 w-3.5" strokeWidth={1.75} />
             {t('library.update')}
+            {updateTo ? ` → ${updateTo}` : ''}
           </button>
         )}
         {onRemove && (
@@ -192,21 +233,24 @@ export function Library() {
   const activeInstance = useAppStore((s) => s.activeInstance)
   const activeId = useAppStore((s) => s.activeId)
   const libraryDetail = useAppStore((s) => s.libraryDetail)
-  const installJobs = useAppStore((s) => s.installJobs)
   const updates = useAppStore((s) => s.updates)
+  const skillUpdates = useAppStore((s) => s.skillUpdates)
   const busy = useAppStore((s) => s.busy)
   const loadRegistry = useAppStore((s) => s.loadRegistry)
   const refreshLibraryDetail = useAppStore((s) => s.refreshLibraryDetail)
-  const reconcileLibraryInventory = useAppStore((s) => s.reconcileLibraryInventory)
-  const refreshUpdates = useAppStore((s) => s.refreshUpdates)
   const togglePlugin = useAppStore((s) => s.togglePlugin)
   const updatePlugin = useAppStore((s) => s.updatePlugin)
+  const updateSkill = useAppStore((s) => s.updateSkill)
   const uninstallPlugin = useAppStore((s) => s.uninstallPlugin)
   const uninstallSkill = useAppStore((s) => s.uninstallSkill)
   const uninstallMcp = useAppStore((s) => s.uninstallMcp)
+  const setMcpEnabled = useAppStore((s) => s.setMcpEnabled)
   const [kind, setKind] = useState<LibraryKind>('plugin')
 
   useEffect(() => {
+    // Page-open reads the snapshot cache only — no DSH deep-scan and no
+    // per-plugin npm update-check here. Reconciliation runs in the launch
+    // background task + after installs; update-check runs post-launch.
     void loadRegistry()
     void refreshLibraryDetail()
   }, [activeId, loadRegistry, refreshLibraryDetail])
@@ -222,14 +266,6 @@ export function Library() {
   const mcps = inventoryItems.filter((item) => item.kind === 'mcp')
   const total = inventoryItems.length
   const inventoryCount = inventoryItems.filter((item) => item.stateSource === 'dshInventory').length
-  const jobCount = Object.keys(installJobs).length
-
-  const refreshAll = () => {
-    void (async () => {
-      await reconcileLibraryInventory()
-      await refreshUpdates()
-    })()
-  }
 
   const renderRows = () => {
     const visible =
@@ -239,9 +275,15 @@ export function Library() {
       const rowKind = itemKind(item.kind)
       const Icon = rowKind === 'plugin' ? Puzzle : rowKind === 'theme' ? Layers3 : rowKind === 'skill' ? Sparkles : Waypoints
       const catalogEntry = item.market?.key ? findCatalogEntry(catalog, item.kind, item.market.key) : undefined
+      // Plugin updates are keyed by package name; skill updates by content id —
+      // an "Update" appears only when the backend's check found a newer hash.
       const update = item.packageName
         ? updates.find((u) => u.name === item.packageName && u.updatable)
         : undefined
+      const skillUpdate =
+        item.kind === 'skill'
+          ? skillUpdates.find((u) => u.id === item.id && u.updatable)
+          : undefined
       const removablePlugin =
         item.packageName && item.source !== 'dshNative'
           ? () => void uninstallPlugin(item.packageName!)
@@ -276,15 +318,36 @@ export function Library() {
           }
           source={t(sourceLabelKey(item.source))}
           detail={`${t(stateSourceLabelKey(item.stateSource))}${item.detail ? ` · ${item.detail}` : ''}`}
+          issues={item.issues}
+          version={item.version}
           enabled={item.enabled ?? undefined}
           busy={busy}
-          onToggle={item.toggleable && item.packageName ? () => void togglePlugin(item.packageName!, !item.enabled) : undefined}
-          onUpdate={update && item.packageName ? () => void updatePlugin(item.packageName!) : undefined}
+          onToggle={
+            item.kind === 'mcp'
+              ? () => void setMcpEnabled(item.id, !(item.enabled ?? true))
+              : item.toggleable && item.packageName
+                ? () => void togglePlugin(item.packageName!, !item.enabled)
+                : undefined
+          }
+          onUpdate={
+            item.kind === 'skill'
+              ? skillUpdate
+                ? () => void updateSkill(item.id)
+                : undefined
+              : update && item.packageName
+                ? () => void updatePlugin(item.packageName!)
+                : undefined
+          }
+          updateTo={
+            item.kind === 'skill'
+              ? shortHashRef(skillUpdate?.latest) ?? undefined
+              : update?.latest ?? undefined
+          }
           onRemove={
             item.kind === 'skill'
               ? removableSkill
               : item.kind === 'mcp'
-                ? mcpEntry ? () => void uninstallMcp(mcpEntry) : undefined
+                ? () => void uninstallMcp(item.id)
                 : removablePlugin
           }
         />
@@ -304,15 +367,7 @@ export function Library() {
             <span className="font-medium text-zinc-200">{activeInstance?.name ?? '-'}</span>
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={refreshAll}
-            className="flex min-h-10 items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 text-sm font-medium text-zinc-300 hover:border-blue-500/40 hover:text-blue-200"
-          >
-            <RefreshCw className="h-4 w-4" strokeWidth={1.75} />
-            {t('overview.refreshChecks')}
-          </button>
-        </div>
+        <InstallCenter />
       </div>
 
       <div className="grid min-h-0 flex-1 grid-cols-12 gap-5">
@@ -320,7 +375,7 @@ export function Library() {
           <div className="grid grid-cols-3 gap-3">
             <SectionStat label={t('library.total')} value={total} />
             <SectionStat label={t('library.enabled')} value={inventoryItems.filter((item) => item.enabled).length} />
-            <SectionStat label="DSH Inventory" value={inventoryCount} />
+            <SectionStat label={t('library.stateSource.dshInventory')} value={inventoryCount} />
           </div>
 
             <div className="mt-5 space-y-2">
@@ -350,10 +405,6 @@ export function Library() {
                 </button>
               )
             })}
-          </div>
-
-          <div className="mt-5 rounded-lg border border-zinc-800/70 bg-zinc-950/25 p-4">
-            <InstallCenter embedded />
           </div>
 
           <div className="mt-auto rounded-lg border border-zinc-800/70 bg-zinc-950/25 p-4">

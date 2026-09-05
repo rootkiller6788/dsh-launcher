@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   Activity as ActivityIcon,
   Boxes,
@@ -19,12 +19,12 @@ import { useAppStore } from './stores/appStore'
 import { applyTheme } from './lib/theme'
 import { useT } from './lib/i18n'
 import { StatusDot } from './components/StatusDot'
-import { InstallCenter } from './components/InstallCenter'
 import logo from './assets/dshl-logo.png'
 import { Overview } from './pages/Overview'
 import { Instances } from './pages/Instances'
 import { Market } from './pages/Market'
 import { Library } from './pages/Library'
+import { Installs } from './pages/Installs'
 import { Activity } from './pages/Activity'
 import { Settings } from './pages/Settings'
 
@@ -75,6 +75,25 @@ function Workspace() {
   const setShellMode = useAppStore((s) => s.setShellMode)
   const status = processState?.status ?? 'stopped'
   const live = status === 'running' || status === 'starting' || status === 'degraded'
+  const paintedRef = useRef(false)
+
+  // Stage timing (Stage 11): once the workspace iframe first renders after a
+  // launch, emit a debug log with the end-to-end launch→paint latency. The
+  // launch action stamps `launchStartedAt`; this clears it so the next launch
+  // starts a fresh measurement.
+  useEffect(() => {
+    if (!(live && dshUrl) || paintedRef.current) return
+    paintedRef.current = true
+    const { launchStartedAt, appendLog } = useAppStore.getState()
+    if (launchStartedAt != null) {
+      appendLog({
+        stream: 'stdout',
+        level: 'debug',
+        line: `workspace first paint +${Date.now() - launchStartedAt}ms`,
+      })
+      useAppStore.setState({ launchStartedAt: null })
+    }
+  }, [live, dshUrl])
 
   if (live && dshUrl) {
     return (
@@ -199,9 +218,9 @@ export default function App() {
     <div className="flex h-full flex-col overflow-hidden bg-zinc-950 text-zinc-200">
       <header
         data-tauri-drag-region
-        className="grid h-[52px] shrink-0 grid-cols-[13rem_1fr_22rem] items-center border-b border-zinc-800 bg-zinc-950/95 pl-4"
+        className="grid h-[52px] shrink-0 grid-cols-[1fr_auto_1fr] items-center border-b border-zinc-800 bg-zinc-950/95"
       >
-        <div className="flex w-52 shrink-0 items-center gap-2.5">
+        <div className="flex w-52 shrink-0 items-center gap-2.5 justify-self-start pl-4">
           <img src={logo} alt="DSH" className="h-8 w-8 shrink-0 rounded-full object-cover" />
           <div className="min-w-0">
             <div className="truncate text-sm font-semibold text-zinc-100">DSH Launcher</div>
@@ -228,10 +247,7 @@ export default function App() {
             </button>
           ))}
         </div>
-        <div className="flex h-full items-center justify-end gap-2">
-          <div className="mr-1">
-            <InstallCenter />
-          </div>
+        <div className="flex h-full items-center justify-end gap-2 justify-self-end">
           <TitleBarButton onClick={() => void appWindow.minimize()}>
             <Minus className="h-3.5 w-3.5" strokeWidth={1.75} />
           </TitleBarButton>
@@ -259,10 +275,8 @@ export default function App() {
 
       <div className="relative min-h-0 flex-1 overflow-hidden">
         <div
-          className={`absolute inset-0 min-h-0 ${
-            shellMode === 'workspace'
-              ? 'visible opacity-100'
-              : 'pointer-events-none invisible opacity-0'
+          className={`shell-panel absolute inset-0 min-h-0 ${
+            shellMode === 'workspace' ? 'shell-panel-active' : 'shell-panel-idle'
           }`}
           aria-hidden={shellMode !== 'workspace'}
         >
@@ -270,7 +284,7 @@ export default function App() {
         </div>
 
         {shellMode === 'manage' && (
-        <div className="absolute inset-0 min-h-0 animate-[manageIn_140ms_ease-out]" aria-hidden={false}>
+        <div className="absolute inset-0 min-h-0 animate-[manageIn_200ms_ease-out]" aria-hidden={false}>
           <div className="flex h-full min-h-0">
             <aside className="flex w-52 shrink-0 flex-col border-r border-zinc-800 bg-zinc-900/60">
               <nav className="flex-1 space-y-1 px-3 py-5">
@@ -311,6 +325,7 @@ export default function App() {
                 {displayPage === 'instances' && <Instances />}
                 {displayPage === 'market' && <Market />}
                 {displayPage === 'library' && <Library />}
+                {displayPage === 'installs' && <Installs />}
                 {displayPage === 'activity' && <Activity />}
                 {displayPage === 'settings' && <Settings />}
               </div>

@@ -20,6 +20,14 @@ pub struct AppSettings {
     /// Theme preference: `"light"`, `"dark"`, or `"system"` (default).
     /// Synced with the running DSH's `ui-theme.preference`.
     pub theme: Option<String>,
+    /// Crash-telemetry consent. Default off (#602): no crash data leaves the
+    /// machine unless the user opts in here. When true, a panic also writes a
+    /// minimal `crash-<ts>.json` sidecar that the next launch may upload.
+    #[serde(default)]
+    pub telemetry_enabled: bool,
+    /// User-owned crash-ingest URL (`https://…`). When unset, consent alone
+    /// enables nothing — there is nowhere to send.
+    pub telemetry_endpoint: Option<String>,
 }
 
 impl AppSettings {

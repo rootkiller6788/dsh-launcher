@@ -36,8 +36,14 @@ fn instance_crud_isolation_and_history() {
     assert_ne!(coding.workspace, research.workspace);
 
     // Isolation: a file written into A's workspace never appears in B's.
-    fs::write(PathBuf::from(&coding.workspace).join("marker.txt"), "a-only").unwrap();
-    assert!(!PathBuf::from(&research.workspace).join("marker.txt").exists());
+    fs::write(
+        PathBuf::from(&coding.workspace).join("marker.txt"),
+        "a-only",
+    )
+    .unwrap();
+    assert!(!PathBuf::from(&research.workspace)
+        .join("marker.txt")
+        .exists());
 
     // --- list ---
     let all = InstanceManifest::list(&paths).expect("list");
@@ -53,10 +59,16 @@ fn instance_crud_isolation_and_history() {
     // --- clone: new id + deep-copied workspace ---
     let copy = InstanceManifest::clone(&paths, "coding-agent", "Research Agent").expect("clone");
     assert_eq!(copy.id, "research-agent-2");
-    assert!(PathBuf::from(&copy.workspace).join("marker.txt").exists(),
-        "clone deep-copies workspace");
+    assert!(
+        PathBuf::from(&copy.workspace).join("marker.txt").exists(),
+        "clone deep-copies workspace"
+    );
     // Editing the copy must not touch the source.
-    fs::write(PathBuf::from(&copy.workspace).join("marker.txt"), "copy-only").unwrap();
+    fs::write(
+        PathBuf::from(&copy.workspace).join("marker.txt"),
+        "copy-only",
+    )
+    .unwrap();
     assert_eq!(
         fs::read_to_string(PathBuf::from(&coding.workspace).join("marker.txt")).unwrap(),
         "a-only"
@@ -71,9 +83,16 @@ fn instance_crud_isolation_and_history() {
     InstanceManifest::delete(&paths, "research-agent").expect("delete non-last instance");
     let remaining = InstanceManifest::list(&paths).expect("list final");
     assert_eq!(remaining.len(), 1);
-    assert!(InstanceManifest::delete(&paths, "coding-agent").is_err(),
-        "cannot delete the last instance");
-    assert_eq!(InstanceManifest::list(&paths).expect("list after refused delete").len(), 1);
+    assert!(
+        InstanceManifest::delete(&paths, "coding-agent").is_err(),
+        "cannot delete the last instance"
+    );
+    assert_eq!(
+        InstanceManifest::list(&paths)
+            .expect("list after refused delete")
+            .len(),
+        1
+    );
 
     // --- history: record, read back, close, persist across reopen ---
     let db = paths.db_file();

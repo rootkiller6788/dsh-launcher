@@ -1,18 +1,21 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
+  AppPathsInfo,
   AppSettings,
   BundleManifest,
-  BundleSummary,
   DiagnosticsReport,
   EnvironmentExportResult,
-  EnvironmentImportResult,
   EnvironmentPreviewResult,
   InstanceManifest,
   InstalledPlugin,
+  Job,
   LibraryInventoryDetail,
   LibraryInventorySummary,
   LaunchSession,
+  McpServerRecord,
   PluginUpdate,
+  SkillRecord,
+  SkillUpdate,
   ProcessState,
   ProviderPreset,
   ProviderProfile,
@@ -60,6 +63,8 @@ export const ipc = {
   openDshExternal: () => call<void>('open_dsh_external'),
   revealInstanceWorkspace: (id: string) => call<void>('reveal_instance_workspace', { id }),
   revealInstanceConfig: (id: string) => call<void>('reveal_instance_config', { id }),
+  appPaths: () => call<AppPathsInfo>('app_paths'),
+  revealDataDir: () => call<void>('reveal_data_dir'),
   currentDshUrl: () => call<string | null>('current_dsh_url'),
   processState: () => call<ProcessState>('process_state'),
   runningInstance: () => call<string | null>('running_instance'),
@@ -87,7 +92,14 @@ export const ipc = {
 
   marketRegistry: () => call<Registry>('market_registry'),
   marketRecommend: (need: string) => call<RecommendResult>('market_recommend', { need }),
-  marketInstall: (id: string, entry: RegistryPlugin) => call<void>('market_install', { id, entry }),
+  // Install jobs (Stage 8): install commands now enqueue and return a Job row.
+  marketInstall: (id: string, entry: RegistryPlugin) =>
+    call<Job>('market_install', { id, entry }),
+  jobsList: () => call<Job[]>('jobs_list'),
+  jobsCancel: (id: number) => call<Job | null>('jobs_cancel', { id }),
+  jobsRetry: (id: number) => call<Job>('jobs_retry', { id }),
+  jobsDelete: (id: number) => call<void>('jobs_delete', { id }),
+  jobsClearFinished: () => call<number>('jobs_clear_finished'),
   pluginsList: (id: string, dshPort?: number | null) =>
     call<InstalledPlugin[]>('plugins_list', { id, dshPort }),
   libraryInventorySummaries: () =>
@@ -97,7 +109,7 @@ export const ipc = {
   libraryInventoryRefresh: (id: string) =>
     call<LibraryInventoryDetail>('library_inventory_refresh', { id }),
   pluginInstall: (id: string, target: string, entry?: RegistryPlugin | null) =>
-    call<void>('plugin_install', { id, target, entry }),
+    call<Job>('plugin_install', { id, target, entry }),
   pluginUninstall: (id: string, name: string) => call<void>('plugin_uninstall', { id, name }),
   pluginToggle: (id: string, name: string, enabled: boolean) =>
     call<void>('plugin_toggle', { id, name, enabled }),
@@ -105,24 +117,30 @@ export const ipc = {
   pluginUpdate: (id: string, name: string) => call<void>('plugin_update', { id, name }),
   profileDiagnostics: (id: string) => call<DiagnosticsReport>('profile_diagnostics', { id }),
 
-  skillList: (id: string) => call<string[]>('skill_list', { id }),
-  skillInstall: (id: string, entry: RegistryPlugin) => call<void>('skill_install', { id, entry }),
+  skillList: (id: string) => call<SkillRecord[]>('skill_list', { id }),
+  skillInstall: (id: string, entry: RegistryPlugin) =>
+    call<Job>('skill_install', { id, entry }),
   skillUninstall: (id: string, skill: string) => call<void>('skill_uninstall', { id, skill }),
+  skillUpdates: (id: string) => call<SkillUpdate[]>('skill_updates', { id }),
+  skillUpdate: (id: string, skill: string) => call<void>('skill_update', { id, skill }),
 
-  mcpList: (id: string) => call<string[]>('mcp_list', { id }),
-  mcpInstall: (id: string, entry: RegistryPlugin) => call<void>('mcp_install', { id, entry }),
-  mcpUninstall: (id: string, entry: RegistryPlugin) => call<void>('mcp_uninstall', { id, entry }),
+  mcpList: (id: string) => call<McpServerRecord[]>('mcp_list', { id }),
+  mcpInstall: (id: string, entry: RegistryPlugin) =>
+    call<Job>('mcp_install', { id, entry }),
+  mcpUninstall: (id: string, mcp: string) => call<void>('mcp_uninstall', { id, mcp }),
+  mcpSetEnabled: (id: string, mcp: string, enabled: boolean) =>
+    call<McpServerRecord[]>('mcp_set_enabled', { id, mcp, enabled }),
 
   bundleImport: (id: string, manifest: BundleManifest) =>
-    call<BundleSummary>('bundle_import', { id, manifest }),
+    call<Job>('bundle_import', { id, manifest }),
   environmentExport: (id: string) =>
     call<EnvironmentExportResult>('environment_export', { id }),
   environmentPreview: (bytes: number[]) =>
     call<EnvironmentPreviewResult>('environment_preview', { bytes }),
   environmentImport: (path: string, name?: string | null) =>
-    call<EnvironmentImportResult>('environment_import', { path, name }),
+    call<Job>('environment_import', { path, name }),
   environmentImportPackage: (bytes: number[], name?: string | null) =>
-    call<EnvironmentImportResult>('environment_import_package', { bytes, name }),
+    call<Job>('environment_import_package', { bytes, name }),
 
   getSettings: () => call<AppSettings>('get_settings'),
   setSettings: (settings: AppSettings) => call<AppSettings>('set_settings', { settings }),

@@ -4,24 +4,29 @@ import {
   Boxes,
   Copy,
   FileUp,
-  Fingerprint,
   Folder,
   Layers3,
   Pencil,
   Play,
   Plus,
-  Puzzle,
   Save,
   ShieldCheck,
   Trash2,
-  Waypoints,
   X,
 } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
 import { useT } from '../lib/i18n'
 import { ipc } from '../lib/ipc'
 import { StatusDot } from '../components/StatusDot'
-import type { EnvironmentImportResult, EnvironmentPreviewResult, InstanceManifest } from '../lib/types'
+import type { ContentKind, EnvironmentPreviewResult, InstanceManifest, Job } from '../lib/types'
+
+const KIND_LABEL: Record<ContentKind, string> = {
+  plugin: 'market.tabPlugins',
+  theme: 'market.tabThemes',
+  skill: 'market.tabSkills',
+  mcp: 'market.tabMcp',
+  bundle: 'market.tabBundles',
+}
 
 function StatTile({
   icon: Icon,
@@ -162,7 +167,7 @@ export function Instances() {
   const deleteInstance = useAppStore((s) => s.deleteInstance)
   const importEnvironment = useAppStore((s) => s.importEnvironment)
   const importEnvironmentPackage = useAppStore((s) => s.importEnvironmentPackage)
-  const launch = useAppStore((s) => s.launch)
+  const openJobInInstalls = useAppStore((s) => s.openJobInInstalls)
 
   const [newName, setNewName] = useState('')
   const fileInputRef = useRef<HTMLInputElement | null>(null)
@@ -175,7 +180,7 @@ export function Instances() {
   const [importOpen, setImportOpen] = useState(false)
   const [importPath, setImportPath] = useState('')
   const [importName, setImportName] = useState('')
-  const [importResult, setImportResult] = useState<EnvironmentImportResult | null>(null)
+  const [importResult, setImportResult] = useState<Job | null>(null)
   const [importPreview, setImportPreview] = useState<EnvironmentPreviewResult | null>(null)
   const [importBytes, setImportBytes] = useState<number[] | null>(null)
 
@@ -236,10 +241,10 @@ export function Instances() {
       : importPath.trim()
         ? importEnvironment(importPath.trim(), name)
         : Promise.resolve(null)
-    void task.then((result) => {
-      if (!result) return
-      setImportResult(result)
-      setSelectedId(result.instance.id)
+    void task.then((job) => {
+      if (!job) return
+      setImportResult(job)
+      setSelectedId(job.instanceId)
       setImportPath('')
       setImportName('')
       setImportBytes(null)
@@ -607,6 +612,55 @@ export function Instances() {
                   <DetailRow label="Skills" value={importPreview.skills} />
                   <DetailRow label="MCP" value={importPreview.mcps} />
                 </div>
+
+                {importPreview.items.length > 0 && (
+                  <div className="mt-3 max-h-40 space-y-1 overflow-y-auto pr-1">
+                    {importPreview.items.map((it, i) => (
+                      <div key={`${it.kind}:${it.name}:${i}`} className="flex items-center gap-2 text-xs">
+                        <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] uppercase text-zinc-400">
+                          {t(KIND_LABEL[it.kind])}
+                        </span>
+                        <span className="truncate font-mono text-zinc-200">{it.name}</span>
+                        <span className="ml-auto shrink-0 truncate font-mono text-[10px] text-zinc-500">
+                          {it.version ? `${it.version} · ` : ''}{it.source || '—'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {importPreview.compatibleWith && (
+                  <div className="mt-3 text-[11px] text-zinc-500">
+                    {t('instances.previewCompatible', { version: importPreview.compatibleWith })}
+                  </div>
+                )}
+
+                {importPreview.conflicts.length > 0 && (
+                  <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 p-2">
+                    <div className="text-[11px] font-semibold text-amber-300">
+                      {t('instances.previewConflicts')}
+                    </div>
+                    <ul className="mt-1 space-y-0.5 text-[11px] text-amber-200/80">
+                      {importPreview.conflicts.map((c) => (
+                        <li key={c} className="truncate">{c}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {importPreview.missingTokens.length > 0 && (
+                  <div className="mt-2 rounded-md border border-red-500/30 bg-red-500/10 p-2">
+                    <div className="text-[11px] font-semibold text-red-300">
+                      {t('instances.previewMissingTokens')}
+                    </div>
+                    <ul className="mt-1 space-y-0.5 text-[11px] text-red-200/80">
+                      {importPreview.missingTokens.map((m) => (
+                        <li key={m} className="truncate font-mono">{m}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
                 <div className="mt-3 truncate font-mono text-[10px] text-zinc-600">
                   sha256:{importPreview.checksum}
                 </div>
@@ -614,21 +668,15 @@ export function Instances() {
             )}
 
             {importResult && (
-              <div className="mt-4 rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-3">
-                <div className="text-xs text-emerald-300">
-                  {t('instances.importSummary', {
-                    name: importResult.instance.name,
-                    installed: importResult.summary.installed,
-                    failed: importResult.summary.failed,
-                  })}
+              <div className="mt-4 rounded-lg border border-blue-500/20 bg-blue-500/10 p-3">
+                <div className="text-xs text-blue-300">
+                  {t('instances.importQueued', { name: importResult.label })}
                 </div>
                 <button
-                  onClick={() => void launch(importResult.instance.id)}
-                  disabled={busy}
-                  className="mt-3 flex h-9 items-center gap-2 rounded-md bg-emerald-500 px-3 text-xs font-semibold text-zinc-950 hover:bg-emerald-400 disabled:opacity-40"
+                  onClick={() => openJobInInstalls()}
+                  className="mt-3 flex h-9 items-center gap-2 rounded-md bg-blue-500 px-3 text-xs font-semibold text-zinc-950 hover:bg-blue-400"
                 >
-                  <Play className="h-3.5 w-3.5" strokeWidth={2} />
-                  {t('instances.launchImported')}
+                  {t('instances.viewInstallCenter')}
                 </button>
               </div>
             )}

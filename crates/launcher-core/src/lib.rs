@@ -7,15 +7,21 @@
 
 pub mod bundle;
 pub mod capabilities;
+pub mod crash;
 pub mod diagnostics;
+pub mod download;
+pub mod environment;
 pub mod history;
 pub mod instance;
+pub mod jobs;
 pub mod market;
 pub mod paths;
+pub mod pricing;
 pub mod process;
 pub mod provider;
 pub mod runtime;
 pub mod settings;
+pub mod telemetry;
 pub mod usage;
 
 pub use bundle::{BundleItemResult, BundleManifest, BundleSummary};
@@ -23,15 +29,24 @@ pub use capabilities::{
     capability_for, CacheSource, ContentCapability, InstallAuthority, StateAuthority,
     CONTENT_CAPABILITIES,
 };
+pub use download::{download_file, file_sha256, part_path, sha256_hex, DownloadOutcome};
+pub use environment::{EnvironmentManifest, EnvironmentSource, ExportedItem};
 pub use history::{LaunchHistory, LaunchSession};
-pub use instance::{InstanceManifest, RuntimeRef};
+pub use instance::{InstanceManifest, McpServerRecord, RuntimeRef, SkillRecord};
+pub use jobs::{Job, JobKind, JobPlan, JobStatus, JobStore};
 pub use market::{RecommendPlan, RecommendResult, Registry, RegistryPlugin};
 pub use paths::AppPaths;
-pub use process::{ChildHandle, ExitSink, LogLine, LogSink, LogStream, ProcessState, ProcessStatus};
+pub use pricing::{cost_for, lookup, Price};
+pub use process::{
+    ChildHandle, ExitSink, LogLevel, LogLine, LogSink, LogStream, ProcessState, ProcessStatus,
+};
 pub use provider::{ProviderPreset, ProviderProfile, ProviderVault, ResolvedProvider};
 pub use runtime::{RuntimeAdapter, RuntimeInfo};
 pub use settings::AppSettings;
-pub use usage::{NewUsageRecord, UsageBucket, UsageLedger, UsageModelTotal, UsageRecord, UsageSummary};
+pub use usage::{
+    NewUsageRecord, UsageBucket, UsageDimension, UsageLedger, UsageModelTotal, UsageRecord,
+    UsageSummary,
+};
 
 /// Atomically write a JSON value to disk (temp file + rename).
 pub fn write_json_atomic(path: &std::path::Path, value: &serde_json::Value) -> anyhow::Result<()> {

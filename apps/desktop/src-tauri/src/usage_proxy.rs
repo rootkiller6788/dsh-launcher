@@ -233,6 +233,7 @@ fn maybe_record_usage(ctx: &ProxyContext, request: &[u8], response: &[u8]) {
         request_id: value
             .get("id")
             .or_else(|| value.get("request_id"))
+            .or_else(|| value.get("requestId"))
             .and_then(Value::as_str)
             .map(str::to_string),
     };
@@ -270,7 +271,7 @@ fn ensure_stream_usage(body: Vec<u8>) -> Vec<u8> {
 }
 
 fn record_sse_usage(ctx: &ProxyContext, request: &[u8], response: &[u8]) -> bool {
-    if let Some(value) = sse_usage_value(response) {
+    if let Some(value) = sse_accumulate_usage(response).or_else(|| sse_usage_value(response)) {
         return maybe_record_usage_value(ctx, request, &value);
     }
     emit_proxy_log(
@@ -302,6 +303,84 @@ fn sse_usage_value(response: &[u8]) -> Option<Value> {
         }
     }
     None
+}
+
+/// A stream frame's `usage` object — top-level (OpenAI / Anthropic
+/// `message_delta`) or nested under `message` (Anthropic `message_start`).
+fn usage_of(value: &Value) -> Option<&Value> {
+    value
+        .get("usage")
+        .or_else(|| value.get("message").and_then(|m| m.get("usage")))
+}
+
+/// Merge token counts split across SSE events. Anthropic streams emit
+/// `input_tokens` on `message_start` (nested under `message`) and
+/// `output_tokens` on `message_delta` (top-level), so no single frame carries
+/// both — unlike OpenAI's `include_usage` final chunk. This walks every frame,
+/// takes the last non-null input/output each, and synthesizes a single
+/// OpenAI-shaped `{ usage: { input_tokens, output_tokens, total_tokens } }`
+/// value for [`maybe_record_usage_value`].
+fn sse_accumulate_usage(response: &[u8]) -> Option<Value> {
+    let text = String::from_utf8_lossy(response);
+    let mut input: Option<u64> = None;
+    let mut output: Option<u64> = None;
+    let mut model: Option<String> = None;
+    let mut id: Option<String> = None;
+    for line in text.lines() {
+        let Some(data) = line.trim_start().strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data == "[DONE]" || data.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        let Some(usage) = usage_of(&value) else {
+            continue;
+        };
+        // Take the *last* non-null input/output: Anthropic reports a
+        // placeholder `output_tokens` on `message_start`, then the real value on
+        // `message_delta`.
+        if let Some(v) = first_u64(usage, INPUT_KEYS) {
+            input = Some(v);
+        }
+        if let Some(v) = first_u64(usage, OUTPUT_KEYS) {
+            output = Some(v);
+        }
+        if model.is_none() {
+            model = value
+                .get("model")
+                .or_else(|| value.get("message").and_then(|m| m.get("model")))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        if id.is_none() {
+            id = value
+                .get("id")
+                .or_else(|| value.get("request_id"))
+                .or_else(|| value.get("requestId"))
+                .or_else(|| value.get("message").and_then(|m| m.get("id")))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+    }
+    let input = input?;
+    let output = output?;
+    let mut usage = serde_json::Map::new();
+    usage.insert("input_tokens".into(), Value::from(input));
+    usage.insert("output_tokens".into(), Value::from(output));
+    usage.insert("total_tokens".into(), Value::from(input + output));
+    let mut obj = serde_json::Map::new();
+    if let Some(m) = model {
+        obj.insert("model".into(), Value::String(m));
+    }
+    if let Some(i) = id {
+        obj.insert("id".into(), Value::String(i));
+    }
+    obj.insert("usage".into(), Value::Object(usage));
+    Some(Value::Object(obj))
 }
 
 fn maybe_record_usage_value(ctx: &ProxyContext, request: &[u8], value: &Value) -> bool {
@@ -372,6 +451,7 @@ fn maybe_record_usage_value(ctx: &ProxyContext, request: &[u8], value: &Value) -
         request_id: value
             .get("id")
             .or_else(|| value.get("request_id"))
+            .or_else(|| value.get("requestId"))
             .and_then(Value::as_str)
             .map(str::to_string),
     };
@@ -396,6 +476,7 @@ fn emit_proxy_log(app: &AppHandle, instance_id: &str, line: &str) {
         "logs",
         launcher_core::LogLine {
             stream: launcher_core::LogStream::Stdout,
+            level: launcher_core::LogLevel::Info,
             line: format!("{instance_id} · {line}"),
         },
     );
@@ -409,9 +490,25 @@ fn request_model(body: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
+const INPUT_KEYS: &[&str] = &["input_tokens", "prompt_tokens", "inputTokens", "promptTokens"];
+const OUTPUT_KEYS: &[&str] = &[
+    "output_tokens",
+    "completion_tokens",
+    "outputTokens",
+    "completionTokens",
+];
+
 fn first_u64(value: &Value, keys: &[&str]) -> Option<u64> {
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(Value::as_u64))
+    keys.iter().find_map(|key| {
+        let v = value.get(*key)?;
+        if let Some(n) = v.as_u64() {
+            return Some(n);
+        }
+        if let Some(n) = v.as_f64() {
+            return Some(n as u64);
+        }
+        v.as_str().and_then(|s| s.trim().parse::<u64>().ok())
+    })
 }
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {
@@ -456,5 +553,43 @@ data: [DONE]\n\n";
         let value = sse_usage_value(sse).unwrap();
         assert_eq!(value["usage"]["prompt_tokens"].as_u64(), Some(3));
         assert_eq!(value["usage"]["completion_tokens"].as_u64(), Some(7));
+    }
+
+    #[test]
+    fn sse_accumulates_anthropic_split_usage() {
+        // Anthropic splits usage: input on message_start, output on
+        // message_delta. message_start also carries a placeholder
+        // output_tokens=1 that must NOT win over the real message_delta value.
+        let sse = b"event: message_start\n\
+data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":25,\"output_tokens\":1}}}\n\n\
+event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n\
+event: message_delta\n\
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":15}}\n\n";
+        let value = sse_accumulate_usage(sse).unwrap();
+        assert_eq!(value["usage"]["input_tokens"].as_u64(), Some(25));
+        assert_eq!(value["usage"]["output_tokens"].as_u64(), Some(15));
+        assert_eq!(value["usage"]["total_tokens"].as_u64(), Some(40));
+        assert_eq!(value["model"].as_str(), Some("claude-sonnet-4-5"));
+        assert_eq!(value["id"].as_str(), Some("msg_1"));
+    }
+
+    #[test]
+    fn sse_accumulate_captures_request_id_variant() {
+        let sse = b"data: {\"requestId\":\"req-9\",\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}\n\n";
+        let value = sse_accumulate_usage(sse).unwrap();
+        assert_eq!(value["id"].as_str(), Some("req-9"));
+    }
+
+    #[test]
+    fn first_u64_coerces_float_and_string() {
+        let value: Value = serde_json::from_str(
+            r#"{"a": 12, "b": 3.0, "c": "7", "d": "x"}"#,
+        )
+        .unwrap();
+        assert_eq!(first_u64(&value, &["a"]), Some(12));
+        assert_eq!(first_u64(&value, &["b"]), Some(3));
+        assert_eq!(first_u64(&value, &["c"]), Some(7));
+        assert_eq!(first_u64(&value, &["d"]), None);
     }
 }

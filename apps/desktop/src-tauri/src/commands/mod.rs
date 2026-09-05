@@ -3,6 +3,7 @@ pub mod diagnostics;
 pub mod environment;
 pub mod history;
 pub mod instance;
+pub mod jobs;
 pub mod language;
 pub mod market;
 pub mod paths;

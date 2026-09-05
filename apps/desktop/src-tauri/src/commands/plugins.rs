@@ -1,5 +1,6 @@
+use dsh_adapter::content as content_adapter;
 use dsh_adapter::{DshAdapter, InstalledPlugin, InstalledPluginSource, PluginUpdate};
-use launcher_core::{market, InstanceManifest, RegistryPlugin};
+use launcher_core::{market, InstanceManifest, Job, JobPlan, RegistryPlugin};
 use market::ContentKind;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,7 +12,7 @@ use tokio::process::Command;
 
 use crate::commands::process::{emit_log, make_sink};
 use crate::error::AppError;
-use crate::jobs::{run_instance_job, HeavyJobKind};
+use crate::jobs::{enqueue_install, run_instance_job, HeavyJobKind, JobCtx};
 use crate::state::AppState;
 
 #[derive(Debug, Clone)]
@@ -22,6 +23,13 @@ struct GithubPluginSpec {
 }
 
 const LIBRARY_INVENTORY_EVENT: &str = "library-inventory-updated";
+
+/// Bumped when `LibraryInventoryCache` drops a field. v4 removed the `skills`
+/// and `mcp` id mirrors — those types' state lives solely in `InstanceManifest`
+/// records (the enriched source of truth from the MCP/skill work), so the
+/// snapshot cache only keeps DSH-owned data (`dsh_inventory`, `skins`) plus
+/// launcher bookkeeping.
+const LIBRARY_INVENTORY_CACHE_SCHEMA: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -36,9 +44,9 @@ struct LibraryInventoryCache {
     launcher_metadata: HashMap<String, MarketInstallMetadata>,
     #[serde(default)]
     install_sources: HashMap<String, InstallSourceMetadata>,
-    skills: Vec<String>,
-    mcp: Vec<String>,
     skins: Vec<String>,
+    #[serde(default)]
+    mcp_issues: HashMap<String, Vec<String>>,
     #[serde(default)]
     #[serde(skip_serializing)]
     market: Vec<MarketInstallMetadata>,
@@ -89,12 +97,19 @@ pub struct LibraryInventoryItem {
     pub kind: ContentKind,
     pub title: String,
     pub package_name: Option<String>,
+    /// Installed "version" label, per kind: npm version for plugins/skins,
+    /// `#<short content hash>` for skills, `None` for MCP. Read from disk so the
+    /// Library snapshot shows it without needing a live DSH.
+    #[serde(default)]
+    pub version: Option<String>,
     pub enabled: Option<bool>,
     pub toggleable: bool,
     pub source: LibraryItemSource,
     pub state_source: LibraryStateSource,
     pub detail: Option<String>,
     pub market: Option<MarketInstallMetadata>,
+    #[serde(default)]
+    pub issues: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -131,6 +146,18 @@ fn now_secs() -> u64 {
         .unwrap_or_default()
 }
 
+/// `#` + first 8 chars of a content hash — the "version" label a skill row
+/// shows (skills have no npm version, the hash is the only revision signal).
+/// `None` when the record predates hash tracking.
+fn short_hash(hash: &str) -> Option<String> {
+    let h = hash.trim();
+    if h.is_empty() {
+        None
+    } else {
+        Some(format!("#{}", &h[..h.len().min(8)]))
+    }
+}
+
 fn read_library_inventory_cache(state: &AppState, id: &str) -> LibraryInventoryCache {
     let path = library_inventory_cache_file(state, id);
     let path = if path.exists() {
@@ -163,8 +190,8 @@ fn normalize_library_inventory_cache(id: &str, cache: &mut LibraryInventoryCache
     if cache.instance_id.is_empty() {
         cache.instance_id = id.to_string();
     }
-    if cache.schema_version < 3 {
-        cache.schema_version = 3;
+    if cache.schema_version < LIBRARY_INVENTORY_CACHE_SCHEMA {
+        cache.schema_version = LIBRARY_INVENTORY_CACHE_SCHEMA;
     }
     for item in cache.market.drain(..) {
         cache
@@ -241,15 +268,14 @@ pub(crate) fn rebuild_library_inventory_cache_from_disk(
     let cached = read_library_inventory_cache(state, id);
     let profile = DshAdapter::installed_plugins(&instance);
     let cache = LibraryInventoryCache {
-        schema_version: 3,
+        schema_version: LIBRARY_INVENTORY_CACHE_SCHEMA,
         instance_id: id.to_string(),
         updated_at: now_secs(),
         dsh_inventory: merge_plugin_sources(cached.dsh_inventory, profile),
         launcher_metadata: cached.launcher_metadata,
         install_sources: cached.install_sources,
-        skills: instance.skills,
-        mcp: instance.mcp,
         skins: instance.skins,
+        mcp_issues: cached.mcp_issues,
         ..LibraryInventoryCache::default()
     };
     write_library_inventory_cache(state, id, &cache)?;
@@ -274,16 +300,10 @@ fn library_inventory_summary_for(
     LibraryInventorySummary {
         instance_id: instance.id.clone(),
         plugins,
-        skills: if cache.skills.is_empty() {
-            instance.skills.len()
-        } else {
-            cache.skills.len()
-        },
-        mcp: if cache.mcp.is_empty() {
-            instance.mcp.len()
-        } else {
-            cache.mcp.len()
-        },
+        // skills/mcp are enriched manifest records — the manifest is the single
+        // source of truth, so counts come straight from it (never a stale mirror).
+        skills: instance.skills.len(),
+        mcp: instance.mcp.len(),
         skins: if cache.skins.is_empty() {
             instance.skins.len()
         } else {
@@ -388,6 +408,7 @@ fn library_inventory_detail_for(
                 .map(|item| item.key.clone())
                 .unwrap_or_else(|| plugin.name.clone()),
             package_name: Some(plugin.name.clone()),
+            version: DshAdapter::installed_version(instance, &plugin.name),
             enabled: Some(plugin.enabled),
             toggleable: plugin.toggleable,
             source: library_item_source(plugin, metadata.as_ref(), install_source),
@@ -398,18 +419,45 @@ fn library_inventory_detail_for(
             },
             detail: plugin.fiber_phase.clone(),
             market: metadata,
+            issues: Vec::new(),
         });
     }
 
-    for skill in &cache.skills {
+    let has_live_inventory = cache
+        .dsh_inventory
+        .iter()
+        .any(|plugin| matches!(plugin.source, InstalledPluginSource::Inventory));
+    let skill_loader_active =
+        has_live_inventory && content_adapter::skill_loader_active(&cache.dsh_inventory);
+
+    // Skill rows come straight from the manifest records — the record carries
+    // the provenance (source/hash) and the disk state is checked per row.
+    for skill in &instance.skills {
+        let id = &skill.id;
         let metadata =
-            market_metadata_for_key_values(&cache.launcher_metadata, ContentKind::Skill, skill)
+            market_metadata_for_key_values(&cache.launcher_metadata, ContentKind::Skill, id)
                 .cloned();
-        let install_source = cache.install_sources.get(skill);
+        let install_source = cache.install_sources.get(id);
+        let disk = content_adapter::skill_disk_state(instance, id);
+        let mut issues = Vec::new();
+        let detail = if disk.valid {
+            disk.dir.clone()
+        } else {
+            issues.push(if disk.present {
+                "skill.invalidFrontmatter".to_string()
+            } else {
+                "skill.missingFile".to_string()
+            });
+            disk.dir.clone()
+        };
+        if has_live_inventory && !skill_loader_active {
+            issues.push("skill.loaderInactive".to_string());
+        }
         items.push(LibraryInventoryItem {
-            id: skill.clone(),
+            id: id.clone(),
             kind: ContentKind::Skill,
-            title: skill.clone(),
+            title: id.clone(),
+            version: short_hash(&skill.hash),
             package_name: None,
             enabled: None,
             toggleable: false,
@@ -422,22 +470,29 @@ fn library_inventory_detail_for(
                 })
                 .unwrap_or(LibraryItemSource::LocalFile),
             state_source: LibraryStateSource::DshWorkspaceFiles,
-            detail: Some("skills/".to_string()),
+            detail: Some(detail),
             market: metadata,
+            issues,
         });
     }
 
-    for mcp in &cache.mcp {
+    // MCP rows are the manifest records themselves (the single source of
+    // truth): the record's `enabled` drives the Library toggle and `transport`
+    // shows in the detail. `toggleable` stays false — the UI toggles via
+    // `mcp_set_enabled`, not the patch's plugin `disabled:` mechanism.
+    for record in &instance.mcp {
+        let id = &record.id;
         let metadata =
-            market_metadata_for_key_values(&cache.launcher_metadata, ContentKind::Mcp, mcp)
+            market_metadata_for_key_values(&cache.launcher_metadata, ContentKind::Mcp, id)
                 .cloned();
-        let install_source = cache.install_sources.get(mcp);
+        let install_source = cache.install_sources.get(id);
         items.push(LibraryInventoryItem {
-            id: mcp.clone(),
+            id: id.clone(),
             kind: ContentKind::Mcp,
-            title: mcp.clone(),
+            title: id.clone(),
+            version: None,
             package_name: None,
-            enabled: None,
+            enabled: Some(record.enabled),
             toggleable: false,
             source: install_source
                 .map(|item| item.source)
@@ -448,8 +503,9 @@ fn library_inventory_detail_for(
                 })
                 .unwrap_or(LibraryItemSource::LocalFile),
             state_source: LibraryStateSource::DshWorkspaceFiles,
-            detail: Some("mcp-client patch".to_string()),
+            detail: Some(format!("mcp-client · {}", record.transport)),
             market: metadata,
+            issues: cache.mcp_issues.get(id).cloned().unwrap_or_default(),
         });
     }
 
@@ -464,13 +520,36 @@ fn library_inventory_detail_for(
             market_metadata_for_key_values(&cache.launcher_metadata, ContentKind::Theme, skin)
                 .cloned();
         let install_source = cache.install_sources.get(skin);
+        // A skin is a DSH plugin; when its plugin row is still in the last
+        // inventory, surface its real enabled/toggleable state instead of
+        // leaving the row as classification-only.
+        let plugin = cache
+            .dsh_inventory
+            .iter()
+            .find(|plugin| skin_key_matches_plugin(skin, plugin));
+        let (enabled, toggleable, package_name, state_source) = match plugin {
+            Some(plugin) => (
+                Some(plugin.enabled),
+                plugin.toggleable,
+                Some(plugin.name.clone()),
+                if matches!(plugin.source, InstalledPluginSource::Inventory) {
+                    LibraryStateSource::DshInventory
+                } else {
+                    LibraryStateSource::LauncherSnapshot
+                },
+            ),
+            None => (None, false, None, LibraryStateSource::LauncherSnapshot),
+        };
         items.push(LibraryInventoryItem {
             id: skin.clone(),
             kind: ContentKind::Theme,
             title: skin.clone(),
-            package_name: None,
-            enabled: None,
-            toggleable: false,
+            version: package_name
+                .as_ref()
+                .and_then(|name| DshAdapter::installed_version(instance, name)),
+            package_name,
+            enabled,
+            toggleable,
             source: install_source
                 .map(|item| item.source)
                 .or_else(|| {
@@ -479,9 +558,10 @@ fn library_inventory_detail_for(
                         .map(|_| LibraryItemSource::MarketInstalled)
                 })
                 .unwrap_or(LibraryItemSource::LocalFile),
-            state_source: LibraryStateSource::LauncherSnapshot,
+            state_source,
             detail: Some("skin classification".to_string()),
             market: metadata,
+            issues: Vec::new(),
         });
     }
 
@@ -505,15 +585,14 @@ pub(crate) async fn refresh_plugin_inventory_cache(
     let instance = InstanceManifest::get(&state.paths, id)?;
     let cached = read_library_inventory_cache(state, id);
     let cache = LibraryInventoryCache {
-        schema_version: 3,
+        schema_version: LIBRARY_INVENTORY_CACHE_SCHEMA,
         instance_id: id.to_string(),
         updated_at: now_secs(),
         dsh_inventory: merge_plugin_sources(inventory, cached.dsh_inventory),
         launcher_metadata: cached.launcher_metadata,
         install_sources: cached.install_sources,
-        skills: instance.skills,
-        mcp: instance.mcp,
         skins: instance.skins,
+        mcp_issues: cached.mcp_issues,
         ..LibraryInventoryCache::default()
     };
     let count = cache.dsh_inventory.len();
@@ -558,7 +637,7 @@ pub(crate) fn record_install_metadata_with_source(
         },
     );
     cache.install_sources.insert(
-        key,
+        key.clone(),
         InstallSourceMetadata {
             source,
             installed_at,
@@ -574,7 +653,13 @@ pub(crate) fn record_install_metadata_with_source(
             ),
         },
     );
-    cache.schema_version = 3;
+    if entry.kind == ContentKind::Mcp {
+        let issues = content_adapter::mcp_config_issues(entry);
+        if !issues.is_empty() {
+            cache.mcp_issues.insert(key.clone(), issues);
+        }
+    }
+    cache.schema_version = LIBRARY_INVENTORY_CACHE_SCHEMA;
     cache.updated_at = now_secs();
     write_library_inventory_cache(state, id, &cache)
 }
@@ -751,7 +836,7 @@ pub(crate) async fn resolve_plugin_install_target(
         let _ = std::fs::create_dir_all(
             cache_dir
                 .parent()
-                .unwrap_or_else(|| state.paths.cache.as_path()),
+                .unwrap_or(state.paths.cache.as_path()),
         );
         if cache_dir.exists() {
             let _ = std::fs::remove_dir_all(&cache_dir);
@@ -876,8 +961,9 @@ pub async fn library_inventory_refresh(
     .await
 }
 
-/// Install a plugin (`dsh plugin add <target>`) into an instance, streaming
-/// pnpm output to the Activity log.
+/// Install a plugin (`dsh plugin add <target>`) by enqueueing a backend install
+/// job. The plan keeps both the raw target and the optional Market entry, so a
+/// Retry restores the exact original install.
 #[tauri::command]
 pub async fn plugin_install(
     state: State<'_, AppState>,
@@ -885,76 +971,106 @@ pub async fn plugin_install(
     id: String,
     target: String,
     entry: Option<RegistryPlugin>,
-) -> Result<(), AppError> {
-    let job_id = id.clone();
-    run_instance_job(&state, &app, &job_id, HeavyJobKind::Install, || async {
-        ensure_not_running(&state, &id).await?;
-        let instance = InstanceManifest::get(&state.paths, &id)?;
-        let settings = state
-            .settings
-            .lock()
-            .map_err(|_| AppError::msg("settings lock poisoned"))?
-            .clone();
-
-        emit_log(&app, &format!("{id} · installing plugin {target}…"));
-        if let Some(entry) = entry.as_ref() {
-            if entry.kind == ContentKind::Theme && entry.path.is_some() {
-                if let Some(root_package) = github_root_package_name(entry) {
-                    emit_log(
-                        &app,
-                        &format!("{id} · checking previous root skin install {root_package}…"),
-                    );
-                    let _ = state
-                        .adapter
-                        .run_plugin_command(
-                            &settings,
-                            &instance,
-                            &["remove".to_string(), root_package],
-                            make_sink(app.clone()),
-                        )
-                        .await;
-                }
-            }
-        }
-        let install_target =
-            resolve_plugin_install_target(&state, &app, &id, &target, entry.as_ref()).await;
-        let sink = make_sink(app.clone());
-        let code = state
-            .adapter
-            .run_plugin_command(
-                &settings,
-                &instance,
-                &["add".to_string(), install_target],
-                sink,
-            )
-            .await?;
-        if code != 0 {
-            return Err(AppError::msg(format!(
-                "dsh plugin add exited with code {code} — see Activity logs"
-            )));
-        }
-        if entry
+) -> Result<Job, AppError> {
+    let key = if entry
+        .as_ref()
+        .map(|e| e.owner.trim().is_empty())
+        .unwrap_or(true)
+    {
+        target.clone()
+    } else {
+        entry
             .as_ref()
-            .is_some_and(|entry| entry.kind == ContentKind::Theme)
-        {
-            if let Some(entry) = entry.as_ref() {
-                let key = if entry.owner.trim().is_empty() {
-                    entry.name.clone()
-                } else {
-                    format!("{}/{}", entry.owner, entry.name)
-                };
-                InstanceManifest::add_skin(&state.paths, &id, &key)?;
+            .map(|e| format!("{}/{}", e.owner, e.name))
+            .unwrap_or_else(|| target.clone())
+    };
+    enqueue_install(
+        &state,
+        &app,
+        &id,
+        &key,
+        &format!("plugin {key}"),
+        JobPlan::Plugin {
+            target,
+            entry,
+        },
+    )
+    .await
+}
+
+/// The durable body `plugin_install` enqueues: optional previous-root-skin
+/// removal, then `dsh plugin add <target>`, recording metadata + Library refresh.
+pub(crate) async fn plugin_install_job(
+    state: &AppState,
+    app: &AppHandle,
+    id: &str,
+    target: &str,
+    entry: Option<&RegistryPlugin>,
+    ctx: &JobCtx,
+) -> Result<(), AppError> {
+    ensure_not_running(state, id).await?;
+    let instance = InstanceManifest::get(&state.paths, id)?;
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| AppError::msg("settings lock poisoned"))?
+        .clone();
+
+    emit_log(app, &format!("{id} · installing plugin {target}…"));
+    if let Some(entry) = entry {
+        if entry.kind == ContentKind::Theme && entry.path.is_some() {
+            if let Some(root_package) = github_root_package_name(entry) {
+                emit_log(
+                    app,
+                    &format!("{id} · checking previous root skin install {root_package}…"),
+                );
+                let _ = state
+                    .adapter
+                    .run_plugin_command(
+                        &settings,
+                        &instance,
+                        &["remove".to_string(), root_package],
+                        ctx.sink(),
+                    )
+                    .await;
             }
         }
-        if let Some(entry) = entry.as_ref() {
-            record_market_install_metadata(&state, &id, entry)?;
+    }
+    let install_target = resolve_plugin_install_target(state, app, id, target, entry).await;
+    ctx.progress("dsh-install", 40);
+    let code = state
+        .adapter
+        .run_plugin_command(
+            &settings,
+            &instance,
+            &["add".to_string(), install_target],
+            ctx.sink(),
+        )
+        .await?;
+    if code != 0 {
+        ctx.set_exit_code(i64::from(code));
+        return Err(AppError::msg(format!(
+            "dsh plugin add exited with code {code} — the package name/version may be wrong or the npm registry unreachable. Check the spec and your network, then Retry (pnpm detail in Activity logs)"
+        )));
+    }
+    ctx.progress("recording", 65);
+    if entry.is_some_and(|entry| entry.kind == ContentKind::Theme) {
+        if let Some(entry) = entry {
+            let key = if entry.owner.trim().is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{}/{}", entry.owner, entry.name)
+            };
+            InstanceManifest::add_skin(&state.paths, id, &key)?;
         }
-        emit_log(&app, &format!("{id} · installed {target}"));
-        reconcile_library_inventory_after_market_change(&state, &app, &id, "plugin install")
-            .await?;
-        Ok(())
-    })
-    .await
+    }
+    if let Some(entry) = entry {
+        record_market_install_metadata(state, id, entry)?;
+    }
+    emit_log(app, &format!("{id} · installed {target}"));
+    ctx.progress("inventory-sync", 88);
+    reconcile_library_inventory_after_market_change(state, app, id, "plugin install").await?;
+    Ok(())
 }
 
 /// Uninstall a plugin (`dsh plugin remove <name>`).
@@ -993,13 +1109,13 @@ pub async fn plugin_uninstall(
             .await?;
         if code != 0 {
             return Err(AppError::msg(format!(
-                "dsh plugin remove exited with code {code} — see Activity logs"
+                "dsh plugin remove exited with code {code} — the plugin may not be installed, or DSH is busy. Check Activity logs for the detail"
             )));
         }
         if let Ok(manifest) = InstanceManifest::get(&state.paths, &id) {
             for skin in manifest.skins {
                 let tail = skin.rsplit('/').next().unwrap_or(&skin).to_lowercase();
-                let normalized = skin.replace('/', "__").replace('-', "__").to_lowercase();
+                let normalized = skin.replace(['/', '-'], "__").to_lowercase();
                 let package = name.to_lowercase();
                 if package.contains(&tail) || package == normalized {
                     let _ = InstanceManifest::remove_skin(&state.paths, &id, &skin);
@@ -1112,7 +1228,7 @@ pub async fn plugin_update(
             .await?;
         if code != 0 {
             return Err(AppError::msg(format!(
-                "dsh plugin update exited with code {code} — see Activity logs"
+                "dsh plugin update exited with code {code} — check the plugin is installed and your network can reach the npm registry (detail in Activity logs)"
             )));
         }
         emit_log(&app, &format!("{id} · updated {name}"));
@@ -1120,4 +1236,107 @@ pub async fn plugin_update(
         Ok(())
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dsh_adapter::InstalledPluginKind;
+    use launcher_core::{AppPaths, AppSettings, ProviderVault};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    fn temp_paths(label: &str) -> AppPaths {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("ahl-snapshot-{label}-{nanos}"));
+        let _ = fs::create_dir_all(&root);
+        AppPaths {
+            portable: false,
+            settings: root.join("settings.json"),
+            providers: root.join("providers.json"),
+            runtimes: root.join("runtimes"),
+            instances: root.join("instances"),
+            cache: root.join("cache"),
+            logs: root.join("logs"),
+            launcher_log: root.join("logs").join("launcher.log"),
+            root,
+        }
+    }
+
+    fn sample_state(label: &str) -> AppState {
+        let paths = temp_paths(label);
+        let vault = ProviderVault::new(paths.clone());
+        AppState::new(paths, AppSettings::default(), vault, None, Arc::new(AtomicBool::new(false)))
+    }
+
+    fn plugin(name: &str, source: InstalledPluginSource) -> InstalledPlugin {
+        InstalledPlugin {
+            name: name.into(),
+            enabled: true,
+            toggleable: false,
+            kind: InstalledPluginKind::Plugin,
+            source,
+            entry_id: None,
+            fiber_phase: None,
+        }
+    }
+
+    #[test]
+    fn merge_plugin_sources_dedupes_and_prefers_profile() {
+        let inventory = vec![
+            plugin("alpha", InstalledPluginSource::Inventory),
+            plugin("beta", InstalledPluginSource::Inventory),
+        ];
+        let profile = vec![
+            plugin("alpha", InstalledPluginSource::Profile),
+            plugin("gamma", InstalledPluginSource::Profile),
+        ];
+        let merged = merge_plugin_sources(inventory, profile);
+        let names: Vec<&str> = merged.iter().map(|p| p.name.as_str()).collect();
+
+        // "alpha" appears once (deduped across inventory/profile); profile
+        // sources sort first so the live truth is at the top.
+        assert_eq!(merged.len(), 3, "alpha must dedupe: {names:?}");
+        assert_eq!(names, vec!["gamma", "alpha", "beta"]);
+        assert_eq!(merged[0].source, InstalledPluginSource::Profile);
+    }
+
+    #[test]
+    fn record_install_metadata_roundtrips_through_snapshot_cache() {
+        let state = sample_state("record");
+        let entry = RegistryPlugin {
+            kind: ContentKind::Plugin,
+            name: "toolbox".into(),
+            owner: "acme".into(),
+            npm: Some("@acme/toolbox".into()),
+            ..Default::default()
+        };
+
+        record_install_metadata_with_source(
+            &state,
+            "test-instance",
+            &entry,
+            LibraryItemSource::MarketInstalled,
+        )
+        .expect("record metadata");
+
+        let cache = read_library_inventory_cache(&state, "test-instance");
+        let meta = cache
+            .launcher_metadata
+            .get("acme/toolbox")
+            .expect("market metadata persisted");
+        assert_eq!(meta.kind, ContentKind::Plugin);
+        assert_eq!(meta.install_spec, "@acme/toolbox");
+        assert!(matches!(
+            cache
+                .install_sources
+                .get("acme/toolbox")
+                .expect("install source persisted")
+                .source,
+            LibraryItemSource::MarketInstalled
+        ));
+    }
 }

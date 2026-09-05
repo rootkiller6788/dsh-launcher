@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+
 use launcher_core::AppSettings;
 use tauri::State;
 
@@ -24,5 +26,10 @@ pub fn set_settings(
         .map_err(|_| AppError::msg("settings lock poisoned"))?;
     *guard = settings.clone();
     guard.save(&state.paths)?;
+    // #602: consent may have flipped — reflect it live so the panic hook's
+    // sidecar decision follows the checkbox without an app restart.
+    state
+        .telemetry_consent
+        .store(guard.telemetry_enabled, Ordering::Relaxed);
     Ok(settings)
 }

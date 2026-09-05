@@ -1,11 +1,14 @@
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use dsh_adapter::DshAdapter;
 use launcher_core::process::ChildHandle;
-use launcher_core::{AppPaths, AppSettings, LaunchHistory, ProviderVault, Registry, UsageLedger};
-use std::collections::HashMap;
+use launcher_core::{
+    AppPaths, AppSettings, JobStore, LaunchHistory, ProviderVault, Registry, UsageLedger,
+};
+use std::collections::{HashMap, HashSet};
 use tokio::sync::oneshot;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -23,6 +26,8 @@ pub struct RunningChild {
     pub port: Option<u16>,
     /// Local OpenAI-compatible proxy used to capture response usage payloads.
     pub usage_proxy_shutdown: Option<oneshot::Sender<()>>,
+    /// Cancels the DSH settings SSE subscription (appearance/language watch).
+    pub settings_watch_shutdown: Option<oneshot::Sender<()>>,
 }
 
 /// Managed application state shared across commands.
@@ -38,6 +43,12 @@ pub struct AppState {
     pub history: LaunchHistory,
     /// Request-level usage ledger (SQLite).
     pub usage: UsageLedger,
+    /// Persistent install-job ledger (SQLite): the queue + history Install
+    /// Center renders. Survives window reloads and app restarts.
+    pub jobs: JobStore,
+    /// Instance ids that currently have a drainer task draining their waiting
+    /// install jobs — guards against spawning two drainers for one instance.
+    pub drainers: Mutex<HashSet<String>>,
     /// Row id of the running session, if any (for closing it out on stop/crash).
     pub session_id: Mutex<Option<i64>>,
     /// Cached market registry (fetched lazily, avoids re-hitting the network).
@@ -50,6 +61,10 @@ pub struct AppState {
     pub monitor: Mutex<sysinfo::System>,
     /// Per-instance queue gates for heavy DSH/profile work.
     pub heavy_jobs: Mutex<HashMap<String, Arc<InstanceJobGate>>>,
+    /// Live crash-telemetry consent (#602). Read by the panic hook's sidecar
+    /// decision at crash time; the Preferences toggle writes it here so a crash
+    /// honours the choice in effect when it happens, not startup's.
+    pub telemetry_consent: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -58,9 +73,11 @@ impl AppState {
         settings: AppSettings,
         vault: ProviderVault,
         resource_dir: Option<PathBuf>,
+        telemetry_consent: Arc<AtomicBool>,
     ) -> Self {
         let history = LaunchHistory::open(&paths.db_file()).expect("open launcher.db for history");
         let usage = UsageLedger::open(&paths.db_file()).expect("open launcher.db for usage");
+        let jobs = JobStore::open(&paths.db_file()).expect("open launcher.db for install jobs");
         let runtimes_dir = paths.runtimes.clone();
         Self {
             paths,
@@ -70,11 +87,14 @@ impl AppState {
             child: AsyncMutex::new(None),
             history,
             usage,
+            jobs,
+            drainers: Mutex::new(HashSet::new()),
             session_id: Mutex::new(None),
             registry: Mutex::new(None),
             content: Mutex::new(None),
             monitor: Mutex::new(sysinfo::System::new()),
             heavy_jobs: Mutex::new(HashMap::new()),
+            telemetry_consent,
         }
     }
 }

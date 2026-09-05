@@ -1,11 +1,14 @@
+use std::collections::HashMap;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use dsh_adapter::DshAdapter;
+use launcher_core::environment::{ENVIRONMENT_FORMAT, ENVIRONMENT_FORMAT_VERSION};
 use launcher_core::market::{self, ContentKind};
 use launcher_core::{
-    AppSettings, BundleItemResult, BundleSummary, InstanceManifest, Registry, RegistryPlugin,
+    EnvironmentManifest, EnvironmentSource, ExportedItem, InstanceManifest, Job, JobPlan, Registry,
+    RegistryPlugin,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -18,31 +21,8 @@ use crate::commands::plugins::{
 };
 use crate::commands::process::emit_log;
 use crate::error::AppError;
-use crate::jobs::{run_instance_job, HeavyJobKind};
+use crate::jobs::{enqueue_install, run_instance_job, HeavyJobKind, JobCtx};
 use crate::state::AppState;
-
-const FORMAT: &str = "dsh.environment";
-const FORMAT_VERSION: u32 = 1;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct EnvironmentSource {
-    instance_id: String,
-    instance_name: String,
-    runtime: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct EnvironmentManifest {
-    format: String,
-    format_version: u32,
-    exported_at: u64,
-    name: String,
-    description: String,
-    source: EnvironmentSource,
-    items: Vec<RegistryPlugin>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,6 +41,15 @@ pub struct EnvironmentExportResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct EnvironmentPreviewItem {
+    pub kind: ContentKind,
+    pub name: String,
+    pub source: String,
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EnvironmentPreviewResult {
     pub name: String,
     pub description: String,
@@ -71,14 +60,31 @@ pub struct EnvironmentPreviewResult {
     pub skills: usize,
     pub mcps: usize,
     pub exported_at: u64,
+    pub compatible_with: String,
+    pub items: Vec<EnvironmentPreviewItem>,
+    pub conflicts: Vec<String>,
+    pub missing_tokens: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EnvironmentImportResult {
-    pub instance: InstanceManifest,
-    pub checksum: String,
-    pub summary: BundleSummary,
+/// Heuristic for "this MCP references a secret the importer must supply": any
+/// `env`/`headers` value that is a `${VAR}` reference or names a token/key.
+/// The curated catalog ships these empty today, but the schema reserves them so
+/// a future MCP can declare auth the same way the runtime consumes it.
+fn mcp_needs_token(item: &RegistryPlugin) -> bool {
+    item.env
+        .iter()
+        .flat_map(|m| m.values())
+        .chain(item.headers.iter().flat_map(|m| m.values()))
+        .any(|v| {
+            v.contains("${")
+                || {
+                    let upper = v.to_ascii_uppercase();
+                    upper.contains("TOKEN")
+                        || upper.contains("API_KEY")
+                        || upper.contains("SECRET")
+                        || upper.contains("BEARER")
+                }
+        })
 }
 
 fn preview_for(pkg: &EnvironmentPackage) -> EnvironmentPreviewResult {
@@ -86,6 +92,21 @@ fn preview_for(pkg: &EnvironmentPackage) -> EnvironmentPreviewResult {
     let mut skins = 0;
     let mut skills = 0;
     let mut mcps = 0;
+
+    // Provenance + versions captured at export time, keyed by item key so the
+    // preview can show where each resource re-installs from.
+    let exports: HashMap<&str, &ExportedItem> = pkg
+        .manifest
+        .exports
+        .iter()
+        .map(|e| (e.key.as_str(), e))
+        .collect();
+
+    let mut items = Vec::with_capacity(pkg.manifest.items.len());
+    let mut conflicts = Vec::new();
+    let mut missing_tokens = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+
     for item in &pkg.manifest.items {
         match item.kind {
             ContentKind::Plugin => plugins += 1,
@@ -94,7 +115,37 @@ fn preview_for(pkg: &EnvironmentPackage) -> EnvironmentPreviewResult {
             ContentKind::Mcp => mcps += 1,
             ContentKind::Bundle => {}
         }
+
+        let key = item.key();
+        let count = seen.entry(key.clone()).or_insert(0);
+        *count += 1;
+        if *count == 2 {
+            conflicts.push(format!("duplicate item \"{key}\""));
+        }
+
+        let mut source = item.install_spec();
+        let version = exports.get(key.as_str()).and_then(|e| e.version.clone());
+        if source.is_empty() {
+            if let Some(e) = exports.get(key.as_str()) {
+                source = e.source.clone();
+            }
+        }
+        if source.is_empty() {
+            conflicts.push(format!("no download source for \"{key}\""));
+        }
+
+        if item.kind == ContentKind::Mcp && mcp_needs_token(item) {
+            missing_tokens.push(key.clone());
+        }
+
+        items.push(EnvironmentPreviewItem {
+            kind: item.kind,
+            name: key,
+            source,
+            version,
+        });
     }
+
     EnvironmentPreviewResult {
         name: pkg.manifest.name.clone(),
         description: pkg.manifest.description.clone(),
@@ -105,6 +156,10 @@ fn preview_for(pkg: &EnvironmentPackage) -> EnvironmentPreviewResult {
         skills,
         mcps,
         exported_at: pkg.manifest.exported_at,
+        compatible_with: pkg.manifest.compatible_with.clone(),
+        items,
+        conflicts,
+        missing_tokens,
     }
 }
 
@@ -116,10 +171,10 @@ fn manifest_checksum(manifest: &EnvironmentManifest) -> Result<String, AppError>
 }
 
 fn validate_package(pkg: &EnvironmentPackage) -> Result<(), AppError> {
-    if pkg.manifest.format != FORMAT {
+    if pkg.manifest.format != ENVIRONMENT_FORMAT {
         return Err(AppError::msg("not a DSH environment package"));
     }
-    if pkg.manifest.format_version != FORMAT_VERSION {
+    if pkg.manifest.format_version != ENVIRONMENT_FORMAT_VERSION {
         return Err(AppError::msg(format!(
             "unsupported environment package version {}",
             pkg.manifest.format_version
@@ -160,7 +215,7 @@ fn slug(name: &str) -> String {
     }
 }
 
-fn registry_index(registry: &Registry) -> Vec<&RegistryPlugin> {
+pub(crate) fn registry_index(registry: &Registry) -> Vec<&RegistryPlugin> {
     registry.plugins.iter().collect()
 }
 
@@ -179,7 +234,7 @@ fn find_by_plugin_name<'a>(items: &'a [&'a RegistryPlugin], name: &str) -> Optio
         .cloned()
 }
 
-fn find_by_key<'a>(
+pub(crate) fn find_by_key<'a>(
     items: &'a [&'a RegistryPlugin],
     kind: ContentKind,
     key: &str,
@@ -201,7 +256,7 @@ fn fallback_plugin(name: &str) -> RegistryPlugin {
     }
 }
 
-async fn merged_registry(state: &AppState) -> Registry {
+pub(crate) async fn merged_registry(state: &AppState) -> Registry {
     let plugins = if let Some(reg) = state.registry.lock().ok().and_then(|g| g.as_ref().cloned()) {
         reg
     } else {
@@ -303,12 +358,12 @@ pub async fn environment_export(
                 items.push(item);
             }
             for skill in &instance.skills {
-                if let Some(item) = find_by_key(&entries, ContentKind::Skill, skill) {
+                if let Some(item) = find_by_key(&entries, ContentKind::Skill, &skill.id) {
                     items.push(item);
                 }
             }
             for mcp in &instance.mcp {
-                if let Some(item) = find_by_key(&entries, ContentKind::Mcp, mcp) {
+                if let Some(item) = find_by_key(&entries, ContentKind::Mcp, &mcp.id) {
                     items.push(item);
                 }
             }
@@ -319,18 +374,42 @@ pub async fn environment_export(
                 ));
             }
 
+            // Provenance + version per resource (best-effort): plugins/themes
+            // read their installed package.json version; skills/MCP are indexed
+            // by key and carry no tracked version.
+            let exports: Vec<ExportedItem> = items
+                .iter()
+                .map(|item| {
+                    let version = match item.kind {
+                        ContentKind::Plugin | ContentKind::Theme => {
+                            DshAdapter::installed_version(&instance, &item.name)
+                        }
+                        _ => None,
+                    };
+                    ExportedItem {
+                        key: item.key(),
+                        kind: item.kind,
+                        name: item.name.clone(),
+                        source: item.install_spec(),
+                        version,
+                    }
+                })
+                .collect();
+
             let manifest = EnvironmentManifest {
-                format: FORMAT.into(),
-                format_version: FORMAT_VERSION,
+                format: ENVIRONMENT_FORMAT.into(),
+                format_version: ENVIRONMENT_FORMAT_VERSION,
                 exported_at: launcher_core::now_secs(),
                 name: instance.name.clone(),
                 description: format!("Environment exported from {}", instance.name),
+                compatible_with: instance.runtime.version.clone(),
                 source: EnvironmentSource {
                     instance_id: instance.id.clone(),
                     instance_name: instance.name.clone(),
                     runtime: instance.runtime.version.clone(),
                 },
                 items,
+                exports,
             };
             let checksum = manifest_checksum(&manifest)?;
             let pkg = EnvironmentPackage {
@@ -367,101 +446,12 @@ pub async fn environment_import(
     app: AppHandle,
     path: String,
     name: Option<String>,
-) -> Result<EnvironmentImportResult, AppError> {
-    run_instance_job(
-        &state,
-        &app,
-        "__environment_import__",
-        HeavyJobKind::EnvironmentImport,
-        || async {
-            let path = PathBuf::from(path.trim());
-            let pkg = read_package_path(&path)?;
-            validate_package(&pkg)?;
-            let name = name.or_else(|| Some(package_name_from_path(&path)));
-            import_validated_package(&state, &app, pkg, name).await
-        },
-    )
-    .await
-}
-
-async fn import_validated_package(
-    state: &AppState,
-    app: &AppHandle,
-    pkg: EnvironmentPackage,
-    name: Option<String>,
-) -> Result<EnvironmentImportResult, AppError> {
-    let instance_name = name
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| pkg.manifest.name.clone());
-    let instance = InstanceManifest::create(&state.paths, &instance_name)?;
-    ensure_not_running(state, &instance.id).await?;
-    let settings: AppSettings = state
-        .settings
-        .lock()
-        .map_err(|_| AppError::msg("settings lock poisoned"))?
-        .clone();
-
-    emit_log(
-        &app,
-        &format!(
-            "{} · importing environment \"{}\" ({} items)…",
-            instance.id,
-            pkg.manifest.name,
-            pkg.manifest.items.len()
-        ),
-    );
-
-    let mut summary = BundleSummary::default();
-    for item in &pkg.manifest.items {
-        let key = item.key();
-        let kind = item.kind.as_str().to_string();
-        match install_bundle_item(
-            state,
-            app,
-            &instance.id,
-            &instance,
-            &settings,
-            item,
-            LibraryItemSource::ImportedEnvironment,
-        )
-        .await
-        {
-            Ok(()) => {
-                summary.installed += 1;
-                summary.results.push(BundleItemResult {
-                    name: key,
-                    kind,
-                    ok: true,
-                    error: None,
-                });
-            }
-            Err(e) => {
-                summary.failed += 1;
-                summary.results.push(BundleItemResult {
-                    name: key,
-                    kind,
-                    ok: false,
-                    error: Some(e.to_string()),
-                });
-            }
-        }
-    }
-
-    let instance = InstanceManifest::get(&state.paths, &instance.id)?;
-    emit_log(
-        &app,
-        &format!(
-            "{} · environment import done: {} installed, {} failed",
-            instance.id, summary.installed, summary.failed
-        ),
-    );
-    reconcile_library_inventory_after_market_change(state, app, &instance.id, "environment import")
-        .await?;
-    Ok(EnvironmentImportResult {
-        instance,
-        checksum: pkg.checksum,
-        summary,
-    })
+) -> Result<Job, AppError> {
+    let path = PathBuf::from(path.trim());
+    let pkg = read_package_path(&path)?;
+    validate_package(&pkg)?;
+    let name = name.or_else(|| Some(package_name_from_path(&path)));
+    enqueue_environment_import(&state, &app, pkg, name).await
 }
 
 #[tauri::command]
@@ -470,17 +460,242 @@ pub async fn environment_import_package(
     app: AppHandle,
     bytes: Vec<u8>,
     name: Option<String>,
-) -> Result<EnvironmentImportResult, AppError> {
-    run_instance_job(
-        &state,
-        &app,
-        "__environment_import__",
-        HeavyJobKind::EnvironmentImport,
-        || async {
-            let pkg = read_package_bytes(&bytes)?;
-            validate_package(&pkg)?;
-            import_validated_package(&state, &app, pkg, name).await
+) -> Result<Job, AppError> {
+    let pkg = read_package_bytes(&bytes)?;
+    validate_package(&pkg)?;
+    enqueue_environment_import(&state, &app, pkg, name).await
+}
+
+/// Validate → create a fresh instance → write its empty Library snapshot →
+/// enqueue an Install Center job. Returns the `Job` immediately; the instance
+/// drainer runs [`environment_import_job`] with per-leaf progress + retry.
+async fn enqueue_environment_import(
+    state: &AppState,
+    app: &AppHandle,
+    pkg: EnvironmentPackage,
+    name: Option<String>,
+) -> Result<Job, AppError> {
+    let instance_name = name
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| pkg.manifest.name.clone());
+    let instance = InstanceManifest::create(&state.paths, &instance_name)?;
+    // Stage 12 校准 part 1: write the empty snapshot up front so the new
+    // instance appears in the Library before its first leaf lands.
+    reconcile_library_inventory_after_market_change(state, app, &instance.id, "environment import")
+        .await?;
+
+    let key = slug(&instance_name);
+    let label = format!(
+        "{} ({} items)",
+        pkg.manifest.name,
+        pkg.manifest.items.len()
+    );
+    enqueue_install(
+        state,
+        app,
+        &instance.id,
+        &key,
+        &label,
+        JobPlan::Environment {
+            manifest: pkg.manifest,
         },
     )
     .await
+}
+
+/// Durable Install Center body: install each manifest leaf with its own
+/// progress tick + log line, then reconcile the Library snapshot. Any failed
+/// leaf fails the whole row so the package can be retried from Install Center.
+pub(crate) async fn environment_import_job(
+    state: &AppState,
+    app: &AppHandle,
+    id: &str,
+    manifest: &EnvironmentManifest,
+    ctx: &JobCtx,
+) -> Result<(), AppError> {
+    ensure_not_running(state, id).await?;
+    let instance = InstanceManifest::get(&state.paths, id)?;
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| AppError::msg("settings lock poisoned"))?
+        .clone();
+
+    emit_log(
+        app,
+        &format!(
+            "{id} · importing environment \"{}\" ({} items)…",
+            manifest.name,
+            manifest.items.len()
+        ),
+    );
+
+    let item_count = manifest.items.len();
+    ctx.progress("importing", 5);
+    let mut failed = 0usize;
+    for (idx, item) in manifest.items.iter().enumerate() {
+        let key = item.key();
+        let kind = item.kind.as_str().to_string();
+        match install_bundle_item(
+            state,
+            app,
+            id,
+            &instance,
+            &settings,
+            item,
+            LibraryItemSource::ImportedEnvironment,
+            Some(ctx),
+        )
+        .await
+        {
+            Ok(()) => {
+                emit_log(app, &format!("{id} · installed {kind} {key}"));
+            }
+            Err(e) => {
+                failed += 1;
+                emit_log(app, &format!("{id} · FAILED {kind} {key}: {e}"));
+            }
+        }
+        if item_count > 0 {
+            let pct = 5 + ((idx as i64 + 1) * 75 / item_count as i64);
+            ctx.progress("importing", pct);
+        }
+    }
+
+    ctx.progress("inventory-sync", 88);
+    reconcile_library_inventory_after_market_change(state, app, id, "environment import").await?;
+    emit_log(
+        app,
+        &format!(
+            "{id} · environment \"{}\" done ({} failed)",
+            manifest.name, failed
+        ),
+    );
+    if failed > 0 {
+        return Err(AppError::msg(format!(
+            "environment \"{}\" finished with {failed} failed item(s)",
+            manifest.name
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_manifest() -> EnvironmentManifest {
+        EnvironmentManifest {
+            format: ENVIRONMENT_FORMAT.into(),
+            format_version: ENVIRONMENT_FORMAT_VERSION,
+            exported_at: 1,
+            name: "demo".into(),
+            description: String::new(),
+            compatible_with: "0.1.0".into(),
+            source: EnvironmentSource {
+                instance_id: "i".into(),
+                instance_name: "demo".into(),
+                runtime: "0.1.0".into(),
+            },
+            items: vec![RegistryPlugin {
+                kind: ContentKind::Plugin,
+                name: "toolbox".into(),
+                npm: Some("@acme/toolbox".into()),
+                ..Default::default()
+            }],
+            exports: vec![ExportedItem {
+                key: "toolbox".into(),
+                kind: ContentKind::Plugin,
+                name: "toolbox".into(),
+                source: "npm:@acme/toolbox".into(),
+                version: Some("1.0.0".into()),
+            }],
+        }
+    }
+
+    #[test]
+    fn export_package_bundles_manifest_and_readme_only() {
+        let pkg = EnvironmentPackage {
+            manifest: sample_manifest(),
+            checksum: "deadbeef".into(),
+        };
+        let bytes = zip_package(&pkg).expect("zip package");
+        let reader = Cursor::new(bytes);
+        let mut zip = zip::ZipArchive::new(reader).expect("open zip");
+        let names: Vec<String> = (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .collect();
+        // No logs, no node_modules, no workspace files — install manifest only.
+        assert_eq!(names.len(), 2, "package must bundle manifest + README only");
+        assert!(names.iter().any(|n| n == "environment.json"));
+        assert!(names.iter().any(|n| n == "README.md"));
+    }
+
+    #[test]
+    fn export_manifest_carries_no_secrets() {
+        // The provider vault (API keys) is never read at export time, and the
+        // manifest is install metadata only — no key/env/log content may appear.
+        let pkg = EnvironmentPackage {
+            manifest: sample_manifest(),
+            checksum: "deadbeef".into(),
+        };
+        let json = package_json(&pkg).expect("serialize package");
+        assert!(!json.contains("sk-"), "no API key material in package");
+        assert!(!json.contains("DEEPSEEK_API_KEY"), "no key env var in package");
+    }
+
+    #[test]
+    fn preview_flags_conflicts_and_missing_tokens() {
+        let plugin = RegistryPlugin {
+            kind: ContentKind::Plugin,
+            name: "toolbox".into(),
+            npm: Some("@acme/toolbox".into()),
+            ..Default::default()
+        };
+        let mut env = HashMap::new();
+        env.insert("GITHUB_TOKEN".into(), "${GITHUB_TOKEN}".into());
+        let mcp = RegistryPlugin {
+            kind: ContentKind::Mcp,
+            name: "server-github".into(),
+            transport: Some("stdio".into()),
+            command: Some("npx".into()),
+            env: Some(env),
+            ..Default::default()
+        };
+        let ghost = RegistryPlugin {
+            kind: ContentKind::Skill,
+            name: "ghost".into(),
+            ..Default::default()
+        };
+
+        let manifest = EnvironmentManifest {
+            items: vec![plugin.clone(), plugin, mcp, ghost],
+            exports: vec![],
+            ..sample_manifest()
+        };
+        let pkg = EnvironmentPackage {
+            manifest,
+            checksum: "deadbeef".into(),
+        };
+        let preview = preview_for(&pkg);
+
+        assert_eq!(preview.items.len(), 4);
+        assert_eq!(preview.missing_tokens, vec!["server-github".to_string()]);
+        assert!(
+            preview
+                .conflicts
+                .iter()
+                .any(|c| c.contains("duplicate item \"toolbox\"")),
+            "duplicate flagged: {:?}",
+            preview.conflicts
+        );
+        assert!(
+            preview
+                .conflicts
+                .iter()
+                .any(|c| c.contains("no download source for \"ghost\"")),
+            "unresolved source flagged: {:?}",
+            preview.conflicts
+        );
+    }
 }

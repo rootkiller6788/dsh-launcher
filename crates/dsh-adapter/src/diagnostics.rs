@@ -370,6 +370,7 @@ mod tests {
             plugins: vec![],
             skills: vec![],
             mcp: vec![],
+            skins: vec![],
             workspace: workspace.display().to_string(),
         };
 

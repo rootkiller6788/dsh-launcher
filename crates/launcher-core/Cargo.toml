@@ -11,8 +11,10 @@ tokio.workspace = true
 tracing.workspace = true
 directories = "6"
 keyring = "4"
+time = { version = "0.3", features = ["formatting"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+sha2 = "0.10"
 flate2 = "1"
 
 [target.'cfg(windows)'.dependencies]

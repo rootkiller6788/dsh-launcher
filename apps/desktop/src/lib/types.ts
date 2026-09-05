@@ -1,9 +1,10 @@
 // Types mirroring the Rust command layer (serde camelCase).
 
 export type ProcessStatus = 'stopped' | 'starting' | 'running' | 'degraded' | 'crashed'
-export type Page = 'overview' | 'instances' | 'market' | 'library' | 'activity' | 'settings'
+export type Page = 'overview' | 'instances' | 'market' | 'library' | 'installs' | 'activity' | 'settings'
 export type ShellMode = 'workspace' | 'manage'
 export type LogStream = 'stdout' | 'stderr'
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 export type Lang = 'en' | 'zh'
 /** Theme preference, mirroring DSH's `ui-theme.preference`. */
 export type Theme = 'light' | 'dark' | 'system'
@@ -20,6 +21,45 @@ export interface RuntimeRef {
   version: string
 }
 
+/**
+ * One installed MCP server — the launcher-side source of truth for the full
+ * connection definition, from which `cordis.patch.yml` is compiled. `id` is the
+ * catalog key (`owner/name`); `serverName` is the DSH-facing server name that
+ * becomes the patch row id `mcp-<serverName>`. A record with an empty
+ * `serverName` is a legacy bare id awaiting catalog backfill.
+ */
+export interface McpServerRecord {
+  id: string
+  serverName: string
+  /** `stdio` or `streamable-http`. */
+  transport: string
+  command: string
+  args: string[]
+  env: Record<string, string>
+  /** streamable-http endpoint URL (catalog `mcpUrl`). */
+  url: string
+  headers: Record<string, string>
+  /** `false` = compiled out of the patch (DSH no longer loads it). */
+  enabled: boolean
+}
+
+/**
+ * One installed skill — the manifest carries full provenance so an update can
+ * be judged and re-fetched without re-deriving anything. `id` is the catalog
+ * key (`owner/name`). A record with empty `source`/`hash` and `installed === 0`
+ * is a legacy bare id predating provenance tracking (backfilled by the next
+ * update pass, which hashes the file on disk).
+ */
+export interface SkillRecord {
+  id: string
+  /** URL the `SKILL.md` was actually fetched from (raw or repo fallback). */
+  source: string
+  /** Content SHA-256 (hex lowercase) of the installed `SKILL.md`. */
+  hash: string
+  /** Install epoch in milliseconds (0 = legacy unknown). */
+  installed: number
+}
+
 export interface InstanceManifest {
   id: string
   name: string
@@ -27,8 +67,8 @@ export interface InstanceManifest {
   profile: string
   providerRef: string
   plugins: string[]
-  skills: string[]
-  mcp: string[]
+  skills: SkillRecord[]
+  mcp: McpServerRecord[]
   skins: string[]
   workspace: string
 }
@@ -65,12 +105,15 @@ export interface LibraryInventoryItem {
   kind: ContentKind
   title: string
   packageName?: string | null
+  /** Installed "version" label: npm version (plugins/skins), `#<hash>` (skills), null (MCP). */
+  version?: string | null
   enabled?: boolean | null
   toggleable: boolean
   source: LibraryItemSource
   stateSource: LibraryStateSource
   detail?: string | null
   market?: MarketInstallMetadata | null
+  issues?: string[]
 }
 
 export interface LibraryInventoryDetail {
@@ -122,6 +165,13 @@ export interface SystemInfo {
   dshError: string | null
 }
 
+/** Data root + edition flag for the Settings → Storage card (#604 portable). */
+export interface AppPathsInfo {
+  /** True when the data root lives next to the exe (green edition). */
+  portable: boolean
+  root: string
+}
+
 /** One sample from the launcher's own resource sampler (Overview sparklines). */
 export interface SystemStats {
   /** Global CPU usage, percent (since the previous poll). */
@@ -138,6 +188,10 @@ export interface AppSettings {
   lastInstance?: string | null
   language?: string | null
   theme?: string | null
+  /** Crash-telemetry consent (#602). Default off; nothing leaves the machine until enabled. */
+  telemetryEnabled?: boolean
+  /** User-owned crash-ingest URL. Sending also requires `telemetryEnabled`. */
+  telemetryEndpoint?: string | null
 }
 
 /** A managed Node runtime, as the Settings → Runtime panel reports it. */
@@ -176,6 +230,7 @@ export interface RuntimeManagerView {
 
 export interface LogLine {
   stream: LogStream
+  level?: LogLevel
   line: string
 }
 
@@ -197,6 +252,8 @@ export interface UsageRecord {
   outputTokens: number
   totalTokens: number
   cost: number
+  /** `true` when cost is provider-reported or price-table derived; `false` = unknown (cost is 0). */
+  costKnown?: boolean
   apiKeyAlias: string
   requestId?: string | null
 }
@@ -219,6 +276,16 @@ export interface UsageModelTotal {
   cost: number
 }
 
+/** A generic dimension aggregate (provider alias / instance). */
+export interface UsageDimension {
+  key: string
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  requests: number
+  cost: number
+}
+
 export interface UsageSummary {
   records: UsageRecord[]
   totalTokens: number
@@ -226,9 +293,15 @@ export interface UsageSummary {
   outputTokens: number
   requests: number
   totalCost: number
+  costKnownRecords: number
+  unknownCostRecords: number
+  totalRecords: number
+  recordsTruncated: boolean
   byHour: UsageBucket[]
   byDay: UsageBucket[]
   byModel: UsageModelTotal[]
+  byProvider: UsageDimension[]
+  byInstance: UsageDimension[]
 }
 
 export interface UsageExportResult {
@@ -312,6 +385,13 @@ export interface EnvironmentExportResult {
   itemCount: number
 }
 
+export interface EnvironmentPreviewItem {
+  kind: ContentKind
+  name: string
+  source: string
+  version: string | null
+}
+
 export interface EnvironmentPreviewResult {
   name: string
   description: string
@@ -322,12 +402,10 @@ export interface EnvironmentPreviewResult {
   skills: number
   mcps: number
   exportedAt: number
-}
-
-export interface EnvironmentImportResult {
-  instance: InstanceManifest
-  checksum: string
-  summary: BundleSummary
+  compatibleWith: string
+  items: EnvironmentPreviewItem[]
+  conflicts: string[]
+  missingTokens: string[]
 }
 
 export interface PlanItem {
@@ -366,6 +444,18 @@ export interface PluginUpdate {
   updatable: boolean
 }
 
+/**
+ * One skill's update status. Skills have no version number, so both sides are
+ * content SHA-256s: `installed` is what's on disk (record hash, or a hash of
+ * the file for legacy records), `latest` is what the source serves now.
+ */
+export interface SkillUpdate {
+  id: string
+  installed: string
+  latest: string
+  updatable: boolean
+}
+
 export interface BundleInfo {
   name: string
   resolved: boolean
@@ -376,6 +466,35 @@ export interface BundleInfo {
 export interface OrderViolation {
   name: string
   message: string
+}
+
+// --- Install jobs (Stage 8: backend persistence) -----------------------------
+
+/** Install job status, mirrored from `launcher_core::JobStatus` (lowercase serde). */
+export type JobStatus = 'waiting' | 'running' | 'done' | 'failed' | 'cancelled'
+
+/** What the Install Center badge shows, mirrored from `launcher_core::JobKind`. */
+export type JobKind = 'plugin' | 'theme' | 'skill' | 'mcp' | 'bundle' | 'environment'
+
+/** A persisted install-job row (camelCase wire form of `launcher_core::Job`). */
+export interface Job {
+  id: number
+  instanceId: string
+  /** Content key (e.g. `owner/name`) a Market card is matched against. */
+  key: string
+  kind: JobKind
+  label: string
+  status: JobStatus
+  /** Current backend stage (download / dsh-install / inventory-sync…). */
+  stage: string | null
+  progress: number
+  error: string | null
+  /** Tail of the most recent sub-process stderr (pnpm / git / dsh). */
+  stderrTail: string | null
+  exitCode: number | null
+  createdAt: number
+  startedAt: number | null
+  finishedAt: number | null
 }
 
 export interface DiagnosticsReport {

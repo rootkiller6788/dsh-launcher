@@ -3,19 +3,20 @@ import { listen } from '@tauri-apps/api/event'
 import { ipc } from '../lib/ipc'
 import { applyTheme } from '../lib/theme'
 import type {
+  AppPathsInfo,
   AppSettings,
   BundleManifest,
-  BundleSummary,
   DiagnosticsReport,
   EnvironmentExportResult,
-  EnvironmentImportResult,
   InstanceManifest,
   InstalledPlugin,
+  Job,
   LibraryInventoryDetail,
   LibraryInventorySummary,
   Lang,
   LaunchSession,
   LogLine,
+  McpServerRecord,
   Page,
   PluginUpdate,
   ProcessState,
@@ -26,30 +27,13 @@ import type {
   Registry,
   RegistryPlugin,
   ShellMode,
+  SkillRecord,
+  SkillUpdate,
   SystemInfo,
   SystemStats,
   Theme,
   UsageSummary,
 } from '../lib/types'
-
-type InstallJobStatus = 'queued' | 'downloading' | 'dshInstalling' | 'inventorySync' | 'classifying' | 'done' | 'failed'
-type InstallJobAction =
-  | { type: 'market'; entry: RegistryPlugin }
-  | { type: 'plugin'; target: string; entry?: RegistryPlugin | null }
-  | { type: 'skill'; entry: RegistryPlugin }
-  | { type: 'mcp'; entry: RegistryPlugin }
-
-export interface InstallJob {
-  status: InstallJobStatus
-  label: string
-  instanceId: string
-  kind?: RegistryPlugin['kind']
-  progress: number
-  logs: string[]
-  detail?: string
-  action?: InstallJobAction
-  updatedAt: number
-}
 
 /**
  * Last time the *user* (or a DSH-side adopt) wrote the theme, for the poll's
@@ -82,35 +66,6 @@ const portFromUrl = (url: string | null): number | null => {
   }
 }
 
-function jobLabel(entry: RegistryPlugin) {
-  return entry.owner ? `${entry.owner}/${entry.name}` : entry.name
-}
-
-function pushInstallJob(
-  current: Record<string, InstallJob>,
-  key: string,
-  patch: Partial<InstallJob>,
-): Record<string, InstallJob> {
-  const previous = current[key]
-  const nextLog = patch.detail
-    ? [...(previous?.logs ?? []), patch.detail].slice(-8)
-    : previous?.logs ?? []
-  return {
-    ...current,
-    [key]: {
-      status: patch.status ?? previous?.status ?? 'queued',
-      label: patch.label ?? previous?.label ?? key,
-      instanceId: patch.instanceId ?? previous?.instanceId ?? '',
-      kind: patch.kind ?? previous?.kind,
-      progress: patch.progress ?? previous?.progress ?? 0,
-      logs: patch.logs ?? nextLog,
-      detail: patch.detail ?? previous?.detail,
-      action: patch.action ?? previous?.action,
-      updatedAt: Date.now(),
-    },
-  }
-}
-
 interface AppStore {
   page: Page
   shellMode: ShellMode
@@ -121,6 +76,7 @@ interface AppStore {
   system: SystemInfo | null
   systemStats: SystemStats | null
   systemHistory: SystemStats[]
+  appPaths: AppPathsInfo | null
   provider: ProviderView | null
   presets: ProviderPreset[]
   settings: AppSettings | null
@@ -134,30 +90,41 @@ interface AppStore {
   registry: Registry | null
   registryError: string | null
   installedPlugins: InstalledPlugin[]
-  installedSkills: string[]
-  installedMcps: string[]
+  installedSkills: SkillRecord[]
+  installedMcps: McpServerRecord[]
   libraryInventory: Record<string, LibraryInventorySummary>
   libraryDetail: LibraryInventoryDetail | null
-  installJobs: Record<string, InstallJob>
+  /** Backend-persisted install jobs (Stage 8): queue + history, newest first. */
+  jobs: Job[]
   recommendations: RecommendResult | null
   searching: boolean
   updates: PluginUpdate[]
+  skillUpdates: SkillUpdate[]
   diagnostics: DiagnosticsReport | null
   busy: boolean
   error: string | null
+  /** Epoch ms captured at launch-invoke; cleared once the workspace first paints. */
+  launchStartedAt: number | null
 
   setPage: (p: Page) => void
   setShellMode: (m: ShellMode) => void
   setError: (e: string | null) => void
-  clearInstallJob: (key: string) => void
-  retryInstallJob: (key: string) => Promise<boolean>
-  openInstallJobInLibrary: (key: string) => void
-  revealInstallWorkspace: (key: string) => Promise<void>
-  revealInstallConfig: (key: string) => Promise<void>
+  upsertJob: (job: Job) => void
+  removeJob: (id: number) => void
+  refreshJobs: () => Promise<void>
+  clearFinishedJobs: () => Promise<void>
+  retryJob: (id: number) => Promise<boolean>
+  cancelJob: (id: number) => Promise<boolean>
+  deleteJob: (id: number) => Promise<void>
+  openJobInLibrary: () => void
+  openJobInInstalls: () => void
+  revealJobWorkspace: (id: number) => Promise<void>
+  revealJobConfig: (id: number) => Promise<void>
   bootstrap: () => void
   refresh: () => Promise<void>
   refreshSystem: () => Promise<void>
   refreshSystemStats: () => Promise<void>
+  refreshAppPaths: () => Promise<void>
   refreshProvider: () => Promise<void>
   refreshState: () => Promise<void>
   refreshHistory: () => Promise<void>
@@ -185,6 +152,7 @@ interface AppStore {
   refreshLibraryDetail: () => Promise<void>
   reconcileLibraryInventory: () => Promise<void>
   recommend: (need: string) => Promise<void>
+  /** Enqueue a backend install job; resolves once the job row is queued. */
   installMarketEntry: (entry: RegistryPlugin) => Promise<boolean>
   installPlugin: (target: string, entry?: RegistryPlugin | null) => Promise<boolean>
   uninstallPlugin: (name: string) => Promise<boolean>
@@ -193,14 +161,17 @@ interface AppStore {
   uninstallSkill: (id: string) => Promise<boolean>
   refreshInstalledSkills: () => Promise<void>
   installMcp: (entry: RegistryPlugin) => Promise<boolean>
-  uninstallMcp: (entry: RegistryPlugin) => Promise<boolean>
+  uninstallMcp: (mcpId: string) => Promise<boolean>
+  setMcpEnabled: (mcpId: string, enabled: boolean) => Promise<boolean>
   refreshInstalledMcps: () => Promise<void>
-  importBundle: (manifest: BundleManifest) => Promise<BundleSummary | null>
+  importBundle: (manifest: BundleManifest) => Promise<Job | null>
   exportEnvironment: () => Promise<EnvironmentExportResult | null>
-  importEnvironment: (path: string, name?: string | null) => Promise<EnvironmentImportResult | null>
-  importEnvironmentPackage: (bytes: number[], name?: string | null) => Promise<EnvironmentImportResult | null>
+  importEnvironment: (path: string, name?: string | null) => Promise<Job | null>
+  importEnvironmentPackage: (bytes: number[], name?: string | null) => Promise<Job | null>
   refreshUpdates: () => Promise<void>
   updatePlugin: (name: string) => Promise<boolean>
+  refreshSkillUpdates: () => Promise<void>
+  updateSkill: (id: string) => Promise<boolean>
   refreshDiagnostics: () => Promise<void>
 }
 
@@ -214,6 +185,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   system: null,
   systemStats: null,
   systemHistory: [],
+  appPaths: null,
   provider: null,
   presets: [],
   settings: null,
@@ -231,55 +203,101 @@ export const useAppStore = create<AppStore>((set, get) => ({
   installedMcps: [],
   libraryInventory: {},
   libraryDetail: null,
-  installJobs: {},
+  jobs: [],
   recommendations: null,
   searching: false,
   updates: [],
+  skillUpdates: [],
   diagnostics: null,
   busy: false,
   error: null,
+  launchStartedAt: null,
 
   setPage: (page) => set({ page }),
   setShellMode: (shellMode) => {
     set({ shellMode })
   },
   setError: (error) => set({ error }),
-  openInstallJobInLibrary: () => set({ shellMode: 'manage', page: 'library' }),
-  revealInstallWorkspace: async (key) => {
-    const job = get().installJobs[key]
-    const id = job?.instanceId ?? get().activeId
-    if (!id) return
-    try {
-      await ipc.revealInstanceWorkspace(id)
-    } catch (e) {
-      set({ error: String(e) })
-    }
-  },
-  revealInstallConfig: async (key) => {
-    const job = get().installJobs[key]
-    const id = job?.instanceId ?? get().activeId
-    if (!id) return
-    try {
-      await ipc.revealInstanceConfig(id)
-    } catch (e) {
-      set({ error: String(e) })
-    }
-  },
-  clearInstallJob: (key) =>
+
+  // Insert-or-update a job row pushed by the backend `job-updated` event.
+  upsertJob: (job) =>
     set((s) => {
-      const next = { ...s.installJobs }
-      delete next[key]
-      return { installJobs: next }
+      const exists = s.jobs.some((j) => j.id === job.id)
+      return {
+        jobs: exists
+          ? s.jobs.map((j) => (j.id === job.id ? job : j))
+          : [job, ...s.jobs].slice(0, 200),
+      }
     }),
-  retryInstallJob: async (key) => {
-    const job = get().installJobs[key]
-    const action = job?.action
-    if (!action) return false
-    if (action.type === 'market') return get().installMarketEntry(action.entry)
-    if (action.type === 'plugin') return get().installPlugin(action.target, action.entry)
-    if (action.type === 'skill') return get().installSkill(action.entry)
-    if (action.type === 'mcp') return get().installMcp(action.entry)
-    return false
+  removeJob: (id) => set((s) => ({ jobs: s.jobs.filter((j) => j.id !== id) })),
+  refreshJobs: async () => {
+    try {
+      set({ jobs: await ipc.jobsList() })
+    } catch {
+      /* non-fatal */
+    }
+  },
+  clearFinishedJobs: async () => {
+    try {
+      await ipc.jobsClearFinished()
+      set((s) => ({
+        jobs: s.jobs.filter((j) => j.status === 'waiting' || j.status === 'running'),
+      }))
+    } catch (e) {
+      set({ error: String(e) })
+    }
+  },
+  retryJob: async (id) => {
+    set({ error: null })
+    try {
+      const job = await ipc.jobsRetry(id)
+      get().upsertJob(job)
+      return true
+    } catch (e) {
+      set({ error: String(e) })
+      return false
+    }
+  },
+  deleteJob: async (id) => {
+    try {
+      await ipc.jobsDelete(id)
+      get().removeJob(id)
+    } catch (e) {
+      set({ error: String(e) })
+    }
+  },
+  cancelJob: async (id) => {
+    set({ error: null })
+    try {
+      const job = await ipc.jobsCancel(id)
+      if (job) get().upsertJob(job)
+      return job != null
+    } catch (e) {
+      set({ error: String(e) })
+      return false
+    }
+  },
+  openJobInLibrary: () => set({ shellMode: 'manage', page: 'library' }),
+  openJobInInstalls: () => set({ shellMode: 'manage', page: 'installs' }),
+  revealJobWorkspace: async (id) => {
+    const job = get().jobs.find((j) => j.id === id)
+    const instanceId = job?.instanceId ?? get().activeId
+    if (!instanceId) return
+    try {
+      await ipc.revealInstanceWorkspace(instanceId)
+    } catch (e) {
+      set({ error: String(e) })
+    }
+  },
+  revealJobConfig: async (id) => {
+    const job = get().jobs.find((j) => j.id === id)
+    const instanceId = job?.instanceId ?? get().activeId
+    if (!instanceId) return
+    try {
+      await ipc.revealInstanceConfig(instanceId)
+    } catch (e) {
+      set({ error: String(e) })
+    }
   },
 
   bootstrap: () => {
@@ -310,6 +328,37 @@ export const useAppStore = create<AppStore>((set, get) => ({
         void state.refreshLibraryDetail()
       }
       void state.refreshLibraryInventory()
+    }).catch(() => {})
+    // DSH pushes settings changes over its host SSE stream; the backend forwards
+    // each `settings/document-updated` as this event, keyed by namespace. Adopt
+    // immediately — the poll below is only the reconnect/fallback path.
+    listen<string>('dsh-settings-changed', (event) => {
+      if (event.payload === 'ui-theme') void get().syncTheme()
+      else if (event.payload === 'locale') void get().syncLanguage()
+    }).catch(() => {})
+    // Stage 8: the backend pushes every job-row change here. Terminal rows on
+    // the active instance also nudge the Library indexes, since install actions
+    // now return at enqueue time (nobody is left to await completion).
+    listen<Job>('job-updated', (event) => {
+      const state = get()
+      state.upsertJob(event.payload)
+      const { status, instanceId } = event.payload
+      if (
+        (status === 'done' || status === 'failed' || status === 'cancelled') &&
+        instanceId === state.activeId &&
+        state.shellMode === 'manage' &&
+        (state.page === 'library' || state.page === 'market')
+      ) {
+        // A finished install changed the instance's content indexes; refresh
+        // them here because the install call returned at enqueue time.
+        if (status === 'done') {
+          void state.refreshInstalledPlugins()
+          void state.refreshInstalledSkills()
+          void state.refreshInstalledMcps()
+        }
+        void state.refreshLibraryInventory()
+        void state.refreshLibraryDetail()
+      }
     }).catch(() => {})
     const poll = () => {
       if (get().shellMode === 'workspace') return
@@ -343,12 +392,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
     poll()
     window.setInterval(poll, 1500)
+    // Fallback appearance/language sync. The primary path is the backend's SSE
+    // subscription (`dsh-settings-changed`); this poll only re-converges after a
+    // dropped stream or a missed event, so it can be slow and infrequent.
     window.setInterval(() => {
       const state = get()
-      if (!state.dshUrl || state.shellMode !== 'manage') return
-      if (state.page !== 'settings') return
+      if (!state.dshUrl) return
       void state.syncTheme()
-    }, 1000)
+      void state.syncLanguage()
+    }, 3000)
     window.setInterval(() => {
       const state = get()
       if (state.shellMode !== 'manage') return
@@ -357,6 +409,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       void state.refreshUsage()
     }, 3000)
     void get().refresh()
+    void get().refreshJobs()
   },
 
   refresh: async () => {
@@ -408,6 +461,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set({ error: String(e) })
     }
   },
+  refreshAppPaths: async () => {
+    try {
+      set({ appPaths: await ipc.appPaths() })
+    } catch (e) {
+      set({ error: String(e) })
+    }
+  },
   refreshSystemStats: async () => {
     try {
       const sample = await ipc.systemStats()
@@ -450,30 +510,18 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       const activeId = get().activeId
       const now = Math.floor(Date.now() / 1000)
+      // 7-day window so the Overview snapshot's 6 prior days resolve to real
+      // byDay buckets instead of zero.
       const start = new Date()
       start.setHours(0, 0, 0, 0)
+      start.setDate(start.getDate() - 6)
       set({ usageSummary: await ipc.usageSummary(activeId, Math.floor(start.getTime() / 1000), now + 1) })
     } catch {
       /* non-fatal */
     }
   },
 
-  appendLog: (line) =>
-    set((s) => {
-      const installJobs = { ...s.installJobs }
-      const text = line.line
-      for (const [key, job] of Object.entries(installJobs)) {
-        if (job.status === 'done' || job.status === 'failed') continue
-        if (!text.includes(job.instanceId) && !text.toLowerCase().includes(job.label.toLowerCase())) continue
-        installJobs[key] = {
-          ...job,
-          logs: [...job.logs, text].slice(-8),
-          detail: text,
-          updatedAt: Date.now(),
-        }
-      }
-      return { logs: [...s.logs.slice(-1999), line], installJobs }
-    }),
+  appendLog: (line) => set((s) => ({ logs: [...s.logs.slice(-1999), line] })),
   clearLogs: () => set({ logs: [] }),
 
   createInstance: async (name) => {
@@ -660,12 +708,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   launch: async (id) => {
-    set({ busy: true, error: null })
+    set({ busy: true, error: null, launchStartedAt: Date.now() })
     try {
       const processState = await ipc.launch(id)
       const dshUrl = await ipc.currentDshUrl().catch(() => get().dshUrl)
       set({ processState, dshUrl, shellMode: 'workspace' })
       void get().refreshLibraryInventory()
+      void get().refreshUpdates()
+      void get().refreshSkillUpdates()
     } catch (e) {
       set({ error: String(e) })
     } finally {
@@ -690,7 +740,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   restart: async () => {
     const id = get().activeId
     if (!id) return
-    set({ busy: true, error: null })
+    set({ busy: true, error: null, launchStartedAt: Date.now() })
     try {
       await ipc.stop()
       await get().refreshHistory()
@@ -698,6 +748,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const dshUrl = await ipc.currentDshUrl().catch(() => get().dshUrl)
       set({ processState, dshUrl, shellMode: 'workspace' })
       void get().refreshLibraryInventory()
+      void get().refreshUpdates()
+      void get().refreshSkillUpdates()
     } catch (e) {
       set({ error: String(e) })
     } finally {
@@ -799,135 +851,32 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
+  // Stage 8: installs enqueue a backend job and return as soon as it's queued.
+  // Progress/result arrives as `job-updated` events; a rejection here means the
+  // job was never accepted (e.g. no active instance).
   installMarketEntry: async (entry) => {
     const id = get().activeId
     if (!id) return false
-    const key = jobLabel(entry)
-    set((s) => ({
-      busy: true,
-      error: null,
-      installJobs: pushInstallJob(s.installJobs, key, {
-        status: 'downloading',
-        label: key,
-        instanceId: id,
-        kind: entry.kind,
-        progress: 18,
-        detail: 'Download / manifest resolution started',
-        action: { type: 'market', entry },
-      }),
-    }))
+    set({ error: null })
     try {
-      set((s) => ({
-        installJobs: pushInstallJob(s.installJobs, key, {
-          status: 'dshInstalling',
-          progress: 45,
-          detail: 'Installing through DSH',
-        }),
-      }))
       await ipc.marketInstall(id, entry)
-      set((s) => ({
-        installJobs: pushInstallJob(s.installJobs, key, {
-          status: 'inventorySync',
-          progress: 74,
-          detail: 'Syncing DSH Inventory snapshot',
-        }),
-      }))
-      if (entry.kind === 'skill') {
-        await get().refreshInstalledSkills()
-      } else if (entry.kind === 'mcp') {
-        await get().refreshInstalledMcps()
-      } else {
-        await get().refreshInstalledPlugins()
-      }
-      await get().refreshLibraryInventory()
-      set((s) => ({
-        installJobs: pushInstallJob(s.installJobs, key, {
-          status: 'classifying',
-          progress: 88,
-          detail: 'Classifying Library metadata',
-        }),
-      }))
-      await get().refreshLibraryDetail()
-      set((s) => ({
-        installJobs: pushInstallJob(s.installJobs, key, {
-          status: 'done',
-          progress: 100,
-          detail: 'Ready in Library',
-        }),
-      }))
       return true
     } catch (e) {
-      set((s) => ({
-        error: String(e),
-        installJobs: pushInstallJob(s.installJobs, key, {
-          status: 'failed',
-          progress: 100,
-          detail: String(e),
-        }),
-      }))
+      set({ error: String(e) })
       return false
-    } finally {
-      set({ busy: false })
     }
   },
 
   installPlugin: async (target, entry = null) => {
     const id = get().activeId
     if (!id) return false
-    const jobKey = entry?.kind === 'theme' && entry.owner ? `${entry.owner}/${entry.name}` : target
-    set((s) => ({
-      busy: true,
-      error: null,
-      installJobs: pushInstallJob(s.installJobs, jobKey, {
-        status: 'dshInstalling',
-        label: jobKey,
-        instanceId: id,
-        kind: entry?.kind ?? 'plugin',
-        progress: 40,
-        detail: 'Installing through DSH',
-        action: { type: 'plugin', target, entry },
-      }),
-    }))
+    set({ error: null })
     try {
       await ipc.pluginInstall(id, target, entry)
-      set((s) => ({
-        installJobs: pushInstallJob(s.installJobs, jobKey, {
-          status: 'inventorySync',
-          progress: 74,
-          detail: 'Syncing DSH Inventory snapshot',
-        }),
-      }))
-      await get().refresh()
-      await get().refreshInstalledPlugins()
-      await get().refreshLibraryInventory()
-      set((s) => ({
-        installJobs: pushInstallJob(s.installJobs, jobKey, {
-          status: 'classifying',
-          progress: 88,
-          detail: 'Classifying Library metadata',
-        }),
-      }))
-      await get().refreshLibraryDetail()
-      set((s) => ({
-        installJobs: pushInstallJob(s.installJobs, jobKey, {
-          status: 'done',
-          progress: 100,
-          detail: 'Ready in Library',
-        }),
-      }))
       return true
     } catch (e) {
-      set((s) => ({
-        error: String(e),
-        installJobs: pushInstallJob(s.installJobs, jobKey, {
-          status: 'failed',
-          progress: 100,
-          detail: String(e),
-        }),
-      }))
+      set({ error: String(e) })
       return false
-    } finally {
-      set({ busy: false })
     }
   },
 
@@ -983,59 +932,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
   installSkill: async (entry) => {
     const id = get().activeId
     if (!id) return false
-    const key = jobLabel(entry)
-    set((s) => ({
-      busy: true,
-      error: null,
-      installJobs: pushInstallJob(s.installJobs, key, {
-        status: 'downloading',
-        label: key,
-        instanceId: id,
-        kind: entry.kind,
-        progress: 22,
-        detail: 'Downloading skill files',
-        action: { type: 'skill', entry },
-      }),
-    }))
+    set({ error: null })
     try {
       await ipc.skillInstall(id, entry)
-      set((s) => ({
-        installJobs: pushInstallJob(s.installJobs, key, {
-          status: 'inventorySync',
-          progress: 74,
-          detail: 'Refreshing Library snapshot',
-        }),
-      }))
-      await get().refreshInstalledSkills()
-      await get().refreshLibraryInventory()
-      set((s) => ({
-        installJobs: pushInstallJob(s.installJobs, key, {
-          status: 'classifying',
-          progress: 88,
-          detail: 'Classifying skill metadata',
-        }),
-      }))
-      await get().refreshLibraryDetail()
-      set((s) => ({
-        installJobs: pushInstallJob(s.installJobs, key, {
-          status: 'done',
-          progress: 100,
-          detail: 'Ready in Library',
-        }),
-      }))
       return true
     } catch (e) {
-      set((s) => ({
-        error: String(e),
-        installJobs: pushInstallJob(s.installJobs, key, {
-          status: 'failed',
-          progress: 100,
-          detail: String(e),
-        }),
-      }))
+      set({ error: String(e) })
       return false
-    } finally {
-      set({ busy: false })
     }
   },
 
@@ -1073,68 +976,40 @@ export const useAppStore = create<AppStore>((set, get) => ({
   installMcp: async (entry) => {
     const id = get().activeId
     if (!id) return false
-    const key = jobLabel(entry)
-    set((s) => ({
-      busy: true,
-      error: null,
-      installJobs: pushInstallJob(s.installJobs, key, {
-        status: 'dshInstalling',
-        label: key,
-        instanceId: id,
-        kind: entry.kind,
-        progress: 42,
-        detail: 'Writing MCP profile configuration',
-        action: { type: 'mcp', entry },
-      }),
-    }))
+    set({ error: null })
     try {
       await ipc.mcpInstall(id, entry)
-      set((s) => ({
-        installJobs: pushInstallJob(s.installJobs, key, {
-          status: 'inventorySync',
-          progress: 74,
-          detail: 'Refreshing Library snapshot',
-        }),
-      }))
-      await get().refreshInstalledMcps()
-      await get().refreshLibraryInventory()
-      set((s) => ({
-        installJobs: pushInstallJob(s.installJobs, key, {
-          status: 'classifying',
-          progress: 88,
-          detail: 'Classifying MCP metadata',
-        }),
-      }))
-      await get().refreshLibraryDetail()
-      set((s) => ({
-        installJobs: pushInstallJob(s.installJobs, key, {
-          status: 'done',
-          progress: 100,
-          detail: 'Ready in Library',
-        }),
-      }))
       return true
     } catch (e) {
-      set((s) => ({
-        error: String(e),
-        installJobs: pushInstallJob(s.installJobs, key, {
-          status: 'failed',
-          progress: 100,
-          detail: String(e),
-        }),
-      }))
+      set({ error: String(e) })
+      return false
+    }
+  },
+
+  uninstallMcp: async (mcpId) => {
+    const id = get().activeId
+    if (!id) return false
+    set({ busy: true, error: null })
+    try {
+      await ipc.mcpUninstall(id, mcpId)
+      await get().refreshInstalledMcps()
+      await get().refreshLibraryInventory()
+      await get().refreshLibraryDetail()
+      return true
+    } catch (e) {
+      set({ error: String(e) })
       return false
     } finally {
       set({ busy: false })
     }
   },
 
-  uninstallMcp: async (entry) => {
+  setMcpEnabled: async (mcpId, enabled) => {
     const id = get().activeId
     if (!id) return false
     set({ busy: true, error: null })
     try {
-      await ipc.mcpUninstall(id, entry)
+      await ipc.mcpSetEnabled(id, mcpId, enabled)
       await get().refreshInstalledMcps()
       await get().refreshLibraryInventory()
       await get().refreshLibraryDetail()
@@ -1150,21 +1025,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
   importBundle: async (manifest) => {
     const id = get().activeId
     if (!id) return null
-    set({ busy: true, error: null })
+    set({ error: null })
     try {
-      const summary = await ipc.bundleImport(id, manifest)
-      // Bundle items can install plugins/skills/MCP, so refresh every index.
-      await get().refreshInstalledPlugins()
-      await get().refreshInstalledSkills()
-      await get().refreshInstalledMcps()
-      await get().refreshLibraryInventory()
-      await get().refreshLibraryDetail()
-      return summary
+      // Enqueues a backend bundle job; per-item progress streams via
+      // `job-updated`. Bundle items can install plugins/skills/MCP — the
+      // terminal-job handler on the active pages refreshes every index.
+      return await ipc.bundleImport(id, manifest)
     } catch (e) {
       set({ error: String(e) })
       return null
-    } finally {
-      set({ busy: false })
     }
   },
 
@@ -1183,42 +1052,33 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   importEnvironment: async (path, name) => {
-    set({ busy: true, error: null })
+    set({ error: null })
     try {
-      const result = await ipc.environmentImport(path, name)
+      // Enqueues an environment-import job; per-leaf progress streams via
+      // `job-updated`. The instance is created eagerly by the backend, so
+      // refresh + select it now and let Install Center drive the install.
+      const job = await ipc.environmentImport(path, name)
       await get().refresh()
-      await get().switchInstance(result.instance.id)
-      await get().refreshInstalledPlugins()
-      await get().refreshInstalledSkills()
-      await get().refreshInstalledMcps()
-      await get().refreshLibraryInventory()
-      await get().refreshLibraryDetail()
-      return result
+      await get().switchInstance(job.instanceId)
+      void get().refreshJobs()
+      return job
     } catch (e) {
       set({ error: String(e) })
       return null
-    } finally {
-      set({ busy: false })
     }
   },
 
   importEnvironmentPackage: async (bytes, name) => {
-    set({ busy: true, error: null })
+    set({ error: null })
     try {
-      const result = await ipc.environmentImportPackage(bytes, name)
+      const job = await ipc.environmentImportPackage(bytes, name)
       await get().refresh()
-      await get().switchInstance(result.instance.id)
-      await get().refreshInstalledPlugins()
-      await get().refreshInstalledSkills()
-      await get().refreshInstalledMcps()
-      await get().refreshLibraryInventory()
-      await get().refreshLibraryDetail()
-      return result
+      await get().switchInstance(job.instanceId)
+      void get().refreshJobs()
+      return job
     } catch (e) {
       set({ error: String(e) })
       return null
-    } finally {
-      set({ busy: false })
     }
   },
 
@@ -1242,6 +1102,37 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       await ipc.pluginUpdate(id, name)
       await get().refreshInstalledPlugins()
+      await get().refreshLibraryInventory()
+      await get().refreshLibraryDetail()
+      return true
+    } catch (e) {
+      set({ error: String(e) })
+      return false
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  refreshSkillUpdates: async () => {
+    const id = get().activeId
+    if (!id) {
+      set({ skillUpdates: [] })
+      return
+    }
+    try {
+      set({ skillUpdates: await ipc.skillUpdates(id) })
+    } catch {
+      /* non-fatal */
+    }
+  },
+
+  updateSkill: async (skillId) => {
+    const id = get().activeId
+    if (!id) return false
+    set({ busy: true, error: null })
+    try {
+      await ipc.skillUpdate(id, skillId)
+      await get().refreshInstalledSkills()
       await get().refreshLibraryInventory()
       await get().refreshLibraryDetail()
       return true

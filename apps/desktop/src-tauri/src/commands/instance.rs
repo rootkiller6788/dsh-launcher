@@ -29,7 +29,7 @@ pub fn get_instance(
     state: State<'_, AppState>,
     id: Option<String>,
 ) -> Result<InstanceManifest, AppError> {
-    Ok(active_instance(&state, id.as_deref())?)
+    active_instance(&state, id.as_deref())
 }
 
 #[tauri::command]

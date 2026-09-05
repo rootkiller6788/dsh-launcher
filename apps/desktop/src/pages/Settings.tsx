@@ -3,8 +3,10 @@ import {
   Archive,
   Cpu,
   FileCheck2,
+  FolderOpen,
   RotateCw,
   Save,
+  Send,
   ServerCog,
   ShieldCheck,
   Terminal,
@@ -59,6 +61,27 @@ function PreferenceCard({
   )
 }
 
+/** Minimal role=switch toggle used by the telemetry consent row. */
+function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      onClick={() => onChange(!on)}
+      className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+        on ? 'bg-blue-500' : 'bg-zinc-700'
+      }`}
+    >
+      <span
+        className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${
+          on ? 'left-[22px]' : 'left-0.5'
+        }`}
+      />
+    </button>
+  )
+}
+
 type Flash = 'saving' | 'saved' | 'failed' | null
 
 export function Settings() {
@@ -66,26 +89,45 @@ export function Settings() {
   const settings = useAppStore((s) => s.settings)
   const system = useAppStore((s) => s.system)
   const busy = useAppStore((s) => s.busy)
+  const appPaths = useAppStore((s) => s.appPaths)
   const saveSettings = useAppStore((s) => s.saveSettings)
   const refreshSystem = useAppStore((s) => s.refreshSystem)
+  const refreshAppPaths = useAppStore((s) => s.refreshAppPaths)
   const exportEnvironment = useAppStore((s) => s.exportEnvironment)
 
   const [dshPath, setDshPath] = useState('')
+  const [telemetryEnabled, setTelemetryEnabled] = useState(false)
+  const [telemetryEndpoint, setTelemetryEndpoint] = useState('')
   const [flash, setFlash] = useState<Flash>(null)
   const [exportedPath, setExportedPath] = useState<string | null>(null)
 
+  // The data root + edition flag is a one-shot read (cheap); it never changes
+  // while the app runs, so load it once on mount.
   useEffect(() => {
-    if (settings) setDshPath(settings.dshPath ?? '')
+    void refreshAppPaths()
+  }, [refreshAppPaths])
+
+  useEffect(() => {
+    if (settings) {
+      setDshPath(settings.dshPath ?? '')
+      setTelemetryEnabled(settings.telemetryEnabled ?? false)
+      setTelemetryEndpoint(settings.telemetryEndpoint ?? '')
+    }
   }, [settings])
 
   const save = async () => {
     setFlash('saving')
     const current = useAppStore.getState()
+    // Spread the persisted doc first so fields this page doesn't edit (nodePath
+    // and anything added later) survive a Save instead of being dropped.
     const okSettings = await saveSettings({
+      ...(current.settings ?? {}),
       dshPath: dshPath.trim() || null,
       lastInstance: current.settings?.lastInstance ?? null,
       language: current.language,
       theme: current.theme,
+      telemetryEnabled,
+      telemetryEndpoint: telemetryEndpoint.trim() || null,
     })
     setFlash(okSettings ? 'saved' : 'failed')
   }
@@ -200,6 +242,61 @@ export function Settings() {
                 <RotateCw className="h-3.5 w-3.5" strokeWidth={1.75} />
                 {t('settings.recheck')}
               </button>
+            </PreferenceCard>
+
+            <PreferenceCard icon={FolderOpen} title={t('settings.storage')} subtitle={t('settings.storageHint')}>
+              {appPaths ? (
+                <div className="flex items-start justify-between gap-4 rounded-lg border border-zinc-800/70 bg-zinc-950/35 p-4">
+                  <div className="min-w-0">
+                    <span
+                      className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                        appPaths.portable
+                          ? 'bg-emerald-500/15 text-emerald-300'
+                          : 'bg-blue-500/15 text-blue-300'
+                      }`}
+                    >
+                      {appPaths.portable ? t('settings.portableMode') : t('settings.installedMode')}
+                    </span>
+                    <p className="mt-2 text-[11px] uppercase tracking-wide text-zinc-500">{t('settings.dataDir')}</p>
+                    <p className="mt-1 truncate font-mono text-xs text-zinc-200" title={appPaths.root}>
+                      {appPaths.root}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => void ipc.revealDataDir()}
+                    className="shrink-0 rounded-lg bg-zinc-800 px-3 py-2 text-xs font-medium text-zinc-300 hover:bg-zinc-700"
+                  >
+                    {t('settings.openDataDir')}
+                  </button>
+                </div>
+              ) : (
+                <p className="text-xs text-zinc-500">{t('settings.loading')}</p>
+              )}
+            </PreferenceCard>
+
+            <PreferenceCard icon={Send} title={t('settings.telemetry')} subtitle={t('settings.telemetryHint')}>
+              <div className="space-y-3">
+                <div className="flex items-start justify-between gap-4 rounded-lg border border-zinc-800/70 bg-zinc-950/35 p-4">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-zinc-200">{t('settings.telemetryConsent')}</p>
+                    <p className="mt-1 text-xs leading-5 text-zinc-500">{t('settings.telemetryCopy')}</p>
+                  </div>
+                  <Toggle on={telemetryEnabled} onChange={setTelemetryEnabled} />
+                </div>
+                {telemetryEnabled && (
+                  <Field label={t('settings.telemetryEndpoint')} hint={t('settings.telemetryEndpointHint')}>
+                    <input
+                      value={telemetryEndpoint}
+                      onChange={(e) => setTelemetryEndpoint(e.target.value)}
+                      placeholder="https://ingest.example.com/v1/crashes"
+                      className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-100 outline-none focus:border-blue-500"
+                    />
+                  </Field>
+                )}
+                <p className="rounded-lg border border-zinc-800/70 bg-zinc-950/25 px-3 py-2 text-[11px] leading-5 text-zinc-500">
+                  {t('settings.telemetryScope')}
+                </p>
+              </div>
             </PreferenceCard>
 
             {flash === 'saved' && <p className="text-center text-xs text-emerald-400">{t('settings.savedMsg')}</p>}

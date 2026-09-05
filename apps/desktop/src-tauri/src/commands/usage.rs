@@ -100,10 +100,12 @@ fn downloads_dir() -> PathBuf {
 }
 
 fn usage_csv(records: &[UsageRecord]) -> String {
-    let mut out = String::from("id,instance_id,timestamp,model,input_tokens,output_tokens,total_tokens,cost,api_key_alias,request_id\n");
+    let mut out = String::from(
+        "id,instance_id,timestamp,model,input_tokens,output_tokens,total_tokens,cost,cost_known,api_key_alias,request_id\n",
+    );
     for record in records {
         out.push_str(&format!(
-            "{},{},{},{},{},{},{},{:.8},{},{}\n",
+            "{},{},{},{},{},{},{},{:.8},{},{},{}\n",
             record.id,
             csv_cell(&record.instance_id),
             record.timestamp,
@@ -112,6 +114,7 @@ fn usage_csv(records: &[UsageRecord]) -> String {
             record.output_tokens,
             record.total_tokens,
             record.cost,
+            if record.cost_known { 1 } else { 0 },
             csv_cell(&record.api_key_alias),
             csv_cell(record.request_id.as_deref().unwrap_or(""))
         ));

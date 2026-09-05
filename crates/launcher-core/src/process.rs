@@ -57,10 +57,27 @@ pub enum LogStream {
     Stderr,
 }
 
+/// Severity of a launcher-originated log line. DSH's own streamed stdout/stderr
+/// map onto `Info`/`Warn`; launcher bookkeeping (proxy inject, inventory sync,
+/// install queue progress) uses `Debug` so Activity can hide the noise by
+/// default and surface only actionable errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[derive(Default)]
+pub enum LogLevel {
+    Debug,
+    #[default]
+    Info,
+    Warn,
+    Error,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogLine {
     pub stream: LogStream,
+    #[serde(default)]
+    pub level: LogLevel,
     pub line: String,
 }
 
@@ -100,8 +117,7 @@ impl WindowsJob {
             let ok = SetInformationJobObject(
                 job,
                 JobObjectExtendedLimitInformation,
-                (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION)
-                    .cast::<core::ffi::c_void>(),
+                (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast::<core::ffi::c_void>(),
                 std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             );
             if ok == 0 {
@@ -366,7 +382,11 @@ pub async fn spawn_child_with_exit(
                     Ok(_) => {
                         let line = buf.trim_end_matches(['\r', '\n']).to_string();
                         if !line.is_empty() {
-                            sink(LogLine { stream: LogStream::Stdout, line });
+                            sink(LogLine {
+                                stream: LogStream::Stdout,
+                                level: LogLevel::Info,
+                                line,
+                            });
                         }
                     }
                     Err(_) => break,
@@ -386,7 +406,11 @@ pub async fn spawn_child_with_exit(
                     Ok(_) => {
                         let line = buf.trim_end_matches(['\r', '\n']).to_string();
                         if !line.is_empty() {
-                            sink(LogLine { stream: LogStream::Stderr, line });
+                            sink(LogLine {
+                                stream: LogStream::Stderr,
+                                level: LogLevel::Warn,
+                                line,
+                            });
                         }
                     }
                     Err(_) => break,
