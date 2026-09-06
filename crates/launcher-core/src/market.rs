@@ -81,6 +81,58 @@ pub struct PlanItem {
     pub reason: String,
 }
 
+/// Resolver-produced install plan for an MCP server (roadmap §2.2 / §8.2).
+///
+/// `Discovery → Install → Runtime` single-direction derivation: the catalog
+/// carries Discovery data; this is the Install manifest — *what* to prefetch and
+/// the *canonical launch* that replaces any best-effort `github:` pseudo command.
+/// Precomputed at catalog-build time by `scripts/resolver/github-analyzer.mjs` or
+/// probed at runtime by the dsh-adapter resolver for a single missing entry.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct McpInstallManifest {
+    /// Runtime the server needs: `"node"` or `"python"` (go/rust arrive in Phase 4).
+    #[serde(default)]
+    pub runtime: String,
+    /// Package manager used for the install-time prefetch: `"npm"` or `"uv"`.
+    #[serde(default)]
+    pub method: String,
+    /// Prefetch target — a registry package name, or a `github:` / `git+https://…`
+    /// spec when the repo isn't published (source-run via npx/uvx).
+    #[serde(default)]
+    pub package: String,
+    /// Canonical launch command (+args) that should be recorded on the MCP row.
+    #[serde(default)]
+    pub launch: McpLaunchSpec,
+}
+
+/// `command` + `args` pair used both for the catalog launch and the recorded MCP row.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct McpLaunchSpec {
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+/// A single environment variable an MCP server needs configured to actually
+/// operate, declared by the catalog (`content-mcp-env.json`, keyed by
+/// `owner/name`). The launcher only *declares* in this phase — values are never
+/// stored here; Library surfaces unset requirements and a future stage wires
+/// value entry (secrets → the OS credential vault).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct McpEnvRequirement {
+    /// Env var name the server reads, e.g. `KANBOARD_URL`.
+    pub key: String,
+    /// Human-readable label for the value the user must supply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// `true` = a credential (token/key) — the UI must never echo or log it.
+    #[serde(default)]
+    pub secret: bool,
+}
+
 /// One curated plugin entry. `spec` is a computed field (not part of the
 /// registry JSON): the ready-to-install pnpm target the launcher hands to
 /// `dsh plugin add`, derived npm → tarball → `github:owner/repo`.
@@ -153,6 +205,10 @@ pub struct RegistryPlugin {
     pub mcp_url: Option<String>,
     #[serde(default)]
     pub headers: Option<HashMap<String, String>>,
+    /// Resolver-produced install plan (MCP). Absent for entries whose launch is a
+    /// plain best-effort command, or ones the resolver couldn't fingerprint.
+    #[serde(default)]
+    pub mcp_install: Option<McpInstallManifest>,
     // --- bundle specific ---
     /// Curated bundle's item references (kind + owner/name + reason), resolved
     /// against the merged catalog and installed as a group.
@@ -161,6 +217,11 @@ pub struct RegistryPlugin {
     /// Computed install target (npm | tarball | `github:owner/repo`).
     #[serde(default)]
     pub spec: String,
+    /// Catalog-declared env the server needs configured (merged from
+    /// `content-mcp-env.json` by [`hydrate`], keyed by `owner/name`). Never
+    /// carries values — only declares *what* is required.
+    #[serde(default)]
+    pub required_env: Vec<McpEnvRequirement>,
 }
 
 impl RegistryPlugin {
@@ -227,10 +288,14 @@ pub struct Registry {
     pub plugins: Vec<RegistryPlugin>,
 }
 
-/// Fill each plugin's computed `spec` after deserialization (fetch or cache).
+/// Fill each plugin's computed `spec` after deserialization (fetch or cache),
+/// and merge the per-server required-env declarations (`content-mcp-env.json`)
+/// onto each MCP by catalog key (`owner/name`).
 pub fn hydrate(mut reg: Registry) -> Registry {
+    let envs = required_env_map();
     for p in &mut reg.plugins {
         p.spec = p.install_spec();
+        p.required_env = envs.get(&p.key()).cloned().unwrap_or_default();
     }
     reg
 }
@@ -245,6 +310,22 @@ const SKILLS_CATALOG: &str = include_str!("../data/content-skills.json");
 /// enriched with transport/command/args/env from the hand-maintained
 /// `scripts/data/mcp-overrides.json`).
 const MCPS_CATALOG: &str = include_str!("../data/content-mcps.json");
+/// Per-server required-env declarations (`what` each MCP needs configured) —
+/// embedded like the catalogs so it works offline. Never stores values.
+const MCP_ENV_CATALOG: &str = include_str!("../data/content-mcp-env.json");
+
+/// The parsed `owner/name → requirements` map from [`MCP_ENV_CATALOG`]. The
+/// file's `comment` key is ignored by serde (unknown fields are skipped).
+pub fn required_env_map() -> HashMap<String, Vec<McpEnvRequirement>> {
+    #[derive(Deserialize)]
+    struct File {
+        #[serde(default)]
+        servers: HashMap<String, Vec<McpEnvRequirement>>,
+    }
+    serde_json::from_str::<File>(MCP_ENV_CATALOG)
+        .map(|f| f.servers)
+        .unwrap_or_default()
+}
 /// The bundled bundle catalog (offline snapshot of awesome-agent-bundles).
 const BUNDLES_CATALOG: &str = include_str!("../data/content-bundles.json");
 
@@ -732,57 +813,7 @@ pub async fn recommend(
     let candidate_names: Vec<String> = candidates.iter().map(|p| p.kind_key()).collect();
     let allowed: HashSet<String> = candidate_names.iter().cloned().collect();
 
-    let base = provider
-        .profile
-        .base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("https://api.deepseek.com")
-        .trim_end_matches('/');
-    let model = provider
-        .profile
-        .model
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("deepseek-v4-flash");
-
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [
-            { "role": "system", "content": SYSTEM_PROMPT },
-            { "role": "user", "content": build_prompt(need, &candidates) },
-        ],
-        "max_tokens": 1200,
-        "stream": false,
-    });
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(90))
-        .build()?;
-    let resp = client
-        .post(format!("{base}/chat/completions"))
-        .bearer_auth(&provider.api_key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| anyhow!("LLM request failed: {e}"))?;
-    let status = resp.status();
-    let text = resp.text().await.context("read LLM response")?;
-    if !status.is_success() {
-        return Err(anyhow!(
-            "LLM error {status}: {}",
-            text.chars().take(300).collect::<String>()
-        ));
-    }
-
-    let json: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| anyhow!("LLM returned non-JSON: {e}"))?;
-    let raw = json["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    let raw = crate::llm::chat(provider, SYSTEM_PROMPT, &build_prompt(need, &candidates)).await?;
     let plans = validate_plans(&raw, &allowed);
     Ok(RecommendResult {
         plans,
@@ -1080,6 +1111,48 @@ mod tests {
             installable * 100 >= reg.plugins.len() * 60,
             "most MCP entries should carry a command (stdio) or mcpUrl (http), got {installable}/{}",
             reg.plugins.len()
+        );
+    }
+
+    #[test]
+    fn hydrate_merges_env_requirements_by_owner_slash_name() {
+        let reg = bundled_mcps();
+        // kanboard lives in the 3452-row bulk catalog (not the curated 25), so a
+        // hit proves the merge keys off `owner/name` across bulk rows too.
+        let kb = reg
+            .plugins
+            .iter()
+            .find(|p| p.owner == "ErnestoCorona" && p.name == "kanboard-mcp")
+            .expect("kanboard-mcp present in bundled MCP catalog");
+        assert_eq!(
+            kb.required_env,
+            vec![McpEnvRequirement {
+                key: "KANBOARD_URL".into(),
+                label: Some("Kanboard base URL".into()),
+                secret: false,
+            }],
+            "kanboard must inherit its catalog-declared required env after hydrate"
+        );
+        // Every declared key that exists in the catalog must be hydrated; entries
+        // without a declaration must stay clean — no phantom "needs config" hints.
+        let declared = required_env_map();
+        let mut declared_hits = 0usize;
+        for p in &reg.plugins {
+            match declared.get(&p.key()) {
+                Some(reqs) => {
+                    declared_hits += 1;
+                    assert_eq!(p.required_env, *reqs, "{} must inherit its declaration", p.key());
+                }
+                None => assert!(
+                    p.required_env.is_empty(),
+                    "{} picked up an undeclared requirement",
+                    p.key()
+                ),
+            }
+        }
+        assert!(
+            declared_hits > 0,
+            "content-mcp-env.json declarations must reach at least one catalog entry"
         );
     }
 

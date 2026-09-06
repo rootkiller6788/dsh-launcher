@@ -1,22 +1,29 @@
 import { useEffect, useMemo, useRef, useState, type ImgHTMLAttributes } from 'react'
 import {
+  BadgeCheck,
   Boxes,
   Download,
+  Import,
+  Info,
   Layers3,
   Package,
   RefreshCw,
   Search,
   Shuffle,
   SlidersHorizontal,
+  X,
 } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
 import { useT } from '../lib/i18n'
+import { ipc } from '../lib/ipc'
 import { Select } from '../components/Select'
 import type {
   BundleManifest,
   ContentKind,
+  ImportedMcp,
   InstalledPlugin,
   Job,
+  McpImportSource,
   PluginUpdate,
   RegistryPlugin,
 } from '../lib/types'
@@ -35,6 +42,35 @@ function repoPackageName(entry: RegistryPlugin) {
     .replace(/\.git$/i, '')
     .toLowerCase()
   return repoPath?.replace(/[/-]/g, '__')
+}
+
+/** Verified badge predicate (roadmap D1): kind=mcp AND from the hand-picked
+ *  `Curated` allowlist the catalog is built from — never a fabricated signal. */
+function isVerifiedMcp(p: RegistryPlugin): boolean {
+  return (p.kind ?? 'plugin') === 'mcp' && p.category.includes('Curated')
+}
+
+/** `owner/repo` when `url` points at a GitHub repository the backend can
+ *  shallow-clone and build (Phase-4 git-local install). Mirrors the Rust
+ *  `mcp_local::github_source` parse: a repo root `owner/repo` is enough — the
+ *  `/tree/<ref>/<subdir>` monorepo form is also accepted (subdir resolved after
+ *  clone). Returns null for anything that is not a github source repo. */
+function githubRepoOf(url: string | null | undefined): string | null {
+  if (!url) return null
+  const rest = url
+    .replace(/^https?:\/\/(www\.)?github\.com\//i, '')
+    .replace(/\/$/i, '')
+    .split('#')[0]
+  const segs = rest.split('/')
+  if (segs.length < 2 || !segs[0]) return null
+  const repo = (segs[1] ?? '').replace(/\.git$/i, '')
+  if (!repo || repo === 'tree' || repo === 'blob' || repo === 'releases') return null
+  return `${segs[0]}/${repo}`
+}
+
+/** A parsed import row can be installed only if it carries a command or url. */
+function importableMcp(m: ImportedMcp): boolean {
+  return m.record.command.trim().length > 0 || m.record.url.trim().length > 0
 }
 
 type SortKey = 'stars' | 'new' | 'name'
@@ -195,6 +231,7 @@ export function Market() {
   const [shuffleKey, setShuffleKey] = useState(0)
   const [noteIndex, setNoteIndex] = useState(() => Math.floor(Math.random() * 5))
   const [preview, setPreview] = useState<{ urls: string[]; index: number } | null>(null)
+  const [importOpen, setImportOpen] = useState(false)
   const [activeKind, setActiveKind] = useState<ContentKind>('plugin')
 
   useEffect(() => {
@@ -433,6 +470,15 @@ export function Market() {
             >
               <Shuffle className="h-4 w-4" strokeWidth={1.75} />
             </button>
+            {activeKind === 'mcp' && (
+              <button
+                onClick={() => setImportOpen(true)}
+                className="flex h-10 shrink-0 items-center gap-1.5 rounded-lg border border-blue-500/40 bg-blue-500/15 px-3 text-xs font-medium text-blue-200 hover:border-blue-400 hover:bg-blue-500/25"
+              >
+                <Import className="h-4 w-4" strokeWidth={1.75} />
+                {t('market.importMcp')}
+              </button>
+            )}
           </div>
 
           <div className="mt-4 flex shrink-0 items-center justify-between text-xs text-zinc-500">
@@ -592,6 +638,410 @@ export function Market() {
           </button>
         </div>
       )}
+
+      {importOpen && (
+        <McpImportModal activeId={activeId} onClose={() => setImportOpen(false)} />
+      )}
+    </div>
+  )
+}
+
+/** Source label for the source header of a detect result. */
+function importSourceLabel(t: ReturnType<typeof useT>, kind: string): string {
+  return t(`mcp.import.source.${kind}`) ?? kind
+}
+
+/**
+ * MCP Import modal (roadmap Phase 3): list what `mcp_import_detect` found in the
+ * known Claude/Cursor/VS Code configs with per-server warnings, or paste a raw
+ * config JSON. Submits through `ipc.mcpImport`, which enqueues a `McpImport`
+ * job (one `cordis.patch.yml` recompile for the batch).
+ */
+function McpImportModal({ activeId, onClose }: { activeId: string | null; onClose: () => void }) {
+  const t = useT()
+  const [tab, setTab] = useState<'sources' | 'paste'>('sources')
+  const [sources, setSources] = useState<McpImportSource[] | null>(null)
+  const [scanErr, setScanErr] = useState<string | null>(null)
+  const [sel, setSel] = useState<Record<string, Record<string, boolean>>>({})
+  const [pasteText, setPasteText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [doneMsg, setDoneMsg] = useState<string | null>(null)
+  const [failMsg, setFailMsg] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    ipc
+      .mcpImportDetect()
+      .then((list) => {
+        if (!alive) return
+        setSources(list)
+        // Default: every importable row checked; placeholders (no launch/url)
+        // stay off and are greyed out — the backend would drop them anyway.
+        const next: Record<string, Record<string, boolean>> = {}
+        for (const s of list) {
+          if (!s.found) continue
+          const row: Record<string, boolean> = {}
+          for (const m of s.servers) row[m.serverName] = importableMcp(m)
+          if (Object.keys(row).length > 0) next[s.kind] = row
+        }
+        setSel(next)
+      })
+      .catch((e) => {
+        if (alive) setScanErr(String(e))
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  const toggle = (kind: string, server: string, on: boolean) => {
+    setSel((prev) => {
+      const cur = { ...(prev[kind] ?? {}) }
+      if (on) cur[server] = true
+      else delete cur[server]
+      return { ...prev, [kind]: cur }
+    })
+  }
+  const setAll = (kind: string, servers: ImportedMcp[], on: boolean) => {
+    setSel((prev) => {
+      const cur = { ...(prev[kind] ?? {}) }
+      for (const m of servers) {
+        if (!importableMcp(m)) continue
+        if (on) cur[m.serverName] = true
+        else delete cur[m.serverName]
+      }
+      return { ...prev, [kind]: cur }
+    })
+  }
+  const selectedCount = useMemo(() => {
+    let n = 0
+    for (const kind of Object.keys(sel)) {
+      for (const name of Object.keys(sel[kind])) if (sel[kind][name]) n += 1
+    }
+    return n
+  }, [sel])
+
+  const clearStatus = () => {
+    setDoneMsg(null)
+    setFailMsg(null)
+  }
+
+  const importSelected = async () => {
+    if (!activeId || selectedCount === 0) return
+    setBusy(true)
+    clearStatus()
+    let ok = 0
+    try {
+      // Backend routes one config per job; loop the sources that have a checked
+      // row so the user keeps per-source control in the modal.
+      for (const s of sources ?? []) {
+        const names = Object.keys(sel[s.kind] ?? {}).filter((n) => sel[s.kind][n])
+        if (names.length === 0) continue
+        await ipc.mcpImport(activeId, { source: s.kind, serverNames: names })
+        ok += 1
+      }
+      if (ok > 0) setDoneMsg(t('mcp.import.enqueued'))
+    } catch (e) {
+      setFailMsg(t('mcp.import.failed', { error: String(e) }))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const importPaste = async () => {
+    const text = pasteText.trim()
+    if (!activeId || !text) return
+    // Cheap client-side shape gate before handing a job to the backend: the
+    // parser accepts a top-level mcpServers or a nested mcp.servers object.
+    let obj: unknown
+    try {
+      obj = JSON.parse(text)
+    } catch (e) {
+      setFailMsg(t('mcp.import.invalidJson', { error: (e as Error).message }))
+      return
+    }
+    const rec = obj as Record<string, unknown>
+    const nestedMcp =
+      typeof rec.mcp === 'object' && rec.mcp !== null
+        ? (rec.mcp as Record<string, unknown>).servers
+        : null
+    const hasShape =
+      (typeof rec.mcpServers === 'object' && rec.mcpServers !== null) ||
+      (typeof nestedMcp === 'object' && nestedMcp !== null)
+    if (!hasShape) {
+      setFailMsg(t('mcp.import.noShape'))
+      return
+    }
+    setBusy(true)
+    clearStatus()
+    try {
+      await ipc.mcpImport(activeId, { source: 'raw', raw: text })
+      setDoneMsg(t('mcp.import.enqueued'))
+    } catch (e) {
+      setFailMsg(t('mcp.import.failed', { error: String(e) }))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-6"
+      onClick={onClose}
+    >
+      <div
+        className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-4 border-b border-zinc-800 px-5 py-4">
+          <div>
+            <h2 className="text-lg font-semibold text-zinc-50">{t('mcp.import.title')}</h2>
+            <p className="mt-1 max-w-xl text-xs leading-5 text-zinc-500">{t('mcp.import.subtitle')}</p>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+          >
+            <X className="h-4 w-4" strokeWidth={1.75} />
+          </button>
+        </div>
+
+        <div className="flex shrink-0 gap-1 border-b border-zinc-800 px-5 pt-3">
+          {(
+            [
+              ['sources', 'mcp.import.tabSources'],
+              ['paste', 'mcp.import.tabPaste'],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              onClick={() => {
+                setTab(value)
+                clearStatus()
+              }}
+              className={`rounded-t-lg border-b-2 px-3 pb-2 pt-1 text-sm font-medium ${
+                tab === value
+                  ? 'border-blue-500 text-blue-300'
+                  : 'border-transparent text-zinc-500 hover:text-zinc-300'
+              }`}
+            >
+              {t(label)}
+            </button>
+          ))}
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          {tab === 'sources' && (
+            <div className="space-y-4">
+              {scanErr && (
+                <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+                  {scanErr}
+                </p>
+              )}
+              {sources === null && !scanErr && (
+                <p className="flex items-center gap-2 text-sm text-zinc-500">
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin" strokeWidth={1.75} />
+                  {t('mcp.import.scanning')}
+                </p>
+              )}
+              {sources !== null && sources.every((s) => !s.found) && (
+                <p className="text-sm text-zinc-500">{t('mcp.import.noneDetected')}</p>
+              )}
+              {sources?.map((s) => {
+                const kindSel = sel[s.kind] ?? {}
+                const importable = s.servers.filter(importableMcp)
+                const checked = importable.filter((m) => kindSel[m.serverName]).length
+                return (
+                  <div key={s.kind} className="rounded-lg border border-zinc-800 bg-zinc-950/40 p-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-zinc-200">
+                        {importSourceLabel(t, s.kind)}
+                      </span>
+                      {s.found ? (
+                        <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] text-emerald-300">
+                          {s.servers.length} server{s.servers.length === 1 ? '' : 's'}
+                        </span>
+                      ) : (
+                        <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-500">
+                          {t('mcp.import.notFound')}
+                        </span>
+                      )}
+                      <span
+                        className="min-w-0 flex-1 truncate font-mono text-[10px] text-zinc-600"
+                        title={s.path}
+                      >
+                        {s.path}
+                      </span>
+                    </div>
+
+                    {s.found && s.error && (
+                      <p className="mt-2 rounded-md border border-amber-500/25 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-300">
+                        {t('mcp.import.sourceError')} {s.error}
+                      </p>
+                    )}
+
+                    {s.found && !s.error && s.servers.length === 0 && (
+                      <p className="mt-2 text-xs text-zinc-500">{t('mcp.import.emptySource')}</p>
+                    )}
+
+                    {s.found && !s.error && s.servers.length > 0 && (
+                      <div className="mt-2">
+                        <div className="flex items-center justify-between text-[11px] text-zinc-500">
+                          <button
+                            onClick={() => {
+                              const all = checked === importable.length
+                              setAll(s.kind, s.servers, !all)
+                            }}
+                            disabled={importable.length === 0}
+                            className="font-medium text-blue-400 hover:text-blue-300 disabled:opacity-40"
+                          >
+                            {checked === importable.length
+                              ? t('mcp.import.clear')
+                              : t('mcp.import.selectAll')}
+                          </button>
+                          <span>
+                            {checked} / {importable.length}
+                          </span>
+                        </div>
+                        <div className="mt-1.5 space-y-1">
+                          {s.servers.map((m) => {
+                            const imp = importableMcp(m)
+                            const on = !!kindSel[m.serverName]
+                            const warn = m.warning
+                            return (
+                              <label
+                                key={m.serverName}
+                                className={`flex cursor-pointer items-start gap-2.5 rounded-md border px-2.5 py-2 ${
+                                  imp
+                                    ? on
+                                      ? 'border-blue-500/40 bg-blue-500/10'
+                                      : 'border-zinc-800 bg-zinc-950/30 hover:border-zinc-700'
+                                    : 'cursor-not-allowed border-zinc-800/60 bg-zinc-950/20 opacity-60'
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={imp && on}
+                                  disabled={!imp || busy}
+                                  onChange={(e) => toggle(s.kind, m.serverName, e.target.checked)}
+                                  className="mt-0.5 accent-blue-500"
+                                />
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="truncate font-mono text-xs text-zinc-200">
+                                      {m.serverName}
+                                    </span>
+                                    <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
+                                      {m.record.transport}
+                                    </span>
+                                  </div>
+                                  <div className="mt-0.5 truncate font-mono text-[10px] text-zinc-500">
+                                    {m.record.transport === 'streamable-http'
+                                      ? m.record.url
+                                      : [m.record.command, ...m.record.args].join(' ')}
+                                  </div>
+                                  {warn && (
+                                    <div
+                                      className={`mt-1 flex items-start gap-1.5 text-[11px] ${
+                                        imp ? 'text-amber-300/90' : 'text-red-300/90'
+                                      }`}
+                                    >
+                                      <Info className="mt-0.5 h-3 w-3 shrink-0" strokeWidth={2} />
+                                      <span>{t(warn)}</span>
+                                    </div>
+                                  )}
+                                  {!imp && (
+                                    <div className="mt-1 text-[11px] text-zinc-600">
+                                      {t('mcp.import.notImportable')}
+                                    </div>
+                                  )}
+                                </div>
+                              </label>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
+          {tab === 'paste' && (
+            <div className="space-y-3">
+              <p className="text-xs leading-5 text-zinc-500">{t('mcp.import.pasteHint')}</p>
+              <textarea
+                value={pasteText}
+                onChange={(e) => {
+                  setPasteText(e.target.value)
+                  clearStatus()
+                }}
+                spellCheck={false}
+                placeholder={t('mcp.import.pastePlaceholder')}
+                className="h-56 w-full resize-none rounded-lg border border-zinc-800 bg-zinc-950/60 p-3 font-mono text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-blue-500"
+              />
+            </div>
+          )}
+
+          {doneMsg && (
+            <p className="mt-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">
+              {doneMsg}
+            </p>
+          )}
+          {failMsg && (
+            <p className="mt-3 break-words rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+              {failMsg}
+            </p>
+          )}
+        </div>
+
+        <div className="flex shrink-0 items-center justify-end gap-2 border-t border-zinc-800 px-5 py-3">
+          <button
+            onClick={onClose}
+            className="rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:border-zinc-600 hover:text-zinc-200"
+          >
+            {t('mcp.import.close')}
+          </button>
+          {tab === 'sources' ? (
+            <button
+              onClick={() => void importSelected()}
+              disabled={!activeId || selectedCount === 0 || busy || sources === null}
+              className="flex items-center gap-1.5 rounded-lg bg-blue-500 px-4 py-1.5 text-xs font-semibold text-white hover:bg-blue-400 disabled:opacity-40"
+            >
+              {busy ? (
+                <>
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
+                  {t('mcp.import.importing')}
+                </>
+              ) : (
+                <>
+                  <Import className="h-3.5 w-3.5" strokeWidth={2} />
+                  {t('mcp.import.importSelected', { n: selectedCount })}
+                </>
+              )}
+            </button>
+          ) : (
+            <button
+              onClick={() => void importPaste()}
+              disabled={!activeId || !pasteText.trim() || busy}
+              className="flex items-center gap-1.5 rounded-lg bg-blue-500 px-4 py-1.5 text-xs font-semibold text-white hover:bg-blue-400 disabled:opacity-40"
+            >
+              {busy ? (
+                <>
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
+                  {t('mcp.import.importing')}
+                </>
+              ) : (
+                <>
+                  <Import className="h-3.5 w-3.5" strokeWidth={2} />
+                  {t('market.installAll')}
+                </>
+              )}
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   )
 }
@@ -789,7 +1239,16 @@ function McpCard({
   const transport = p.transport ?? 'stdio'
   const launch =
     transport === 'streamable-http' ? p.mcpUrl || '' : p.command || ''
-  const installable = !!(p.command || p.mcpUrl)
+  // Installable when the backend has a real path for this server (mirrors
+  // `mcp_install_job` classification in content.rs): a registry launch command
+  // (npm/uv download), a remote streamable-http endpoint (mcpUrl), OR a github
+  // source repo the Phase-4 branch shallow-clones and builds (go/rust/python /
+  // unpublished node — no command until it is built from source).
+  const gitRepo = githubRepoOf(p.url)
+  const installable = !!(p.command || p.mcpUrl || gitRepo)
+  // A source-built server has no precomputed launch — show its origin repo instead.
+  const launchLabel = gitRepo && !p.command && !p.mcpUrl ? gitRepo : launch
+  const verified = isVerifiedMcp(p)
   return (
     <div className="flex flex-col rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
       <div className="mb-1 flex items-start justify-between gap-2">
@@ -797,13 +1256,24 @@ function McpCard({
           <div className="truncate font-semibold text-zinc-100">{p.name}</div>
           <div className="truncate font-mono text-[11px] text-zinc-500">{pluginKey(p)}</div>
         </div>
-        <span className="shrink-0 rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-400">
-          MCP
+        <span className="flex shrink-0 items-center gap-1.5">
+          {verified && (
+            <span
+              title={t('market.verifiedHint')}
+              className="flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300"
+            >
+              <BadgeCheck className="h-3 w-3" strokeWidth={2} />
+              {t('market.verified')}
+            </span>
+          )}
+          <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-400">
+            MCP
+          </span>
         </span>
       </div>
       <div className="mb-1 truncate font-mono text-[11px] text-zinc-500">
-        {installable ? transport : 'manual'}
-        {installable && launch ? ` · ${launch}` : ''}
+        {installable ? (gitRepo && !p.command && !p.mcpUrl ? 'source' : transport) : 'manual'}
+        {installable && launchLabel ? ` · ${launchLabel}` : ''}
       </div>
       <p className="mb-3 line-clamp-2 text-xs text-zinc-400">{desc}</p>
       <div className="mt-auto flex items-center gap-2">

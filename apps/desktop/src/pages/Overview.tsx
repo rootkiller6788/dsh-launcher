@@ -240,7 +240,6 @@ function UsageSnapshot({ summary, locale }: { summary: UsageSummary | null; loca
   const todayTokens = summary?.byDay.find((b) => b.timestamp === todayStart)?.totalTokens ?? 0
   const requests = summary?.requests ?? 0
   const cost = summary?.totalCost ?? 0
-  const unknownCost = summary?.unknownCostRecords ?? 0
   const topModel = summary?.byModel[0]?.model ?? '-'
   const max = Math.max(...days.map((d) => d.tokens), 1)
   return (
@@ -261,7 +260,7 @@ function UsageSnapshot({ summary, locale }: { summary: UsageSummary | null; loca
             <SignalRow label={t('overview.requests')} value={requests} accent={requests > 0} />
             <SignalRow
               label={t('overview.estimatedCost')}
-              value={`$${cost.toFixed(3)}${unknownCost > 0 ? ` · ${t('overview.unpricedHint', { n: unknownCost })}` : ''}`}
+              value={`$${cost.toFixed(3)}`}
               accent={cost > 0}
             />
             <SignalRow label={t('overview.topModel')} value={topModel} accent={todayTokens > 0} />

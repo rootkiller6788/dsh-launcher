@@ -330,9 +330,19 @@ pub async fn spawn_child_with_exit(
     };
 
     #[cfg(windows)]
-    if job.is_some() {
-        use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    {
+        use windows_sys::Win32::System::Threading::{
+            CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
+        };
+        // This GUI process has no console, so a console-subsystem child (node
+        // running DSH, taskkill fallback, …) would otherwise get its own brand
+        // new terminal window on every launch. Suppress it — DSH renders in the
+        // launcher's own window and its stdout/stderr are piped to the log.
+        let mut flags = CREATE_NO_WINDOW;
+        if job.is_some() {
+            flags |= CREATE_NEW_PROCESS_GROUP;
+        }
+        cmd.creation_flags(flags);
     }
 
     // Own process group so kill_tree can killpg(-pgid) the whole tree on Unix

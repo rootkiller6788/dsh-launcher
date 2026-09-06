@@ -237,7 +237,7 @@ export default function App() {
             <button
               key={mode}
               onClick={() => setShellMode(mode)}
-              className={`relative z-10 h-7 min-w-24 rounded-md px-4 text-sm font-medium transition-colors duration-200 ${
+              className={`relative z-10 flex h-7 items-center justify-center rounded-md text-sm font-medium transition-colors duration-200 ${
                 shellMode === mode
                   ? 'text-blue-100'
                   : 'text-zinc-500 hover:text-zinc-200'

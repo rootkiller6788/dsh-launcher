@@ -44,6 +44,61 @@ export interface McpServerRecord {
 }
 
 /**
+ * One MCP's persisted runtime snapshot (roadmap Phase 2). The launcher
+ * *self-proves* a server boots and answers an `initialize` handshake; this is
+ * that verdict — it describes a probe the launcher ran, never DSH's live process
+ * (which the launcher cannot observe). Mirrors the Rust `McpRuntimeState`.
+ */
+export type McpHealthState = 'untested' | 'ok' | 'degraded' | 'error'
+
+export interface McpRuntimeState {
+  state: McpHealthState
+  /** Transport the last probe exercised (`stdio` | `streamable-http`). */
+  transport: string
+  /** Epoch ms of the last check (any outcome); absent until first probe. */
+  checkedAt?: number | null
+  /** Epoch ms of the last `ok` check. */
+  okAt?: number | null
+  /** Consecutive non-ok outcomes since the last ok. */
+  failCount: number
+  /** Exit code when the probe's child exited non-zero. */
+  exitCode?: number | null
+  /** Human-readable verdict detail (spawn error, timeout, auth, …). */
+  error?: string | null
+  /** Tool names surfaced by a best-effort tools/list after initialize. */
+  tools: string[]
+}
+
+/** One installed server's snapshot for the Library badge (Rust `McpRuntimeEntry`). */
+export interface McpRuntimeEntry {
+  id: string
+  serverName: string
+  state: McpRuntimeState
+}
+
+/**
+ * One MCP server parsed out of an external tool's config by the import path
+ * (roadmap Phase 3). Mirrors Rust `dsh_adapter::mcp_import::ImportedMcp`.
+ * `warning` is a localized-key code (e.g. `mcp.import.warnNeedsToken`) shown in
+ * the Import modal; `null` means the row is clean to import.
+ */
+export interface ImportedMcp {
+  serverName: string
+  record: McpServerRecord
+  warning?: string | null
+}
+
+/** One scannable import source (Rust `McpImportSource`). */
+export interface McpImportSource {
+  /** `claude` | `cursor` | `vscode`. */
+  kind: string
+  path: string
+  found: boolean
+  servers: ImportedMcp[]
+  error?: string | null
+}
+
+/**
  * One installed skill — the manifest carries full provenance so an update can
  * be judged and re-fetched without re-deriving anything. `id` is the catalog
  * key (`owner/name`). A record with empty `source`/`hash` and `installed === 0`
@@ -100,6 +155,21 @@ export interface MarketInstallMetadata {
   installedAt: number
 }
 
+/** A catalog-declared env var an MCP server needs configured to operate.
+ * Carries key/label/secret only — the value is never stored here. */
+export interface McpEnvRequirement {
+  key: string
+  label?: string | null
+  secret: boolean
+}
+
+/** One configured key on a server (Rust `McpConfigVar`). Values never cross the
+ * IPC boundary back to the UI — the app can only see that a key is set. */
+export interface McpConfigVar {
+  key: string
+  secret: boolean
+}
+
 export interface LibraryInventoryItem {
   id: string
   kind: ContentKind
@@ -114,6 +184,8 @@ export interface LibraryInventoryItem {
   detail?: string | null
   market?: MarketInstallMetadata | null
   issues?: string[]
+  /** Catalog-declared required env vars still unset on this MCP row. */
+  missingConfig?: McpEnvRequirement[]
 }
 
 export interface LibraryInventoryDetail {

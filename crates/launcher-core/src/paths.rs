@@ -97,6 +97,25 @@ impl AppPaths {
         self.instance_dir(id).join("instance.json")
     }
 
+    /// Per-MCP runtime dir under an instance (`instances/<id>/mcp/<server>/`),
+    /// the Phase-2 home for a server's `runtime.json` and `logs/`. `server` is
+    /// sanitized into a filesystem-safe segment (`owner/name` → `owner-name`).
+    pub fn mcp_dir(&self, id: &str, server: &str) -> PathBuf {
+        self.instance_dir(id)
+            .join("mcp")
+            .join(sanitize_mcp_segment(server))
+    }
+
+    /// A server's persisted health snapshot (`instances/<id>/mcp/<server>/runtime.json`).
+    pub fn mcp_runtime_file(&self, id: &str, server: &str) -> PathBuf {
+        self.mcp_dir(id, server).join("runtime.json")
+    }
+
+    /// A server's most recent health-check transcript (`…/mcp/<server>/logs/last.log`).
+    pub fn mcp_log_file(&self, id: &str, server: &str) -> PathBuf {
+        self.mcp_dir(id, server).join("logs").join("last.log")
+    }
+
     /// The SQLite file for launch history / index (`root/launcher.db`).
     pub fn db_file(&self) -> PathBuf {
         self.root.join("launcher.db")
@@ -148,6 +167,37 @@ fn is_truthy(v: &str) -> bool {
         v.trim().to_ascii_lowercase().as_str(),
         "" | "0" | "false" | "no" | "off"
     )
+}
+
+/// Filesystem-safe folder segment for an MCP server identity. Catalog keys
+/// carry a `/` (`owner/name`) which would nest directories; keep `[A-Za-z0-9._-]`,
+/// collapse everything else to single `-`, trim, cap at 48 chars, `server` fallback.
+pub fn sanitize_mcp_segment(server: &str) -> String {
+    let mut out = String::with_capacity(server.len());
+    let mut prev_sep = false;
+    for c in server.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+            out.push(c);
+            prev_sep = false;
+        } else if !prev_sep && !out.is_empty() {
+            out.push('-');
+            prev_sep = true;
+        }
+    }
+    let out = out.trim_matches('-').to_string();
+    if out.len() > 48 {
+        let capped = out[..48].trim_end_matches('-').to_string();
+        if capped.is_empty() {
+            return "server".into();
+        }
+        return capped;
+    }
+    if out.is_empty() || out == "." || out == ".." {
+        // `.`/`..` are reserved directory names (parent traversal) on Windows.
+        "server".into()
+    } else {
+        out
+    }
 }
 
 #[cfg(test)]
@@ -238,5 +288,43 @@ mod tests {
         for value in ["1", "yes", "on", "true", "TRUE", "Yes"] {
             assert!(is_truthy(value), "{value:?} should be truthy");
         }
+    }
+
+    #[test]
+    fn mcp_runtime_paths_are_safe_and_scoped() {
+        let paths = AppPaths {
+            root: tmp_dir("mcp-dirs"),
+            portable: false,
+            settings: "s".into(),
+            providers: "p".into(),
+            runtimes: "r".into(),
+            instances: "i".into(),
+            cache: "c".into(),
+            logs: "l".into(),
+            launcher_log: "ll".into(),
+        };
+        let dir = paths.mcp_dir("default", "owner/server-git");
+        let want = paths.instances.join("default").join("mcp").join("owner-server-git");
+        assert_eq!(dir, want, "slash in identity must flatten to one segment");
+        assert_eq!(
+            paths.mcp_runtime_file("default", "owner/server-git"),
+            dir.join("runtime.json")
+        );
+        assert_eq!(
+            paths.mcp_log_file("default", "owner/server-git"),
+            dir.join("logs").join("last.log")
+        );
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn sanitize_mcp_segment_handles_hostile_input() {
+        assert_eq!(sanitize_mcp_segment("owner/name"), "owner-name");
+        assert_eq!(sanitize_mcp_segment("a::b"), "a-b");
+        assert_eq!(sanitize_mcp_segment("@scope/pkg"), "scope-pkg", "leading separators dropped");
+        assert_eq!(sanitize_mcp_segment(".."), "server", "only separators → fallback");
+        assert_eq!(sanitize_mcp_segment("a"), "a");
+        let long = "n".repeat(80);
+        assert_eq!(sanitize_mcp_segment(&long).len(), 48);
     }
 }

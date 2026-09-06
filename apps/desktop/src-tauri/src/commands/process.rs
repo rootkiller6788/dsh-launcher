@@ -5,7 +5,10 @@ use launcher_core::instance::InstanceManifest;
 use launcher_core::process::{
     sweep_leftover, wait_for_port, PidLedger, ProcessState, ProcessStatus,
 };
-use launcher_core::{ExitSink, LogLevel, LogLine, LogSink, LogStream, NewUsageRecord, RuntimeAdapter};
+use launcher_core::{
+    ExitSink, LogLevel, LogLine, LogSink, LogStream, McpConfigStore, NewUsageRecord,
+    RuntimeAdapter,
+};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::oneshot;
@@ -87,6 +90,18 @@ async fn do_launch(
     let instance = InstanceManifest::get(&state.paths, &id)?;
     let provider = state.vault.resolve(&instance.provider_ref)?;
     let mut env = state.adapter.build_env(&provider, &instance)?;
+    // Fold each installed MCP server's configured env (key names on disk,
+    // values in the OS credential store) into DSH's own environment, so the MCP
+    // server children DSH spawns inherit them. The patch `config.env` stays
+    // clean — configured secrets never land on disk in the patch.
+    {
+        let store = McpConfigStore::new(state.paths.clone());
+        for record in instance.mcp.iter().filter(|r| r.enabled) {
+            for (key, value) in store.resolve_env(&id, &record.id) {
+                env.entry(key).or_insert(value); // DSH's own env wins on clashes
+            }
+        }
+    }
     let fallback_model = provider
         .profile
         .model

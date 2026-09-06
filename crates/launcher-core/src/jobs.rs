@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bundle::BundleManifest;
 use crate::environment::EnvironmentManifest;
+use crate::instance::McpServerRecord;
 use crate::market::{ContentKind, RegistryPlugin};
 use crate::now_secs;
 
@@ -106,6 +107,22 @@ pub enum JobPlan {
     Environment {
         manifest: EnvironmentManifest,
     },
+    /// Bring an installed skill up to its source's current content.
+    SkillUpdate {
+        entry: RegistryPlugin,
+    },
+    /// Bring an installed plugin/theme up to its npm `latest`.
+    PluginUpdate {
+        name: String,
+    },
+    /// Import MCP servers parsed from an external tool's config (Claude/Cursor/
+    /// VSCode, roadmap Phase 3) into the instance manifest. `source` is a label
+    /// for the job row; the records were already normalized by the import parser
+    /// (`id = import:<serverName>`), so retry is deterministic.
+    McpImport {
+        source: String,
+        servers: Vec<McpServerRecord>,
+    },
 }
 
 impl JobPlan {
@@ -114,13 +131,19 @@ impl JobPlan {
         match self {
             Self::Bundle { .. } => JobKind::Bundle,
             Self::Environment { .. } => JobKind::Environment,
-            Self::Skill { entry } => job_kind_from_entry(entry),
+            Self::Skill { entry } | Self::SkillUpdate { entry } => {
+                job_kind_from_entry(entry)
+            }
+            // An MCP import has no single catalog entry to classify, but its
+            // records are MCP servers — the job row badges as MCP.
             Self::Mcp { entry } => job_kind_from_entry(entry),
+            Self::McpImport { .. } => JobKind::Mcp,
             Self::Market { entry } => job_kind_from_entry(entry),
             Self::Plugin { entry, .. } => entry
                 .as_ref()
                 .map(job_kind_from_entry)
                 .unwrap_or(JobKind::Plugin),
+            Self::PluginUpdate { .. } => JobKind::Plugin,
         }
     }
 }

@@ -202,7 +202,8 @@
     "command": "npx",
     "args": [
       "-y",
-      "@modelcontextprotocol/server-wiki-explorer"
+      "@modelcontextprotocol/server-wiki-explorer",
+      "--stdio"
     ],
     "env": {}
   },
@@ -216,7 +217,8 @@
     "command": "npx",
     "args": [
       "-y",
-      "@modelcontextprotocol/server-system-monitor"
+      "@modelcontextprotocol/server-system-monitor",
+      "--stdio"
     ],
     "env": {}
   },

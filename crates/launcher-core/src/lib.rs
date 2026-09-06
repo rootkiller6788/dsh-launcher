@@ -14,6 +14,8 @@ pub mod environment;
 pub mod history;
 pub mod instance;
 pub mod jobs;
+pub mod llm;
+pub mod mcp_config;
 pub mod market;
 pub mod paths;
 pub mod pricing;
@@ -32,9 +34,16 @@ pub use capabilities::{
 pub use download::{download_file, file_sha256, part_path, sha256_hex, DownloadOutcome};
 pub use environment::{EnvironmentManifest, EnvironmentSource, ExportedItem};
 pub use history::{LaunchHistory, LaunchSession};
-pub use instance::{InstanceManifest, McpServerRecord, RuntimeRef, SkillRecord};
+pub use instance::{
+    load_runtime, save_runtime, InstanceManifest, McpRuntimeState, McpServerRecord, RuntimeRef,
+    SkillRecord, MCP_STATE_DEGRADED, MCP_STATE_ERROR, MCP_STATE_OK, MCP_STATE_UNTESTED,
+};
 pub use jobs::{Job, JobKind, JobPlan, JobStatus, JobStore};
-pub use market::{RecommendPlan, RecommendResult, Registry, RegistryPlugin};
+pub use market::{
+    McpEnvRequirement, McpInstallManifest, McpLaunchSpec, RecommendPlan, RecommendResult, Registry,
+    RegistryPlugin,
+};
+pub use mcp_config::{McpConfigStore, McpConfigVar};
 pub use paths::AppPaths;
 pub use pricing::{cost_for, lookup, Price};
 pub use process::{

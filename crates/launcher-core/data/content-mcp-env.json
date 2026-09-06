@@ -1,0 +1,29 @@
+{
+  "comment": "Per-server required-env declarations, keyed by catalog owner/name (RegistryPlugin::key). Every entry is backed by the server's own docs/README (or, for kanboard, a real degraded run: 'KANBOARD_URL is required but was not set'). Values are NEVER stored here — this file only declares WHAT a server needs; the launcher surfaces the requirement (Library 'needs config' hint) and a future stage wires value entry. secret:true hints the UI to treat the value as a credential (never echo/log). Add rows as servers are verified.",
+  "servers": {
+    "ErnestoCorona/kanboard-mcp": [
+      { "key": "KANBOARD_URL", "label": "Kanboard base URL", "secret": false }
+    ],
+    "mendableai/firecrawl-mcp": [
+      { "key": "FIRECRAWL_API_KEY", "label": "Firecrawl API key", "secret": true }
+    ],
+    "modelcontextprotocol/server-google-maps": [
+      { "key": "GOOGLE_MAPS_API_KEY", "label": "Google Maps API key", "secret": true }
+    ],
+    "e2b-dev/mcp-server": [
+      { "key": "E2B_API_KEY", "label": "E2B API key", "secret": true }
+    ],
+    "neondatabase/mcp-server-neon": [
+      { "key": "NEON_API_KEY", "label": "Neon API key", "secret": true }
+    ],
+    "getsentry/mcp-server": [
+      { "key": "SENTRY_AUTH_TOKEN", "label": "Sentry auth token", "secret": true }
+    ],
+    "bytebase/dbhub": [
+      { "key": "DATABASE_URL", "label": "Database connection URL", "secret": false }
+    ],
+    "browserbase/mcp": [
+      { "key": "BROWSERBASE_API_KEY", "label": "Browserbase API key", "secret": true }
+    ]
+  }
+}

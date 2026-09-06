@@ -1,4 +1,4 @@
-import { Download, Trash2 } from 'lucide-react'
+import { Download } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
 import { useT } from '../lib/i18n'
 import { JobRow } from '../components/InstallCenter'
@@ -6,11 +6,7 @@ import { JobRow } from '../components/InstallCenter'
 export function Installs() {
   const t = useT()
   const jobs = useAppStore((s) => s.jobs)
-  const clearFinishedJobs = useAppStore((s) => s.clearFinishedJobs)
   const active = jobs.filter((j) => j.status === 'waiting' || j.status === 'running')
-  const finished = jobs.filter(
-    (j) => j.status === 'done' || j.status === 'failed' || j.status === 'cancelled',
-  )
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-5 overflow-hidden p-6">
@@ -23,15 +19,6 @@ export function Installs() {
               : t('installs.subtitle')}
           </p>
         </div>
-        {finished.length > 0 && (
-          <button
-            onClick={() => void clearFinishedJobs()}
-            className="flex h-10 items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 text-sm font-medium text-zinc-300 hover:border-red-500/40 hover:text-red-200"
-          >
-            <Trash2 className="h-4 w-4" strokeWidth={1.75} />
-            {t('installCenter.clearFinished')}
-          </button>
-        )}
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-900/60 p-5">

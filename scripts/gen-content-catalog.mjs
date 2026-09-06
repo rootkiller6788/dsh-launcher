@@ -1,18 +1,25 @@
 // Generates the bundled content catalogs that ship inside the launcher binary:
 //   crates/launcher-core/data/content-themes.json  <- awesome-dsh-themes/data/themes.json
 //   crates/launcher-core/data/content-skills.json  <- awesome-agent-skills/README.md
-//   crates/launcher-core/data/content-mcps.json    <- scripts/data/mcp-overrides.json
+//   crates/launcher-core/data/content-mcps.json    <- scripts/data/mcp-overrides.json + mcp-bulk.json,
+//                                                    then resolver-stamped from scripts/data/mcp-resolved.json
 //   crates/launcher-core/data/content-bundles.json <- awesome-agent-bundles/data/bundles.json
 //
 // The awesome-* clones live OUTSIDE this repo (D:/Opencode/dsh-plugin/…); this is
 // a dev-time tool — run it, commit the resulting JSON, and the launcher embeds
 // the JSON via include_str! (offline, no hosted endpoint needed for these kinds).
 //
-//   node scripts/gen-content-catalog.mjs
+//   node scripts/resolver/github-analyzer.mjs   # optional: resolve → mcp-resolved.json
+//   node scripts/gen-content-catalog.mjs        # regenerate all catalogs (mcps get stamped)
+//
+// When mcp-resolved.json is absent the MCP catalog is emitted un-stamped (base
+// form, still installable for its already-real entries) — run the analyzer first
+// to lift coverage of the pseudo/no-command entries.
 
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
+import { mcpCoverage, stampPlugins } from './resolver/stamp.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '..')
@@ -379,15 +386,34 @@ function genMcps() {
   })
   const categories = {}
   for (const c of [...cats].sort()) categories[c] = { en: c, zh: zhLabel(c) }
+
+  // Resolver stamp: overlay mcpInstall from scripts/data/mcp-resolved.json when the
+  // batch has run (see stamp.mjs). Best-effort — missing cache keeps base form.
+  let stampNote = ''
+  try {
+    const resolved =
+      JSON.parse(readFileSync(resolve(__dirname, 'data/mcp-resolved.json'), 'utf8')).entries || {}
+    const { fromResolved, mirrored } = stampPlugins(mcps, resolved)
+    if (fromResolved + mirrored > 0) {
+      stampNote = ` (+${fromResolved} resolved, ${mirrored} mirrored)`
+    }
+  } catch {
+    stampNote = ' (no mcp-resolved.json — un-stamped)'
+  }
+
   const out = {
-    updated: '',
+    updated: stampNote ? new Date().toISOString().slice(0, 10) : '',
     count: mcps.length,
     categories,
     plugins: mcps,
   }
   mkdirSync(dataDir, { recursive: true })
   writeFileSync(resolve(dataDir, 'content-mcps.json'), JSON.stringify(out, null, 2))
-  console.log(`content-mcps.json: ${mcps.length} MCP servers in ${Object.keys(categories).length} categories`)
+  const cov = mcpCoverage(mcps)
+  console.log(
+    `content-mcps.json: ${cov.total} MCP servers in ${Object.keys(categories).length} categories, ` +
+      `${cov.withPlan} with mcpInstall${stampNote}`,
+  )
 }
 
 // Bundles are curated cross-kind combinations. Each entry is a composite that

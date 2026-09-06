@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::market::McpEnvRequirement;
 use crate::AppPaths;
 
 /// Which runtime an instance pins (id + detected version).
@@ -47,6 +48,11 @@ pub struct McpServerRecord {
     /// streamable-http auth headers.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// Catalog-declared env the server needs configured (copied from the
+    /// registry entry at install; see `content-mcp-env.json`). Declares *what*
+    /// is required — never carries a value.
+    #[serde(default)]
+    pub required_env: Vec<McpEnvRequirement>,
     /// `false` = compiled out of the patch (DSH no longer loads it). No MCP
     /// `disabled:` toggle row exists — absent from the patch *is* disabled.
     #[serde(default = "default_true")]
@@ -64,6 +70,7 @@ impl Default for McpServerRecord {
             env: HashMap::new(),
             url: String::new(),
             headers: HashMap::new(),
+            required_env: Vec::new(),
             enabled: true,
         }
     }
@@ -87,6 +94,124 @@ fn default_true() -> bool {
 
 fn default_transport() -> String {
     "stdio".to_string()
+}
+
+// MCP runtime states (persisted in `instances/<id>/mcp/<server>/runtime.json`).
+pub const MCP_STATE_UNTESTED: &str = "untested";
+pub const MCP_STATE_OK: &str = "ok";
+pub const MCP_STATE_DEGRADED: &str = "degraded";
+pub const MCP_STATE_ERROR: &str = "error";
+
+fn default_untested() -> String {
+    MCP_STATE_UNTESTED.to_string()
+}
+
+/// Per-server runtime snapshot produced by a health check (roadmap Phase 2, A
+/// path): the launcher *self-proves* an MCP boots and answers an `initialize`
+/// handshake, then persists this next to the manifest. It describes a probe the
+/// launcher ran — not DSH's live process, which the launcher cannot observe.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpRuntimeState {
+    /// `untested` | `ok` | `degraded` | `error` (see the `MCP_STATE_*` consts).
+    #[serde(default = "default_untested")]
+    pub state: String,
+    /// Transport snapshot probed (`stdio` | `streamable-http`).
+    #[serde(default)]
+    pub transport: String,
+    /// Epoch ms of the last check (any outcome); absent until first probe.
+    #[serde(default)]
+    pub checked_at: Option<u64>,
+    /// Epoch ms of the last `ok` (or HTTP-ok) check.
+    #[serde(default)]
+    pub ok_at: Option<u64>,
+    /// Consecutive non-`ok` outcomes since the last `ok`.
+    #[serde(default)]
+    pub fail_count: u64,
+    /// Exit code when the probe's child exited non-zero.
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    /// Human-readable failure/verdict detail (e.g. spawn error, timeout, auth).
+    #[serde(default)]
+    pub error: Option<String>,
+    /// Tool names surfaced by a best-effort `tools/list` after `initialize`.
+    #[serde(default)]
+    pub tools: Vec<String>,
+}
+
+impl Default for McpRuntimeState {
+    fn default() -> Self {
+        Self {
+            state: MCP_STATE_UNTESTED.into(),
+            transport: String::new(),
+            checked_at: None,
+            ok_at: None,
+            fail_count: 0,
+            exit_code: None,
+            error: None,
+            tools: Vec::new(),
+        }
+    }
+}
+
+impl McpRuntimeState {
+    /// A fresh `untested` snapshot for a server about to be probed.
+    pub fn fresh(transport: &str) -> Self {
+        Self {
+            transport: transport.to_string(),
+            ..Self::default()
+        }
+    }
+
+    pub fn is_ok(&self) -> bool {
+        self.state == MCP_STATE_OK
+    }
+
+    /// Merge one probe verdict (`incoming`, state already chosen by the probe
+    /// layer) into the running snapshot: refresh `checked_at`, carry
+    /// `transport/exit_code/error/tools`, bump `fail_count` on non-ok and clear
+    /// it (plus set `ok_at`) on a return to ok. Deterministic — no text guessing.
+    pub fn record(&mut self, incoming: &McpRuntimeState) {
+        let now = now_ms();
+        self.checked_at = Some(now);
+        self.transport = incoming.transport.clone();
+        self.state = incoming.state.clone();
+        self.exit_code = incoming.exit_code;
+        self.error = incoming.error.clone();
+        self.tools.clone_from(&incoming.tools);
+        if incoming.is_ok() {
+            self.ok_at = Some(now);
+            self.fail_count = 0;
+        } else {
+            self.fail_count += 1;
+        }
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Load a server's persisted runtime snapshot; a missing/corrupt file yields a
+/// fresh `untested` state rather than an error (bad health data must never block).
+pub fn load_runtime(path: &Path) -> McpRuntimeState {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Persist a server's runtime snapshot (`mcp/<server>/runtime.json`).
+pub fn save_runtime(path: &Path, state: &McpRuntimeState) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let text = serde_json::to_string_pretty(state)?;
+    std::fs::write(path, text).with_context(|| format!("write mcp runtime {}", path.display()))?;
+    Ok(())
 }
 
 /// Element wrapper for the `mcp` array: legacy manifests store bare
@@ -793,6 +918,54 @@ mod tests {
         write_manifest(&paths, "default", "[]"); // no skills key at all
         let m = InstanceManifest::get(&paths, "default").unwrap();
         assert!(m.skills.is_empty(), "absent skills field must deserialize to []");
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn runtime_defaults_to_untested_and_missing_file_loads_default() {
+        let paths = tmp_paths("rt-untested");
+        let f = paths.mcp_runtime_file("default", "owner/git");
+        assert_eq!(McpRuntimeState::default().state, MCP_STATE_UNTESTED);
+        let loaded = load_runtime(&f);
+        assert_eq!(loaded.state, MCP_STATE_UNTESTED, "missing runtime.json → untested, not error");
+        assert!(loaded.transport.is_empty());
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn runtime_record_bookkeeping_and_round_trip() {
+        let paths = tmp_paths("rt-record");
+        let f = paths.mcp_runtime_file("default", "owner/git");
+        let mut snap = McpRuntimeState::fresh("stdio");
+
+        // Fail once → error, fail_count 1, checked set, ok_at none.
+        let mut bad = McpRuntimeState::fresh("stdio");
+        bad.state = MCP_STATE_ERROR.into();
+        bad.error = Some("spawn: npx not found".into());
+        bad.exit_code = Some(1);
+        snap.record(&bad);
+        assert_eq!(snap.state, MCP_STATE_ERROR);
+        assert_eq!(snap.fail_count, 1);
+        assert!(snap.checked_at.is_some());
+        assert!(snap.ok_at.is_none());
+        assert_eq!(snap.exit_code, Some(1));
+
+        // Back to ok → fail_count reset + ok_at set, tools carried.
+        let mut good = McpRuntimeState::fresh("stdio");
+        good.state = MCP_STATE_OK.into();
+        good.tools = vec!["search".into(), "issue".into()];
+        snap.record(&good);
+        assert!(snap.is_ok());
+        assert_eq!(snap.fail_count, 0, "ok clears the fail streak");
+        assert!(snap.ok_at.is_some());
+        assert_eq!(snap.tools, vec!["search", "issue"]);
+
+        save_runtime(&f, &snap).unwrap();
+        let loaded = load_runtime(&f);
+        assert_eq!(loaded, snap);
+        assert_eq!(loaded.state, MCP_STATE_OK);
+        assert_eq!(loaded.transport, "stdio");
+        assert_eq!(loaded.tools, snap.tools);
         let _ = std::fs::remove_dir_all(&paths.root);
     }
 }

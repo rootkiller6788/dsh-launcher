@@ -35,6 +35,11 @@ pub mod diagnostics;
 pub mod events;
 pub mod language;
 pub mod llm;
+pub mod mcp_import;
+pub mod mcp_local;
+pub mod mcp_prefetch;
+pub mod mcp_probe;
+pub mod mcp_resolver;
 pub mod runtimes;
 pub mod theme;
 
@@ -1212,9 +1217,18 @@ mod tests {
     /// checkout into the *actual* launcher runtimes dir, mark it active, and
     /// confirm the whole resolve chain lands on `managed` (not the dev tree).
     /// `#[ignore]` because it needs that checkout and copies a lot of disk.
+    // Two real-machine e2e tests touch the SAME managed-runtime dir
+    // (`runtimes/dsh-0.1.0-rc.7`): the import test *replaces* it (delete +
+    // recopy, tens of seconds) while the stop/start test *spawns* from it. cargo
+    // runs the tests in one process, in parallel — so they race and round-1
+    // boots die mid-copy ("did not boot within 60s"). Serialize both behind one
+    // lock; either alone is fast and clean.
+    static REAL_E2E_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     #[ignore = "requires the sibling deepseek-harness-master checkout"]
     fn import_real_master_and_detect_managed() {
+        let _guard = REAL_E2E_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(root) = std::env::var_os("LOCALAPPDATA") else {
             eprintln!("no LOCALAPPDATA — skipping");
             return;
@@ -1362,7 +1376,11 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     #[ignore = "requires the P0 managed runtime; 10 real boot/stop cycles"]
+    #[allow(clippy::await_holding_lock)] // intentional: serialize with the import e2e (REAL_E2E_LOCK)
     async fn real_dsh_stop_start_10_rounds_no_scars() {
+        // Serialize with import_real_master_and_detect_managed (see the lock's
+        // comment): never spawn a runtime while the other test is replacing it.
+        let _guard = REAL_E2E_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         use std::sync::Arc;
         use std::time::Duration;
 

@@ -19,6 +19,10 @@ pub enum HeavyJobKind {
     EnvironmentExport,
     Launch,
     ProfileMutation,
+    /// MCP health probe (roadmap Phase 2): the launcher transiently spawns a
+    /// server + `initialize` handshake. Serialized behind the same gate so a
+    /// probe never races a launch or install on the same instance.
+    McpHealth,
 }
 
 impl HeavyJobKind {
@@ -32,6 +36,7 @@ impl HeavyJobKind {
             Self::EnvironmentExport => "environment-export",
             Self::Launch => "launch",
             Self::ProfileMutation => "profile-mutation",
+            Self::McpHealth => "mcp-health",
         }
     }
 
@@ -365,9 +370,9 @@ async fn execute_job(app: &AppHandle, instance_id: &str, job_id: i64) {
     }
 }
 
-/// Route a persisted retry plan to the matching `*_job` install body. The five
-/// variants cover the install surface Stage 8 tracks (uninstall / toggle /
-/// update / environment-import deliberately stay outside the job store).
+/// Route a persisted retry plan to the matching `*_job` body. The variants cover
+/// the install/update surface Stage 8 tracks (uninstall / toggle /
+/// environment-import deliberately stay outside the job store).
 async fn dispatch_plan(
     state: &AppState,
     app: &AppHandle,
@@ -397,6 +402,17 @@ async fn dispatch_plan(
         JobPlan::Mcp { entry } => {
             crate::commands::content::mcp_install_job(state, app, instance_id, &entry, ctx).await
         }
+        JobPlan::McpImport { source, servers } => {
+            crate::commands::content::mcp_import_job(
+                state,
+                app,
+                instance_id,
+                &source,
+                &servers,
+                ctx,
+            )
+            .await
+        }
         JobPlan::Bundle { manifest } => {
             crate::commands::content::bundle_import_job(state, app, instance_id, &manifest, ctx)
                 .await
@@ -410,6 +426,12 @@ async fn dispatch_plan(
                 ctx,
             )
             .await
+        }
+        JobPlan::SkillUpdate { entry } => {
+            crate::commands::content::skill_update_job(state, app, instance_id, &entry, ctx).await
+        }
+        JobPlan::PluginUpdate { name } => {
+            crate::commands::plugins::plugin_update_job(state, app, instance_id, &name, ctx).await
         }
     }
 }

@@ -12,6 +12,10 @@ import type {
   LibraryInventoryDetail,
   LibraryInventorySummary,
   LaunchSession,
+  McpConfigVar,
+  McpImportSource,
+  McpRuntimeEntry,
+  McpRuntimeState,
   McpServerRecord,
   PluginUpdate,
   SkillRecord,
@@ -114,7 +118,7 @@ export const ipc = {
   pluginToggle: (id: string, name: string, enabled: boolean) =>
     call<void>('plugin_toggle', { id, name, enabled }),
   pluginUpdates: (id: string) => call<PluginUpdate[]>('plugin_updates', { id }),
-  pluginUpdate: (id: string, name: string) => call<void>('plugin_update', { id, name }),
+  pluginUpdate: (id: string, name: string) => call<Job>('plugin_update', { id, name }),
   profileDiagnostics: (id: string) => call<DiagnosticsReport>('profile_diagnostics', { id }),
 
   skillList: (id: string) => call<SkillRecord[]>('skill_list', { id }),
@@ -122,7 +126,7 @@ export const ipc = {
     call<Job>('skill_install', { id, entry }),
   skillUninstall: (id: string, skill: string) => call<void>('skill_uninstall', { id, skill }),
   skillUpdates: (id: string) => call<SkillUpdate[]>('skill_updates', { id }),
-  skillUpdate: (id: string, skill: string) => call<void>('skill_update', { id, skill }),
+  skillUpdate: (id: string, skill: string) => call<Job>('skill_update', { id, skill }),
 
   mcpList: (id: string) => call<McpServerRecord[]>('mcp_list', { id }),
   mcpInstall: (id: string, entry: RegistryPlugin) =>
@@ -130,6 +134,30 @@ export const ipc = {
   mcpUninstall: (id: string, mcp: string) => call<void>('mcp_uninstall', { id, mcp }),
   mcpSetEnabled: (id: string, mcp: string, enabled: boolean) =>
     call<McpServerRecord[]>('mcp_set_enabled', { id, mcp, enabled }),
+  /** Health-check one installed server; returns its folded runtime snapshot. */
+  mcpHealth: (id: string, server: string) =>
+    call<McpRuntimeState>('mcp_health', { id, server }),
+  /** Read-only snapshot of every installed server (Library badges). */
+  mcpRuntime: (id: string) => call<McpRuntimeEntry[]>('mcp_runtime', { id }),
+  /** Configured keys for one server (names + secret flags only — values stay in the OS vault and never return). */
+  mcpConfigGet: (id: string, server: string) =>
+    call<McpConfigVar[]>('mcp_config_get', { id, server }),
+  /** Upsert configured keys; non-blank values go to the OS credential store. */
+  mcpConfigSave: (
+    id: string,
+    server: string,
+    entries: { key: string; secret: boolean; value?: string | null }[],
+  ) => call<McpConfigVar[]>('mcp_config_save', { id, server, entries }),
+  /** Drop one configured key (its name and its stored value). */
+  mcpConfigRemove: (id: string, server: string, key: string) =>
+    call<McpConfigVar[]>('mcp_config_remove', { id, server, key }),
+  /** Scan the known Claude/Cursor/VSCode configs for importable MCP servers. */
+  mcpImportDetect: () => call<McpImportSource[]>('mcp_import_detect'),
+  /** Import servers parsed from an external config (or pasted JSON) as a job. */
+  mcpImport: (
+    id: string,
+    request: { source: string; raw?: string | null; serverNames?: string[] },
+  ) => call<Job>('mcp_import', { id, request }),
 
   bundleImport: (id: string, manifest: BundleManifest) =>
     call<Job>('bundle_import', { id, manifest }),

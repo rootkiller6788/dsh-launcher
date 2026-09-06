@@ -16,6 +16,7 @@ import type {
   Lang,
   LaunchSession,
   LogLine,
+  McpRuntimeState,
   McpServerRecord,
   Page,
   PluginUpdate,
@@ -92,6 +93,10 @@ interface AppStore {
   installedPlugins: InstalledPlugin[]
   installedSkills: SkillRecord[]
   installedMcps: McpServerRecord[]
+  /** Per-server health snapshots keyed by server id (roadmap Phase 2). */
+  mcpRuntime: Record<string, McpRuntimeState>
+  /** Server id currently being health-checked (row-level spinner). */
+  healthing: string | null
   libraryInventory: Record<string, LibraryInventorySummary>
   libraryDetail: LibraryInventoryDetail | null
   /** Backend-persisted install jobs (Stage 8): queue + history, newest first. */
@@ -164,7 +169,15 @@ interface AppStore {
   uninstallMcp: (mcpId: string) => Promise<boolean>
   setMcpEnabled: (mcpId: string, enabled: boolean) => Promise<boolean>
   refreshInstalledMcps: () => Promise<void>
+  refreshMcpRuntime: () => Promise<void>
+  /** Transiently probe one server (backend single-flight gate) + store snapshot. */
+  healthMcp: (server: string) => Promise<boolean>
   importBundle: (manifest: BundleManifest) => Promise<Job | null>
+  importMcp: (request: {
+    source: string
+    raw?: string | null
+    serverNames?: string[]
+  }) => Promise<Job | null>
   exportEnvironment: () => Promise<EnvironmentExportResult | null>
   importEnvironment: (path: string, name?: string | null) => Promise<Job | null>
   importEnvironmentPackage: (bytes: number[], name?: string | null) => Promise<Job | null>
@@ -201,6 +214,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   installedPlugins: [],
   installedSkills: [],
   installedMcps: [],
+  mcpRuntime: {},
+  healthing: null,
   libraryInventory: {},
   libraryDetail: null,
   jobs: [],
@@ -355,9 +370,24 @@ export const useAppStore = create<AppStore>((set, get) => ({
           void state.refreshInstalledPlugins()
           void state.refreshInstalledSkills()
           void state.refreshInstalledMcps()
+          // Post-install verification (probe) already wrote runtime.json during
+          // the job — pull the fresh badges so the Library row is green the
+          // moment the install lands, not `untested` until a page remount.
+          void state.refreshMcpRuntime()
         }
         void state.refreshLibraryInventory()
         void state.refreshLibraryDetail()
+        // Update jobs (label `update …`) optimistically hid their Update button
+        // at enqueue. A terminal job re-probes to converge the button state: a
+        // `failed` job brings the button back (it was never really updated),
+        // and a `done` job makes it disappear once the manifest + disk actually
+        // changed — without this the button can linger until next launch if an
+        // in-flight probe snapshot raced the optimistic hide.
+        const label = event.payload.label
+        if ((status === 'done' || status === 'failed') && label.startsWith('update ')) {
+          void state.refreshUpdates()
+          void state.refreshSkillUpdates()
+        }
       }
     }).catch(() => {})
     const poll = () => {
@@ -973,6 +1003,38 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
+  refreshMcpRuntime: async () => {
+    const id = get().activeId
+    if (!id) {
+      set({ mcpRuntime: {} })
+      return
+    }
+    try {
+      const entries = await ipc.mcpRuntime(id)
+      set({
+        mcpRuntime: Object.fromEntries(entries.map((e) => [e.id, e.state])),
+      })
+    } catch {
+      /* non-fatal — badges stay as last known */
+    }
+  },
+
+  healthMcp: async (server) => {
+    const id = get().activeId
+    if (!id || get().healthing) return false
+    set({ healthing: server, error: null })
+    try {
+      const state = await ipc.mcpHealth(id, server)
+      set((s) => ({ mcpRuntime: { ...s.mcpRuntime, [server]: state } }))
+      return true
+    } catch (e) {
+      set({ error: String(e) })
+      return false
+    } finally {
+      set({ healthing: null })
+    }
+  },
+
   installMcp: async (entry) => {
     const id = get().activeId
     if (!id) return false
@@ -1031,6 +1093,20 @@ export const useAppStore = create<AppStore>((set, get) => ({
       // `job-updated`. Bundle items can install plugins/skills/MCP — the
       // terminal-job handler on the active pages refreshes every index.
       return await ipc.bundleImport(id, manifest)
+    } catch (e) {
+      set({ error: String(e) })
+      return null
+    }
+  },
+
+  importMcp: async (request) => {
+    const id = get().activeId
+    if (!id) return null
+    set({ error: null })
+    try {
+      // Enqueues a backend McpImport job (one `sync_mcp_patch` recompile for
+      // the batch); the terminal-job handler refreshes Library/MCP indexes.
+      return await ipc.mcpImport(id, request)
     } catch (e) {
       set({ error: String(e) })
       return null
@@ -1098,18 +1174,24 @@ export const useAppStore = create<AppStore>((set, get) => ({
   updatePlugin: async (name) => {
     const id = get().activeId
     if (!id) return false
-    set({ busy: true, error: null })
+    set({ error: null })
     try {
+      // Enqueues a durable Install Center job and returns at queue time; the
+      // `job-updated` events drive progress and the done/failed refreshes.
       await ipc.pluginUpdate(id, name)
-      await get().refreshInstalledPlugins()
-      await get().refreshLibraryInventory()
-      await get().refreshLibraryDetail()
+      // Optimistic flip so the row's Update button disappears immediately — a
+      // re-probe would be an async network round-trip, and the next launch
+      // re-runs the full probe anyway. A failed job re-probes (see the
+      // job-updated handler) to restore the button.
+      set((s) => ({
+        updates: s.updates.map((u) =>
+          u.name === name ? { ...u, installed: u.latest, updatable: false } : u,
+        ),
+      }))
       return true
     } catch (e) {
       set({ error: String(e) })
       return false
-    } finally {
-      set({ busy: false })
     }
   },
 
@@ -1129,18 +1211,24 @@ export const useAppStore = create<AppStore>((set, get) => ({
   updateSkill: async (skillId) => {
     const id = get().activeId
     if (!id) return false
-    set({ busy: true, error: null })
+    set({ error: null })
     try {
+      // Enqueues a durable Install Center job and returns at queue time; the
+      // `job-updated` events drive progress and the done/failed refreshes.
       await ipc.skillUpdate(id, skillId)
-      await get().refreshInstalledSkills()
-      await get().refreshLibraryInventory()
-      await get().refreshLibraryDetail()
+      // Optimistic flip so the row's Update button disappears immediately — a
+      // re-probe would be an async network round-trip, and the next launch
+      // re-runs the full probe anyway. A failed job re-probes (see the
+      // job-updated handler) to restore the button.
+      set((s) => ({
+        skillUpdates: s.skillUpdates.map((u) =>
+          u.id === skillId ? { ...u, installed: u.latest, updatable: false } : u,
+        ),
+      }))
       return true
     } catch (e) {
       set({ error: String(e) })
       return false
-    } finally {
-      set({ busy: false })
     }
   },
 

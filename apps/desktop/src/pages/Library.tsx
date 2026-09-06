@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react'
 import {
+  Activity,
   Boxes,
   CheckCircle2,
   Layers3,
+  Loader2,
   PackageCheck,
   Puzzle,
   RefreshCw,
+  Settings2,
   Shield,
   Sparkles,
   Trash2,
@@ -14,8 +17,17 @@ import {
 } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
 import { useT } from '../lib/i18n'
+import { runtimeNeedsConfig, runtimeNoTools } from '../lib/mcpConfig'
 import { InstallCenter } from '../components/InstallCenter'
-import type { ContentKind, LibraryInventoryItem, RegistryPlugin } from '../lib/types'
+import { McpConfigModal } from '../components/McpConfigModal'
+import type {
+  ContentKind,
+  LibraryInventoryItem,
+  McpEnvRequirement,
+  McpHealthState,
+  McpRuntimeState,
+  RegistryPlugin,
+} from '../lib/types'
 
 type LibraryKind = 'plugin' | 'skill' | 'mcp' | 'theme'
 
@@ -54,6 +66,31 @@ const TONES: Record<
     chip: 'text-fuchsia-300',
     active: 'border-fuchsia-500/40 bg-fuchsia-500/10 text-fuchsia-200',
   },
+}
+
+/** MCP health badge tones (roadmap Phase 2): untested gray / ok green / degraded amber / error red. */
+const HEALTH_TONES: Record<McpHealthState, string> = {
+  untested: 'bg-zinc-500/15 text-zinc-400',
+  ok: 'bg-emerald-500/10 text-emerald-400',
+  degraded: 'bg-amber-500/10 text-amber-400',
+  error: 'bg-red-500/10 text-red-400',
+}
+
+const HEALTH_DOT: Record<McpHealthState, string> = {
+  untested: 'bg-zinc-500',
+  ok: 'bg-emerald-400',
+  degraded: 'bg-amber-400',
+  error: 'bg-red-400',
+}
+
+/** Hover detail for a health badge: transport · last checked · error · tools. */
+function healthTooltip(h: McpRuntimeState | null): string {
+  const bits: string[] = []
+  if (h?.transport) bits.push(h.transport)
+  if (h?.checkedAt) bits.push(new Date(h.checkedAt).toLocaleString())
+  if (h?.error) bits.push(h.error)
+  if (h && h.tools.length > 0) bits.push(`${h.tools.length} tools`)
+  return bits.join(' · ')
 }
 
 function pluginKey(p: RegistryPlugin) {
@@ -116,9 +153,15 @@ function AssetRow({
   source,
   detail,
   issues,
+  missingConfig,
   version,
   enabled,
   busy,
+  health,
+  checking,
+  configWarn,
+  onCheck,
+  onConfigure,
   onToggle,
   onUpdate,
   updateTo,
@@ -132,9 +175,20 @@ function AssetRow({
   source: string
   detail?: string
   issues?: string[]
+  /** Catalog-declared required env vars still unset (the row's "needs config" hint). */
+  missingConfig?: McpEnvRequirement[]
   version?: string | null
   enabled?: boolean
   busy?: boolean
+  /** MCP health snapshot (roadmap Phase 2); omit on non-MCP rows. */
+  health?: McpRuntimeState | null
+  /** Row is being health-checked (spinner in the 「检查」 button). */
+  checking?: boolean
+  /** Runtime-self-declared config gap (degraded + config-shaped), no declared keys. */
+  configWarn?: string | null
+  onCheck?: () => void
+  /** Opens the config modal; provided only for MCP rows that need or have config. */
+  onConfigure?: () => void
   onToggle?: () => void
   onUpdate?: () => void
   updateTo?: string
@@ -161,6 +215,17 @@ function AssetRow({
               {issues.map((code) => t(`library.issue.${code}`)).join(' · ')}
             </div>
           )}
+          {missingConfig && missingConfig.length > 0 && (
+            <div className="mt-0.5 truncate text-[11px] text-amber-400/90">
+              {t('library.missingConfig')}
+              {missingConfig
+                .map((req) => `${req.secret ? '🔑 ' : ''}${req.key}`)
+                .join(', ')}
+            </div>
+          )}
+          {configWarn && (
+            <div className="mt-0.5 truncate text-[11px] text-amber-400/90">{configWarn}</div>
+          )}
         </div>
       </div>
 
@@ -173,6 +238,48 @@ function AssetRow({
         <span className="rounded-full border border-zinc-800 bg-zinc-950/50 px-2 py-1 text-[10px] font-medium text-zinc-400">
           {source}
         </span>
+        {health !== undefined && (
+          <span
+            title={healthTooltip(health)}
+            className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[10px] font-medium uppercase tracking-wide ${
+              HEALTH_TONES[health?.state ?? 'untested']
+            }`}
+          >
+            <span
+              className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                HEALTH_DOT[health?.state ?? 'untested']
+              }`}
+            />
+            {t(`mcp.health.${health?.state ?? 'untested'}`)}
+          </span>
+        )}
+        {onCheck && (
+          <button
+            type="button"
+            onClick={onCheck}
+            disabled={busy || checking}
+            title={t('library.check')}
+            className="flex h-8 items-center gap-1.5 rounded-lg border border-zinc-800 px-2.5 text-xs font-medium text-zinc-400 hover:border-cyan-500/40 hover:text-cyan-200 disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            {checking ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.75} />
+            ) : (
+              <Activity className="h-3.5 w-3.5" strokeWidth={1.75} />
+            )}
+            {checking ? t('library.checking') : t('library.check')}
+          </button>
+        )}
+        {onConfigure && (
+          <button
+            type="button"
+            onClick={onConfigure}
+            title={t('library.configure')}
+            className="flex h-8 items-center gap-1.5 rounded-lg border border-zinc-800 px-2.5 text-xs font-medium text-zinc-400 hover:border-amber-500/50 hover:text-amber-200"
+          >
+            <Settings2 className="h-3.5 w-3.5" strokeWidth={1.75} />
+            {t('library.configure')}
+          </button>
+        )}
         <span
           className={`rounded-full px-2 py-1 text-[10px] font-medium uppercase tracking-wide ${
             !isOn
@@ -245,7 +352,19 @@ export function Library() {
   const uninstallSkill = useAppStore((s) => s.uninstallSkill)
   const uninstallMcp = useAppStore((s) => s.uninstallMcp)
   const setMcpEnabled = useAppStore((s) => s.setMcpEnabled)
+  const mcpRuntime = useAppStore((s) => s.mcpRuntime)
+  const healthing = useAppStore((s) => s.healthing)
+  const refreshMcpRuntime = useAppStore((s) => s.refreshMcpRuntime)
+  const healthMcp = useAppStore((s) => s.healthMcp)
   const [kind, setKind] = useState<LibraryKind>('plugin')
+  /** The MCP row the config modal is editing (null = closed). */
+  const [configFor, setConfigFor] = useState<{
+    instanceId: string
+    id: string
+    title: string
+    missing: McpEnvRequirement[]
+    runtimeError: string | null
+  } | null>(null)
 
   useEffect(() => {
     // Page-open reads the snapshot cache only — no DSH deep-scan and no
@@ -253,7 +372,9 @@ export function Library() {
     // background task + after installs; update-check runs post-launch.
     void loadRegistry()
     void refreshLibraryDetail()
-  }, [activeId, loadRegistry, refreshLibraryDetail])
+    // MCP health badges come from persisted runtime.json — cheap local reads.
+    void refreshMcpRuntime()
+  }, [activeId, loadRegistry, refreshLibraryDetail, refreshMcpRuntime])
 
   const catalog = registry?.plugins ?? []
   const inventoryItems =
@@ -290,6 +411,16 @@ export function Library() {
           : undefined
       const removableSkill = item.kind === 'skill' ? () => void uninstallSkill(item.id) : undefined
       const mcpEntry = item.kind === 'mcp' ? findCatalogEntry(catalog, 'mcp', item.id) : undefined
+      // MCP config signal: catalog-declared missing keys (snapshot) OR a runtime
+      // verdict that reads as a config gap. Two runtime signals, both universal
+      // (no declaration needed): a degraded self-report ("KANBOARD_URL is
+      // required but was not set") and a healthy-but-empty tool list (firecrawl
+      // without FIRECRAWL_API_KEY initializes ok but exposes zero tools).
+      const isMcp = item.kind === 'mcp'
+      const runtime = isMcp ? mcpRuntime[item.id] ?? null : null
+      const runtimeNeed = isMcp && runtimeNeedsConfig(runtime)
+      const runtimeNoTool = isMcp && runtimeNoTools(runtime)
+      const needsConfig = isMcp && ((item.missingConfig?.length ?? 0) > 0 || runtimeNeed || runtimeNoTool)
       return (
         <AssetRow
           key={`${item.kind}:${item.id}`}
@@ -319,9 +450,36 @@ export function Library() {
           source={t(sourceLabelKey(item.source))}
           detail={`${t(stateSourceLabelKey(item.stateSource))}${item.detail ? ` · ${item.detail}` : ''}`}
           issues={item.issues}
+          missingConfig={item.missingConfig}
           version={item.version}
           enabled={item.enabled ?? undefined}
           busy={busy}
+          health={isMcp ? runtime : undefined}
+          checking={isMcp && healthing === item.id}
+          configWarn={
+            needsConfig && (item.missingConfig?.length ?? 0) === 0 && (runtimeNeed || runtimeNoTool)
+              ? runtimeNeed
+                ? t('library.runtimeNeedsConfig')
+                : t('library.noToolsHint')
+              : null
+          }
+          onCheck={
+            isMcp && item.enabled !== false
+              ? () => void healthMcp(item.id)
+              : undefined
+          }
+          onConfigure={
+            needsConfig
+              ? () =>
+                  setConfigFor({
+                    instanceId: activeId!,
+                    id: item.id,
+                    title: item.title,
+                    missing: item.missingConfig ?? [],
+                    runtimeError: runtimeNeed ? runtime?.error ?? null : null,
+                  })
+              : undefined
+          }
           onToggle={
             item.kind === 'mcp'
               ? () => void setMcpEnabled(item.id, !(item.enabled ?? true))
@@ -358,6 +516,7 @@ export function Library() {
   const rows = renderRows()
 
   return (
+    <>
     <div className="flex h-full min-h-0 flex-col gap-5 overflow-hidden p-6">
       <div className="flex shrink-0 items-end justify-between gap-4">
         <div>
@@ -453,5 +612,20 @@ export function Library() {
         </section>
       </div>
     </div>
+    {configFor && (
+      <McpConfigModal
+        instanceId={configFor.instanceId}
+        serverId={configFor.id}
+        serverName={configFor.title}
+        missing={configFor.missing}
+        runtimeError={configFor.runtimeError}
+        onClose={() => setConfigFor(null)}
+        onSaved={() => {
+          setConfigFor(null)
+          void refreshLibraryDetail()
+        }}
+      />
+    )}
+    </>
   )
 }

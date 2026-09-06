@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use launcher_core::{
-    sha256_hex, InstanceManifest, McpServerRecord, RegistryPlugin, SkillRecord,
+    sha256_hex, InstanceManifest, McpEnvRequirement, McpServerRecord, RegistryPlugin, SkillRecord,
 };
 use serde_yaml::Value as Yaml;
 
@@ -365,7 +365,9 @@ fn mcp_server_name(entry: &RegistryPlugin) -> String {
         .unwrap_or_else(|| sanitize_server_name(&entry.name))
 }
 
-fn sanitize_server_name(name: &str) -> String {
+/// Force an arbitrary config key (imported `serverName`, or a bare entry name)
+/// into the `[A-Za-z0-9_-]{1,32}` pattern the mcp-client server id requires.
+pub(crate) fn sanitize_server_name(name: &str) -> String {
     let mut s: String = name
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
@@ -391,8 +393,31 @@ pub fn mcp_record(entry: &RegistryPlugin) -> McpServerRecord {
         env: entry.env.clone().unwrap_or_default(),
         url: entry.mcp_url.clone().unwrap_or_default(),
         headers: entry.headers.clone().unwrap_or_default(),
+        required_env: entry.required_env.clone(),
         enabled: true,
     }
+}
+
+/// Whether a stdio server is **directory-gated**: it can only operate on paths
+/// a client whitelists (filesystem-family `allowed-directory` args, or MCP
+/// roots), and launched without one it idles ("waiting for roots") then rejects
+/// every path — observed real-machine on the filesystem server
+/// (`list_allowed_directories` empty, "Access denied - path outside allowed
+/// directories"). The install flow injects the instance workspace as the
+/// default allowed directory for these records.
+///
+/// v1 recognizes the filesystem family by record id / server name — the
+/// catalog's only directory-gated server today. The match is deliberately
+/// narrow so github / memory / kanboard and every non-directory server stays
+/// out. A future catalog capability field would drive this more precisely;
+/// name matching is the honest v1 bound.
+pub fn needs_allowed_directory(record: &McpServerRecord) -> bool {
+    let id = record.id.to_ascii_lowercase();
+    let name = record.server_name.trim().to_ascii_lowercase();
+    name == "filesystem"
+        || name == "server-filesystem"
+        || id.ends_with("/server-filesystem")
+        || id.ends_with("/filesystem")
 }
 
 /// The mcp-client plugin's config as a `serde_yaml::Value`, from a record:
@@ -506,6 +531,84 @@ pub fn mcp_config_issues(entry: &RegistryPlugin) -> Vec<String> {
     issues
 }
 
+/// Live validation of an *installed* MCP record — the record-side mirror of
+/// [`mcp_config_issues`]. Library computes issues from the manifest record at
+/// read time (like skills rows) instead of caching an install-time snapshot of
+/// the catalog entry: a Phase-4 git-source server legitimately has a `null`
+/// catalog `command` by design (the record only gains a real local `command`
+/// after the local build), so judging the *entry* reports a false
+/// "missing command" that persists on an otherwise Healthy record. Issue codes
+/// are the same vocabulary as [`mcp_config_issues`]; the transport/endpoint
+/// check reads the record's effective launch (`command`/`url`) and any
+/// auth-token placeholder in its resolved env/headers.
+pub fn mcp_record_config_issues(record: &McpServerRecord) -> Vec<String> {
+    let mut issues = Vec::new();
+    let transport = if record.transport.trim().is_empty() {
+        "stdio"
+    } else {
+        record.transport.as_str()
+    };
+    match transport {
+        "stdio" => {
+            if record.command.trim().is_empty() {
+                issues.push("mcp.missingCommand".to_string());
+            }
+        }
+        "streamable-http" => {
+            if !(record.url.starts_with("http://") || record.url.starts_with("https://")) {
+                issues.push("mcp.missingUrl".to_string());
+            }
+        }
+        _ => issues.push("mcp.unknownTransport".to_string()),
+    }
+    if mcp_record_needs_token(record) {
+        issues.push("mcp.missingToken".to_string());
+    }
+    issues
+}
+
+/// The subset of `required` env vars a record has no non-empty value for. Used
+/// by both [`mcp_record_missing_config`] (declarations persisted on the record)
+/// and the Library snapshot's catalog fallback for legacy records that predate
+/// `required_env` (their declaration lives only in `content-mcp-env.json`).
+pub fn mcp_missing_against(
+    record: &McpServerRecord,
+    required: &[McpEnvRequirement],
+) -> Vec<McpEnvRequirement> {
+    required
+        .iter()
+        .filter(|req| record.env.get(&req.key).is_none_or(|v| v.trim().is_empty()))
+        .cloned()
+        .collect()
+}
+
+/// Which of a record's catalog-declared required env vars are still unset — the
+/// live Library "needs configuring" signal. A declaration is satisfied when
+/// `record.env` holds a non-empty value under that key. This is the *declared*
+/// set (`required_env`, from `content-mcp-env.json`), independent of the
+/// runtime degraded probe which only fires after launch.
+pub fn mcp_record_missing_config(record: &McpServerRecord) -> Vec<McpEnvRequirement> {
+    mcp_missing_against(record, &record.required_env)
+}
+
+/// Whether an installed MCP record carries an unresolved auth credential in its
+/// effective launch config — mirrors [`mcp_needs_token`] over the record's
+/// concrete `env`/`headers` (already merged from catalog + build + preferences).
+/// Whether an installed MCP record declares an auth credential the launcher
+/// cannot supply (a `${VAR}` reference or a token-named env/header). The
+/// install rollback gate consults this: a server whose *record itself* declares
+/// auth need is config-gated — a failed post-install probe is kept with an
+/// honest badge rather than rolled back (the user configures the value, then
+/// re-checks). A record that declares nothing and still cannot run is a genuine
+/// install failure and is rolled back.
+pub fn mcp_record_needs_token(record: &McpServerRecord) -> bool {
+    record
+        .env
+        .values()
+        .chain(record.headers.values())
+        .any(|v| value_needs_token(v))
+}
+
 /// Whether an MCP entry declares an auth credential the catalog can't supply:
 /// an `env`/`headers` value that is a `${VAR}` reference, or names a token/key.
 /// The curated catalog ships these empty today, but the schema reserves them so
@@ -516,16 +619,21 @@ fn mcp_needs_token(entry: &RegistryPlugin) -> bool {
         .iter()
         .flat_map(|m| m.values())
         .chain(entry.headers.iter().flat_map(|m| m.values()))
-        .any(|v| {
-            v.contains("${")
-                || {
-                    let upper = v.to_ascii_uppercase();
-                    upper.contains("TOKEN")
-                        || upper.contains("API_KEY")
-                        || upper.contains("SECRET")
-                        || upper.contains("BEARER")
-                }
-        })
+        .any(|v| value_needs_token(v))
+}
+
+/// Whether a single config value looks like a credential the runtime must
+/// supply: a `${VAR}` reference, or a value that names a token/key. Shared by
+/// [`mcp_needs_token`] and the MCP import warning path (roadmap §10 / P3).
+pub(crate) fn value_needs_token(v: &str) -> bool {
+    v.contains("${")
+        || {
+            let upper = v.to_ascii_uppercase();
+            upper.contains("TOKEN")
+                || upper.contains("API_KEY")
+                || upper.contains("SECRET")
+                || upper.contains("BEARER")
+        }
 }
 
 #[cfg(test)]
@@ -553,6 +661,76 @@ mod tests {
             server_name: server_name.into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn needs_allowed_directory_recognizes_only_filesystem_family() {
+        // Directory-gated: the official filesystem server, under any name/id form.
+        assert!(needs_allowed_directory(&rec("modelcontextprotocol/server-filesystem", "server-filesystem")));
+        assert!(needs_allowed_directory(&rec("modelcontextprotocol/server-filesystem", "filesystem")));
+        assert!(needs_allowed_directory(&rec("someone/mcp-filesystem", "filesystem")));
+        // Deliberately NOT directory-gated — injecting a workspace into these
+        // would corrupt their launch args.
+        assert!(!needs_allowed_directory(&rec("modelcontextprotocol/server-github", "github")));
+        assert!(!needs_allowed_directory(&rec("modelcontextprotocol/server-memory", "memory")));
+        assert!(!needs_allowed_directory(&rec("ErnestoCorona/kanboard-mcp", "kanboard")));
+        assert!(!needs_allowed_directory(&rec("mendableai/firecrawl-mcp", "firecrawl-mcp")));
+        assert!(!needs_allowed_directory(&rec("modelcontextprotocol/server-puppeteer", "puppeteer")));
+        // No false positive on id prefixes that merely contain the word.
+        assert!(!needs_allowed_directory(&rec("acme/filesystem-proxy-not-local", "proxy")));
+    }
+
+    #[test]
+    fn mcp_record_missing_config_reflects_declared_vs_set_env() {
+        let req = |key: &str, secret: bool| McpEnvRequirement {
+            key: key.into(),
+            label: None,
+            secret,
+        };
+        let mut record = rec("ErnestoCorona/kanboard-mcp", "kanboard");
+        record.required_env = vec![req("KANBOARD_URL", false), req("KANBOARD_API_TOKEN", true)];
+
+        // Nothing set → every declaration is missing.
+        assert_eq!(mcp_record_missing_config(&record).len(), 2);
+
+        // One set → only the unset key survives (with its secret flag).
+        record.env.insert("KANBOARD_URL".into(), "https://pm.example.com".into());
+        let missing = mcp_record_missing_config(&record);
+        assert_eq!(missing, vec![req("KANBOARD_API_TOKEN", true)]);
+
+        // All set → nothing missing.
+        record.env.insert("KANBOARD_API_TOKEN".into(), "tok".into());
+        assert!(mcp_record_missing_config(&record).is_empty());
+
+        // Whitespace-only still counts as unset.
+        record.env.insert("KANBOARD_API_TOKEN".into(), "  ".into());
+        assert_eq!(mcp_record_missing_config(&record), vec![req("KANBOARD_API_TOKEN", true)]);
+
+        // No declarations → never missing.
+        record.required_env.clear();
+        assert!(mcp_record_missing_config(&record).is_empty());
+    }
+
+    #[test]
+    fn mcp_missing_against_supports_legacy_catalog_fallback() {
+        let req = |key: &str, secret: bool| McpEnvRequirement {
+            key: key.into(),
+            label: None,
+            secret,
+        };
+        // A legacy record predating `required_env`: its persisted declaration set
+        // is empty, but the catalog still declares KANBOARD_URL. The Library
+        // snapshot falls back to evaluating the declared list against the record.
+        let mut record = rec("ErnestoCorona/kanboard-mcp", "kanboard");
+        assert!(record.required_env.is_empty(), "legacy record shape");
+        let declared = vec![req("KANBOARD_URL", false)];
+
+        assert_eq!(mcp_missing_against(&record, &declared).len(), 1);
+        // Record gained a value (future fill phase writes record.env) → hint clears.
+        record.env.insert("KANBOARD_URL".into(), "https://pm.example.com".into());
+        assert!(mcp_missing_against(&record, &declared).is_empty());
+        // No declaration for this record → still nothing missing.
+        assert!(mcp_missing_against(&record, &[]).is_empty());
     }
 
     /// A throwaway instance whose `$DSH_HOME` sits in temp; returns the instance
@@ -811,6 +989,67 @@ mod tests {
         assert_eq!(
             mcp_config_issues(&key_env),
             vec!["mcp.missingToken".to_string()]
+        );
+    }
+
+    #[test]
+    fn mcp_record_config_issues_reads_record_not_entry() {
+        use std::collections::HashMap;
+
+        // stdio record with no command → flagged (record genuinely can't launch).
+        let stdio_missing = McpServerRecord {
+            id: "o/s".into(),
+            transport: "stdio".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            mcp_record_config_issues(&stdio_missing),
+            vec!["mcp.missingCommand"]
+        );
+
+        // http record with no url → flagged.
+        let http_missing = McpServerRecord {
+            id: "o/s".into(),
+            transport: "streamable-http".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            mcp_record_config_issues(&http_missing),
+            vec!["mcp.missingUrl"]
+        );
+
+        // Unknown transport → flagged.
+        let unknown = McpServerRecord {
+            id: "o/s".into(),
+            transport: "sse".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            mcp_record_config_issues(&unknown),
+            vec!["mcp.unknownTransport"]
+        );
+
+        // A Phase-4 source-built record: catalog command is null by design but
+        // the *record* now carries a real local launch line → clean, no issue.
+        let git_built = McpServerRecord {
+            id: "o/s".into(),
+            transport: "stdio".into(),
+            command: "C:\\instances\\mcp\\kanboard\\bin\\kanboard-mcp.exe".into(),
+            ..Default::default()
+        };
+        assert!(mcp_record_config_issues(&git_built).is_empty());
+
+        // Token placeholder declared on the record's own env → flagged.
+        let key_env = McpServerRecord {
+            id: "o/s".into(),
+            transport: "stdio".into(),
+            command: "server".into(),
+            env: HashMap::from([("API_KEY".into(), "${API_KEY}".into())]),
+            ..Default::default()
+        };
+        assert_eq!(
+            mcp_record_config_issues(&key_env),
+            vec!["mcp.missingToken"]
         );
     }
 

@@ -1,6 +1,8 @@
 use dsh_adapter::content as content_adapter;
 use dsh_adapter::{DshAdapter, InstalledPlugin, InstalledPluginSource, PluginUpdate};
-use launcher_core::{market, InstanceManifest, Job, JobPlan, RegistryPlugin};
+use launcher_core::{
+    market, InstanceManifest, Job, JobPlan, McpConfigStore, McpEnvRequirement, RegistryPlugin,
+};
 use market::ContentKind;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -26,10 +28,14 @@ const LIBRARY_INVENTORY_EVENT: &str = "library-inventory-updated";
 
 /// Bumped when `LibraryInventoryCache` drops a field. v4 removed the `skills`
 /// and `mcp` id mirrors — those types' state lives solely in `InstanceManifest`
-/// records (the enriched source of truth from the MCP/skill work), so the
-/// snapshot cache only keeps DSH-owned data (`dsh_inventory`, `skins`) plus
-/// launcher bookkeeping.
-const LIBRARY_INVENTORY_CACHE_SCHEMA: u32 = 4;
+/// records (the enriched source of truth from the MCP/skill work). v5 removed
+/// `mcp_issues`: MCP row issues are now computed live from the manifest record
+/// at read time (mirroring skills rows), never cached from the catalog entry —
+/// a Phase-4 git-source server's `null` catalog `command` is by design and would
+/// otherwise report a false "missing command" forever. So the snapshot cache
+/// only keeps DSH-owned data (`dsh_inventory`, `skins`) plus launcher
+/// bookkeeping.
+const LIBRARY_INVENTORY_CACHE_SCHEMA: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -45,8 +51,6 @@ struct LibraryInventoryCache {
     #[serde(default)]
     install_sources: HashMap<String, InstallSourceMetadata>,
     skins: Vec<String>,
-    #[serde(default)]
-    mcp_issues: HashMap<String, Vec<String>>,
     #[serde(default)]
     #[serde(skip_serializing)]
     market: Vec<MarketInstallMetadata>,
@@ -110,6 +114,11 @@ pub struct LibraryInventoryItem {
     pub market: Option<MarketInstallMetadata>,
     #[serde(default)]
     pub issues: Vec<String>,
+    /// Catalog-declared required env vars still unset on the record — the row's
+    /// "needs configuring" signal (see `mcp_record_missing_config`). Carries the
+    /// key/label/secret; never a value.
+    #[serde(default)]
+    pub missing_config: Vec<McpEnvRequirement>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -275,7 +284,6 @@ pub(crate) fn rebuild_library_inventory_cache_from_disk(
         launcher_metadata: cached.launcher_metadata,
         install_sources: cached.install_sources,
         skins: instance.skins,
-        mcp_issues: cached.mcp_issues,
         ..LibraryInventoryCache::default()
     };
     write_library_inventory_cache(state, id, &cache)?;
@@ -420,6 +428,7 @@ fn library_inventory_detail_for(
             detail: plugin.fiber_phase.clone(),
             market: metadata,
             issues: Vec::new(),
+            missing_config: Vec::new(),
         });
     }
 
@@ -473,6 +482,7 @@ fn library_inventory_detail_for(
             detail: Some(detail),
             market: metadata,
             issues,
+            missing_config: Vec::new(),
         });
     }
 
@@ -480,7 +490,20 @@ fn library_inventory_detail_for(
     // truth): the record's `enabled` drives the Library toggle and `transport`
     // shows in the detail. `toggleable` stays false — the UI toggles via
     // `mcp_set_enabled`, not the patch's plugin `disabled:` mechanism.
+    // Legacy-record fallback for `missing_config`: a server installed before
+    // `required_env` was persisted carries an empty declaration set, so the
+    // record can't surface its own "needs configuring" hint. Its declaration
+    // lives in the catalog (`content-mcp-env.json`) — look it up once here so
+    // pre-existing installs show the same hint without a reinstall. New
+    // installs carry `required_env` on the record itself and are authoritative.
+    let declared_env = market::required_env_map();
+    let config_store = McpConfigStore::new(state.paths.clone());
     for record in &instance.mcp {
+        // Keys the user already configured for THIS server (name on disk + value
+        // in the OS credential store) — the ones a declared requirement is
+        // satisfied by. Per-record: another server's key never clears this one's
+        // "needs configuring" hint.
+        let resolved = config_store.resolved_keys(&instance.id, &record.id);
         let id = &record.id;
         let metadata =
             market_metadata_for_key_values(&cache.launcher_metadata, ContentKind::Mcp, id)
@@ -505,7 +528,28 @@ fn library_inventory_detail_for(
             state_source: LibraryStateSource::DshWorkspaceFiles,
             detail: Some(format!("mcp-client · {}", record.transport)),
             market: metadata,
-            issues: cache.mcp_issues.get(id).cloned().unwrap_or_default(),
+            // Live from the manifest record, like skills rows: a git-source
+            // server's catalog `command` is null by design pre-build, so the
+            // row must reflect what the record actually launches now, not an
+            // install-time snapshot of the catalog entry.
+            issues: content_adapter::mcp_record_config_issues(record),
+            // A declared key is only "missing" when it also has no value in the
+            // config store (OS credential vault) — once the user configures it,
+            // the row stops asking even though `record.env` stays clean.
+            missing_config: content_adapter::mcp_missing_against(
+                record,
+                if record.required_env.is_empty() {
+                    declared_env
+                        .get(id)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default()
+                } else {
+                    record.required_env.as_slice()
+                },
+            )
+            .into_iter()
+            .filter(|req| !resolved.contains(&req.key))
+            .collect(),
         });
     }
 
@@ -562,6 +606,7 @@ fn library_inventory_detail_for(
             detail: Some("skin classification".to_string()),
             market: metadata,
             issues: Vec::new(),
+            missing_config: Vec::new(),
         });
     }
 
@@ -592,7 +637,6 @@ pub(crate) async fn refresh_plugin_inventory_cache(
         launcher_metadata: cached.launcher_metadata,
         install_sources: cached.install_sources,
         skins: instance.skins,
-        mcp_issues: cached.mcp_issues,
         ..LibraryInventoryCache::default()
     };
     let count = cache.dsh_inventory.len();
@@ -653,15 +697,29 @@ pub(crate) fn record_install_metadata_with_source(
             ),
         },
     );
-    if entry.kind == ContentKind::Mcp {
-        let issues = content_adapter::mcp_config_issues(entry);
-        if !issues.is_empty() {
-            cache.mcp_issues.insert(key.clone(), issues);
-        }
-    }
     cache.schema_version = LIBRARY_INVENTORY_CACHE_SCHEMA;
     cache.updated_at = now_secs();
     write_library_inventory_cache(state, id, &cache)
+}
+
+/// Drop an item's market-install provenance (`launcher_metadata` +
+/// `install_sources`) from the library-inventory cache. Used when an install is
+/// rolled back after a failed post-install probe, and by uninstall, so a removed
+/// MCP leaves no residual "market installed" row in `library-inventory.json`.
+pub(crate) fn remove_market_install_metadata(
+    state: &AppState,
+    id: &str,
+    key: &str,
+) -> Result<(), AppError> {
+    let mut cache = read_library_inventory_cache(state, id);
+    let had_metadata = cache.launcher_metadata.remove(key).is_some();
+    let had_source = cache.install_sources.remove(key).is_some();
+    if had_metadata || had_source {
+        cache.schema_version = LIBRARY_INVENTORY_CACHE_SCHEMA;
+        cache.updated_at = now_secs();
+        write_library_inventory_cache(state, id, &cache)?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn reconcile_library_inventory_after_market_change(
@@ -1172,7 +1230,15 @@ pub async fn plugin_updates(
         let instance = InstanceManifest::get(&state.paths, &id)?;
         let installed = DshAdapter::installed_plugins(&instance);
         let registry = market::npm_registry();
-        let mut out = Vec::new();
+        // Resolve the installed baseline + probe candidates synchronously; each
+        // npm `latest` fetch is a separate HTTP round-trip, so the probes run
+        // concurrently below instead of serialising the whole update state on
+        // the slowest registry call.
+        struct Probe {
+            name: String,
+            installed: String,
+        }
+        let mut probes = Vec::new();
         for p in installed {
             // In-box DSH packages are not market-managed.
             if p.name.starts_with("@deepseek-ai/") {
@@ -1181,13 +1247,31 @@ pub async fn plugin_updates(
             let Some(installed_ver) = DshAdapter::installed_version(&instance, &p.name) else {
                 continue;
             };
-            let Ok(latest) = market::npm_latest(&registry, &p.name).await else {
-                continue;
-            };
-            let updatable = market::version_newer(&latest, &installed_ver);
-            out.push(PluginUpdate {
+            probes.push(Probe {
                 name: p.name,
                 installed: installed_ver,
+            });
+        }
+        let mut workers = tokio::task::JoinSet::new();
+        for probe in probes {
+            let registry = registry.clone();
+            workers.spawn(async move {
+                let latest = market::npm_latest(&registry, &probe.name).await;
+                (probe, latest)
+            });
+        }
+        let mut out = Vec::new();
+        while let Some(res) = workers.join_next().await {
+            let Ok((probe, latest)) = res else {
+                continue;
+            };
+            let Ok(latest) = latest else {
+                continue;
+            };
+            let updatable = market::version_newer(&latest, &probe.installed);
+            out.push(PluginUpdate {
+                name: probe.name,
+                installed: probe.installed,
                 latest,
                 updatable,
             });
@@ -1197,45 +1281,69 @@ pub async fn plugin_updates(
     .await
 }
 
-/// Update a plugin to its latest (`dsh plugin update <name>`).
+/// Update a plugin to its latest (`dsh plugin update <name>`). Enqueues a
+/// durable job like an install, so Install Center shows the row with real stage
+/// progress instead of the call silently blocking on the whole pnpm pass.
 #[tauri::command]
 pub async fn plugin_update(
     state: State<'_, AppState>,
     app: AppHandle,
     id: String,
     name: String,
-) -> Result<(), AppError> {
-    let job_id = id.clone();
-    run_instance_job(&state, &app, &job_id, HeavyJobKind::Install, || async {
-        ensure_not_running(&state, &id).await?;
-        let instance = InstanceManifest::get(&state.paths, &id)?;
-        let settings = state
-            .settings
-            .lock()
-            .map_err(|_| AppError::msg("settings lock poisoned"))?
-            .clone();
-
-        emit_log(&app, &format!("{id} · updating plugin {name}…"));
-        let sink = make_sink(app.clone());
-        let code = state
-            .adapter
-            .run_plugin_command(
-                &settings,
-                &instance,
-                &["update".to_string(), name.clone()],
-                sink,
-            )
-            .await?;
-        if code != 0 {
-            return Err(AppError::msg(format!(
-                "dsh plugin update exited with code {code} — check the plugin is installed and your network can reach the npm registry (detail in Activity logs)"
-            )));
-        }
-        emit_log(&app, &format!("{id} · updated {name}"));
-        reconcile_library_inventory_after_market_change(&state, &app, &id, "plugin update").await?;
-        Ok(())
-    })
+) -> Result<Job, AppError> {
+    let label = format!("update plugin {name}");
+    enqueue_install(
+        &state,
+        &app,
+        &id,
+        &name,
+        &label,
+        JobPlan::PluginUpdate {
+            name: name.clone(),
+        },
+    )
     .await
+}
+
+/// The durable body `plugin_update` enqueues: `dsh plugin update <name>`, then
+/// re-calibrates the Library snapshot.
+pub(crate) async fn plugin_update_job(
+    state: &AppState,
+    app: &AppHandle,
+    id: &str,
+    name: &str,
+    ctx: &JobCtx,
+) -> Result<(), AppError> {
+    ensure_not_running(state, id).await?;
+    let instance = InstanceManifest::get(&state.paths, id)?;
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| AppError::msg("settings lock poisoned"))?
+        .clone();
+
+    emit_log(app, &format!("{id} · updating plugin {name}…"));
+    ctx.progress("dsh-install", 40);
+    let code = state
+        .adapter
+        .run_plugin_command(
+            &settings,
+            &instance,
+            &["update".to_string(), name.to_string()],
+            ctx.sink(),
+        )
+        .await?;
+    if code != 0 {
+        ctx.set_exit_code(i64::from(code));
+        return Err(AppError::msg(format!(
+            "dsh plugin update exited with code {code} — check the plugin is installed and your network can reach the npm registry (detail in Activity logs)"
+        )));
+    }
+    ctx.progress("recording", 70);
+    emit_log(app, &format!("{id} · updated {name}"));
+    ctx.progress("inventory-sync", 88);
+    reconcile_library_inventory_after_market_change(state, app, id, "plugin update").await?;
+    Ok(())
 }
 
 #[cfg(test)]
