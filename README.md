@@ -5,7 +5,7 @@
 <h1 align="center">DeepSeek Harness Launcher</h1>
 
 <p align="center">
-  <strong>DeepSeek Harness 的 Windows / macOS 原生桌面启动器 —— 运行时安装、实例隔离、模型供应商配置、插件管理、一键启动。</strong>
+  <strong>DeepSeek Harness 的 Windows / Ubuntu 原生桌面启动器 —— 运行时安装、实例隔离、模型供应商配置、插件管理、一键启动。</strong>
 </p>
 
 <p align="center">
@@ -43,7 +43,7 @@ DeepSeek Harness Launcher 把 [DeepSeek Harness](https://github.com/deepseek-ai/
 
 ## 下载与安装
 
-当前安装包支持 Windows x64（macOS 即将支持）。无需额外环境，下载安装，一键使用。
+当前安装包支持 Windows x64（Ubuntu 即将支持）。无需额外环境，下载安装，一键使用。
 
 | 平台 | 下载 | 安装方式 |
 | --- | --- | --- |
