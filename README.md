@@ -23,7 +23,7 @@
   <img src="https://img.shields.io/badge/Rust-1.82%2B-dea584?style=flat" alt="Rust">
 </p>
 
-AI Harness Launcher 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的本地 Web UI、Host 服务与插件系统集成进原生桌面应用。它负责窗口、托盘、运行时、工作配置与更新，并透过 DeepSeek Harness 提供的插件机制与上游能力组合。固定并原样运行特定上游版本，不 fork、不改上游行为。
+DeepSeek Harness Launcher 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的本地 Web UI、Host 服务与插件系统集成进原生桌面应用。它负责窗口、托盘、运行时、工作配置与更新，并透过 DeepSeek Harness 提供的插件机制与上游能力组合。固定并原样运行特定上游版本，不 fork、不改上游行为。
 
 <p align="center">
   <img src="assets/4664b6a007a53558c07bd1b857d79f49.png" alt="AI Harness Launcher" width="100%">
@@ -33,9 +33,6 @@ AI Harness Launcher 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepse
 </p>
 <p align="center">
   <img src="assets/c48d234376ef2071f4ad662c5fdff276.png" alt="AI Harness Launcher" width="100%">
-</p>
-<p align="center">
-  <img src="assets/65761af0c034f4c8c22fe47ce9210aac.png" alt="AI Harness Launcher" width="100%">
 </p>
 <p align="center">
   <img src="assets/aec464faaba2d5dfa9ca159f7c973d02.png" alt="AI Harness Launcher" width="100%">
