@@ -2,7 +2,7 @@
   <img src="assets/overview.png" alt="AI Harness Launcher" width="100%">
 </p>
 
-<h1 align="center">AI Harness Launcher</h1>
+<h1 align="center">DeepSeek Harness Launcher</h1>
 
 <p align="center">
   <strong>DeepSeek Harness 的 Windows / macOS 原生桌面启动器 —— 运行时安装、实例隔离、模型供应商配置、插件管理、一键启动。</strong>
