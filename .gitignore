@@ -28,3 +28,11 @@ Thumbs.db
 # Launcher runtime artifacts
 *.pids
 spawned.pids
+
+# Personal planning/design docs (private, not public)
+/plan.md
+/TODO.md
+/architecture.md
+/docs/mcp-ecosystem-roadmap.md
+/docs/release-test-plan.md
+/docs/dsh-first-capability-boundaries.md
