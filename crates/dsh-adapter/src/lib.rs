@@ -397,6 +397,7 @@ impl DshAdapter {
         names.sort();
         let profile_dir = Self::profile_dir(instance);
         let disabled_ids = read_patch_disabled(&profile_dir.join("cordis.patch.yml"));
+        let insert_names = read_insert_names(&profile_dir.join("cordis.patch.yml"));
         names
             .into_iter()
             .map(|name| {
@@ -404,7 +405,16 @@ impl DshAdapter {
                 let ids = inserted_row_ids(&profile_dir, &name);
                 let disabled = ids.iter().any(|id| disabled_ids.contains(id));
                 let kind = installed_plugin_kind(&profile_dir, &name, !ids.is_empty());
+                // A skin is a client plugin DSH will not auto-load; the
+                // launcher mounts it by writing an insert row, so its `enabled`
+                // state is "insert row present", not "installed". A skin that
+                // declares `dsh.bundle` activates via bundles instead and keeps
+                // plugin semantics.
+                let skin_is_bundle = package_json(&profile_dir, &name)
+                    .map(|p| p.pointer("/dsh/bundle").is_some())
+                    .unwrap_or(false);
                 let enabled = match kind {
+                    InstalledPluginKind::Theme if !skin_is_bundle => insert_names.contains(&name),
                     InstalledPluginKind::Theme | InstalledPluginKind::Client => deps.contains(&name),
                     InstalledPluginKind::Plugin => {
                         if in_bundles {
@@ -417,7 +427,8 @@ impl DshAdapter {
                 InstalledPlugin {
                     name,
                     enabled,
-                    toggleable: !ids.is_empty(),
+                    toggleable: matches!(kind, InstalledPluginKind::Theme if !skin_is_bundle)
+                        || !ids.is_empty(),
                     kind,
                     source: InstalledPluginSource::Profile,
                     entry_id: None,
@@ -774,6 +785,59 @@ fn parse_id(trimmed: &str) -> Option<String> {
     }
 }
 
+/// The `name:` values nested under `- insert:` blocks — the packages a patch
+/// layer currently mounts via insert rows. A client-plugin skin is "enabled"
+/// iff its npm package name appears here (see [`installed_plugins`]).
+fn read_insert_names(patch_path: &Path) -> HashSet<String> {
+    let text = std::fs::read_to_string(patch_path).unwrap_or_default();
+    parse_insert_names(&text)
+}
+
+fn parse_insert_names(text: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut insert_indent: Option<usize> = None;
+    for raw in text.lines() {
+        let line = raw.split('#').next().unwrap_or("");
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let indent = line.len() - trimmed.len();
+        if let Some(ins) = insert_indent {
+            if indent <= ins && !is_row_line(trimmed) {
+                insert_indent = None;
+            }
+        }
+        if is_insert_line(trimmed) {
+            insert_indent = Some(indent);
+            continue;
+        }
+        if let Some(name) = parse_name(trimmed) {
+            if let Some(ins) = insert_indent {
+                if indent > ins {
+                    out.insert(name);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn parse_name(trimmed: &str) -> Option<String> {
+    let t = trimmed.strip_prefix('-').unwrap_or(trimmed).trim();
+    let rest = t.strip_prefix("name:")?.trim();
+    let rest = rest.trim_start_matches(['"', '\'']);
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+        .unwrap_or(rest.len());
+    let val = &rest[..end];
+    if val.is_empty() {
+        None
+    } else {
+        Some(val.to_string())
+    }
+}
+
 /// What the user patch layer currently says about each row: ids it disables
 /// (`disabled: true`) and ids it force-enables (`disabled: false`). Line-wise
 /// on purpose, matching dsh-market's `readUserPatchState` — the file may hold
@@ -1064,6 +1128,50 @@ pub(crate) fn remove_mcp_insert_blocks(text: &str) -> String {
     out.join("\n")
 }
 
+/// Remove every top-level `- insert:` block that inserts a launcher-owned skin
+/// row — a nested row whose `id:` carries the `skin-` prefix
+/// [`skin_id_from_package`](crate::content::skin_id_from_package) assigns. The
+/// launcher owns the `skin-` id namespace, so removing by prefix (rather than
+/// by package name) also clears the orphan block a removed skin leaves behind.
+/// The block spans from its `- insert:` line to the next column-0 entry (or
+/// EOF). Pure and line-based, matching [`remove_mcp_insert_blocks`]: MCP rows,
+/// plugin rows, comments, and non-launcher `insert:` blocks pass through
+/// untouched, and line endings survive the split/join.
+pub(crate) fn remove_skin_insert_blocks(text: &str) -> String {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i].trim_end_matches('\r');
+        if line.starts_with("- insert:") {
+            let mut end = i + 1;
+            while end < lines.len() {
+                let inner = lines[end].trim_end_matches('\r');
+                if !inner.is_empty() && !inner.starts_with(' ') && !inner.starts_with('\t') {
+                    break;
+                }
+                end += 1;
+            }
+            let owns_skin = (i + 1..end).any(|k| {
+                let content = lines[k].trim_end_matches('\r');
+                let content = content.split('#').next().unwrap_or("").trim();
+                let t = content.trim_start_matches('-').trim();
+                let Some(rest) = t.strip_prefix("id:") else {
+                    return false;
+                };
+                rest.trim().trim_start_matches(['"', '\'']).starts_with("skin-")
+            });
+            if owns_skin {
+                i = end;
+                continue;
+            }
+        }
+        out.push(lines[i].to_string());
+        i += 1;
+    }
+    out.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1119,6 +1227,57 @@ mod tests {
         let text = "- id: timer\n  disabled: true\n# only comments\n";
         assert_eq!(remove_mcp_insert_blocks(text), text);
         assert_eq!(remove_mcp_insert_blocks(""), "");
+    }
+
+    #[test]
+    fn remove_skin_insert_blocks_drops_skin_prefixed_blocks_only() {
+        let text = "\
+# comment
+- id: timer
+  disabled: true
+- insert:
+    - id: mcp-a
+      name: '@deepseek-ai/dsh-mcp-client'
+- insert:
+    - id: skin-sakura
+      name: dsh-skin-sakura
+    - id: skin-dark
+      name: dsh-skin-dark
+";
+        let next = remove_skin_insert_blocks(text);
+        assert!(!next.contains("skin-sakura"), "{next}");
+        assert!(!next.contains("skin-dark"), "{next}");
+        assert!(next.contains("mcp-a"), "{next}");
+        assert!(next.contains("- id: timer\n  disabled: true"), "{next}");
+        assert_eq!(
+            next.lines().filter(|l| l.starts_with("- insert:")).count(),
+            1,
+            "only the MCP insert block survives:\n{next}"
+        );
+    }
+
+    #[test]
+    fn remove_skin_insert_blocks_is_idempotent_without_matches() {
+        let text = "- id: timer\n  disabled: true\n# only comments\n";
+        assert_eq!(remove_skin_insert_blocks(text), text);
+        assert_eq!(remove_skin_insert_blocks(""), "");
+    }
+
+    #[test]
+    fn parse_insert_names_reads_names_under_insert() {
+        let text = "\
+- id: timer
+  name: '@deepseek-ai/cordis-plugin-timer'
+- insert:
+    - id: skin-a
+      name: dsh-skin-a
+    - id: skin-b
+      name: '@scope/dsh-skin-b'
+";
+        let names = parse_insert_names(text);
+        assert!(names.contains("dsh-skin-a"));
+        assert!(names.contains("@scope/dsh-skin-b"));
+        assert!(!names.contains("@deepseek-ai/cordis-plugin-timer"));
     }
 
     #[test]
@@ -1427,6 +1586,7 @@ mod tests {
             skills: vec![],
             mcp: vec![],
             skins: vec![],
+            skin_packages: vec![],
             workspace: ws.display().to_string(),
         };
         let provider = ResolvedProvider {

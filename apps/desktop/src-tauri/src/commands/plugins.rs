@@ -832,6 +832,33 @@ async fn run_git(args: &[String], cwd: Option<&Path>) -> Result<(), AppError> {
     Err(AppError::msg(format!("git command failed: {detail}")))
 }
 
+/// When a github skin repo lacks a root `package.json` (a monorepo shell), the
+/// real skin package lives one level down. Scan immediate subdirectories for a
+/// `package.json` declaring `dsh.client`; return the first match (the catalog
+/// `path` field normally names it, so this is a fallback for the 399 skins
+/// without one).
+fn find_skin_subdir(dir: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut hits: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(path.join("package.json")) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if value.pointer("/dsh/client").is_some() {
+            hits.push(path);
+        }
+    }
+    hits.sort();
+    hits.into_iter().next()
+}
+
 pub(crate) async fn resolve_plugin_install_target(
     state: &AppState,
     app: &AppHandle,
@@ -916,7 +943,18 @@ pub(crate) async fn resolve_plugin_install_target(
                 .filter(|path| !path.trim().is_empty())
                 .map(|path| cache_dir.join(path))
                 .unwrap_or_else(|| cache_dir.clone());
-            if !install_dir.join("package.json").exists() {
+            let install_dir = if install_dir.join("package.json").exists() {
+                install_dir
+            } else if let Some(subdir) = find_skin_subdir(&install_dir) {
+                emit_log(
+                    app,
+                    &format!(
+                        "{id} · repo root has no package.json — using skin subdir {}",
+                        subdir.display()
+                    ),
+                );
+                subdir
+            } else {
                 emit_log(
                     app,
                     &format!(
@@ -925,7 +963,7 @@ pub(crate) async fn resolve_plugin_install_target(
                     ),
                 );
                 return target.to_string();
-            }
+            };
             emit_log(
                 app,
                 &format!(
@@ -1101,7 +1139,7 @@ pub(crate) async fn plugin_install_job(
         .run_plugin_command(
             &settings,
             &instance,
-            &["add".to_string(), install_target],
+            &["add".to_string(), install_target.clone()],
             ctx.sink(),
         )
         .await?;
@@ -1119,7 +1157,19 @@ pub(crate) async fn plugin_install_job(
             } else {
                 format!("{}/{}", entry.owner, entry.name)
             };
-            InstanceManifest::add_skin(&state.paths, id, &key)?;
+            // The real npm package name comes from the installed target's own
+            // `package.json.name` (a github subdir), or the bare npm spec when
+            // the target was a registry package.
+            let package = content_adapter::skin_package_name(Path::new(&install_target))
+                .unwrap_or_else(|| install_target.clone());
+            InstanceManifest::add_skin_package(&state.paths, id, &key, &package)?;
+            // Mount the skin by writing its insert row. A package that declares
+            // `dsh.bundle` was already auto-registered by `dsh plugin add`, so
+            // it must not get a duplicate insert row.
+            let updated = InstanceManifest::get(&state.paths, id)?;
+            if !content_adapter::skin_has_bundle(&updated, &package) {
+                content_adapter::sync_skin_patch(&updated, &updated.skin_packages)?;
+            }
         }
     }
     if let Some(entry) = entry {
@@ -1176,11 +1226,16 @@ pub async fn plugin_uninstall(
                 let normalized = skin.replace(['/', '-'], "__").to_lowercase();
                 let package = name.to_lowercase();
                 if package.contains(&tail) || package == normalized {
-                    let _ = InstanceManifest::remove_skin(&state.paths, &id, &skin);
+                    let _ = InstanceManifest::remove_skin_package(&state.paths, &id, &skin);
                 }
             }
         }
         DshAdapter::remove_patch_rows(&instance, &patch_ids)?;
+        // Recompile the skin insert block: a removed skin's row must not survive
+        // as an orphan (its package is already gone from the profile).
+        if let Ok(updated) = InstanceManifest::get(&state.paths, &id) {
+            content_adapter::sync_skin_patch(&updated, &updated.skin_packages)?;
+        }
         emit_log(&app, &format!("{id} · removed {name}"));
         reconcile_library_inventory_after_market_change(&state, &app, &id, "plugin uninstall")
             .await?;
@@ -1209,7 +1264,20 @@ pub async fn plugin_toggle(
         || async {
             ensure_not_running(&state, &id).await?;
             let instance = InstanceManifest::get(&state.paths, &id)?;
-            DshAdapter::set_plugin_enabled(&instance, &name, enabled)?;
+            // Skins toggle via their insert row (mount/unmount), not via bundle
+            // `disabled:` rows — a client-plugin skin has no bundle rows to flip.
+            if let Some(skin) = instance
+                .skin_packages
+                .iter()
+                .find(|p| p.package == name)
+                .cloned()
+            {
+                InstanceManifest::set_skin_enabled(&state.paths, &id, &skin.key, enabled)?;
+                let updated = InstanceManifest::get(&state.paths, &id)?;
+                content_adapter::sync_skin_patch(&updated, &updated.skin_packages)?;
+            } else {
+                DshAdapter::set_plugin_enabled(&instance, &name, enabled)?;
+            }
             reconcile_library_inventory_after_market_change(&state, &app, &id, "plugin toggle")
                 .await?;
             Ok(())

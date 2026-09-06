@@ -371,6 +371,7 @@ mod tests {
             skills: vec![],
             mcp: vec![],
             skins: vec![],
+            skin_packages: vec![],
             workspace: workspace.display().to_string(),
         };
 

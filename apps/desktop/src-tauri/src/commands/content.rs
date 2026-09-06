@@ -1193,7 +1193,7 @@ pub(crate) async fn install_bundle_item(
                 .run_plugin_command(
                     settings,
                     instance,
-                    &["add".to_string(), install_target],
+                    &["add".to_string(), install_target.clone()],
                     sink,
                 )
                 .await?;
@@ -1209,7 +1209,13 @@ pub(crate) async fn install_bundle_item(
                 ctx.progress("recording", 65);
             }
             if item.kind == ContentKind::Theme {
-                InstanceManifest::add_skin(&state.paths, id, &key)?;
+                let package = content_adapter::skin_package_name(std::path::Path::new(&install_target))
+                    .unwrap_or_else(|| install_target.clone());
+                InstanceManifest::add_skin_package(&state.paths, id, &key, &package)?;
+                let updated = InstanceManifest::get(&state.paths, id)?;
+                if !content_adapter::skin_has_bundle(&updated, &package) {
+                    content_adapter::sync_skin_patch(&updated, &updated.skin_packages)?;
+                }
             }
             record_install_metadata_with_source(state, id, item, source)?;
         }

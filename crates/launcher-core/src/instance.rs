@@ -88,6 +88,25 @@ impl McpServerRecord {
     }
 }
 
+/// One installed skin (Theme) — a DSH client plugin the launcher classifies as
+/// a skin and registers into `cordis.patch.yml` (the activation step DSH itself
+/// does not perform for `dsh.client`-only packages). `key` is the catalog
+/// identity (`owner/name`); `package` is the real npm package name
+/// (`package.json.name`) that `dsh plugin add` installs and that the patch
+/// `insert` row's `name` field must equal; `enabled` gates whether the skin is
+/// mounted — absent from the patch insert *is* disabled.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SkinPackage {
+    /// Catalog identity (`owner/name`) — the manifest/library key.
+    pub key: String,
+    /// Real npm package name (`package.json.name`), e.g. `dsh-skin-sakura`.
+    pub package: String,
+    /// `false` = compiled out of the patch insert (skin not mounted).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -380,6 +399,12 @@ pub struct InstanceManifest {
     pub mcp: Vec<McpServerRecord>,
     #[serde(default)]
     pub skins: Vec<String>,
+    /// Structured skin records (`key` + `package` + `enabled`) — the source of
+    /// truth for the `cordis.patch.yml` insert registration. `skins` (bare keys)
+    /// stays for Library display matching and legacy compatibility; the two are
+    /// kept in lockstep by [`SkinPackage`]-aware install/remove.
+    #[serde(default)]
+    pub skin_packages: Vec<SkinPackage>,
     /// The instance's isolated `$DSH_HOME` (profiles/config live here).
     pub workspace: String,
 }
@@ -399,6 +424,7 @@ impl InstanceManifest {
             skills: Vec::new(),
             mcp: Vec::new(),
             skins: Vec::new(),
+            skin_packages: Vec::new(),
             workspace: instances_root
                 .join(&id)
                 .join("workspace")
@@ -538,6 +564,57 @@ impl InstanceManifest {
         let mut m = Self::get(paths, id)?;
         m.skins.retain(|s| s != skin);
         m.save(&paths.instance_file(id))?;
+        Ok(m)
+    }
+
+    /// Record an installed skin with its real npm package name (kept in lockstep
+    /// with the bare `skins` key). `package` is `package.json.name`, which
+    /// `dsh plugin add` links into the profile and which the `cordis.patch.yml`
+    /// insert row's `name` field must equal. Re-installing refreshes the package
+    /// name and re-enables.
+    pub fn add_skin_package(
+        paths: &AppPaths,
+        id: &str,
+        key: &str,
+        package: &str,
+    ) -> Result<Self> {
+        let mut m = Self::get(paths, id)?;
+        if !m.skins.iter().any(|s| s == key) {
+            m.skins.push(key.to_string());
+        }
+        match m.skin_packages.iter_mut().find(|p| p.key == key) {
+            Some(existing) => {
+                existing.package = package.to_string();
+                existing.enabled = true;
+            }
+            None => m.skin_packages.push(SkinPackage {
+                key: key.to_string(),
+                package: package.to_string(),
+                enabled: true,
+            }),
+        }
+        m.save(&paths.instance_file(id))?;
+        Ok(m)
+    }
+
+    /// Remove an installed skin record (both the bare `skins` key and the
+    /// structured `skin_packages` entry), then persist.
+    pub fn remove_skin_package(paths: &AppPaths, id: &str, key: &str) -> Result<Self> {
+        let mut m = Self::get(paths, id)?;
+        m.skins.retain(|s| s != key);
+        m.skin_packages.retain(|p| p.key != key);
+        m.save(&paths.instance_file(id))?;
+        Ok(m)
+    }
+
+    /// Flip a skin's `enabled` flag (mount/unmount via `cordis.patch.yml`), then
+    /// persist. No-op when the skin isn't recorded.
+    pub fn set_skin_enabled(paths: &AppPaths, id: &str, key: &str, enabled: bool) -> Result<Self> {
+        let mut m = Self::get(paths, id)?;
+        if let Some(p) = m.skin_packages.iter_mut().find(|p| p.key == key) {
+            p.enabled = enabled;
+            m.save(&paths.instance_file(id))?;
+        }
         Ok(m)
     }
 

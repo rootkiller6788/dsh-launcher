@@ -36,7 +36,7 @@ pub use environment::{EnvironmentManifest, EnvironmentSource, ExportedItem};
 pub use history::{LaunchHistory, LaunchSession};
 pub use instance::{
     load_runtime, save_runtime, InstanceManifest, McpRuntimeState, McpServerRecord, RuntimeRef,
-    SkillRecord, MCP_STATE_DEGRADED, MCP_STATE_ERROR, MCP_STATE_OK, MCP_STATE_UNTESTED,
+    SkillRecord, SkinPackage, MCP_STATE_DEGRADED, MCP_STATE_ERROR, MCP_STATE_OK, MCP_STATE_UNTESTED,
 };
 pub use jobs::{Job, JobKind, JobPlan, JobStatus, JobStore};
 pub use market::{

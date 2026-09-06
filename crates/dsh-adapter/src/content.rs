@@ -17,6 +17,7 @@
 //! [`sync_mcp_patch`]; install/uninstall/disable mutate the record then
 //! regenerate.)
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,6 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use launcher_core::{
     sha256_hex, InstanceManifest, McpEnvRequirement, McpServerRecord, RegistryPlugin, SkillRecord,
+    SkinPackage,
 };
 use serde_yaml::Value as Yaml;
 
@@ -501,6 +503,110 @@ pub fn sync_mcp_patch(instance: &InstanceManifest, records: &[McpServerRecord]) 
     std::fs::write(&patch_path, next).with_context(|| format!("write {}", patch_path.display()))
 }
 
+/// Derive a stable, cordis-safe insert `id` for a skin from its npm package
+/// name: strip any scope (`@scope/`), strip a `dsh-`/`dsh-client-` prefix, and
+/// ensure a `skin-` prefix. `id` is a *free* unique identifier in the cordis
+/// layer — unrelated to any `__ModuleLoader__.load({id})` inside the skin's
+/// `client.js` — so only `[A-Za-z0-9_.-]` and uniqueness matter here.
+pub(crate) fn skin_id_from_package(package: &str) -> String {
+    let base = package.rsplit('/').next().unwrap_or(package);
+    let base = base
+        .strip_prefix("dsh-client-")
+        .or_else(|| base.strip_prefix("dsh-"))
+        .unwrap_or(base);
+    let base = base.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.');
+    if base.starts_with("skin-") || base == "skin" {
+        base.to_string()
+    } else {
+        format!("skin-{base}")
+    }
+}
+
+/// Serialize one skin as an insert row nested under a top-level `- insert:`
+/// block:
+/// ```yaml
+///     - id: skin-sakura
+///       name: dsh-skin-sakura
+/// ```
+/// The `name` must equal the npm package name (`package.json.name`) so DSH's
+/// `require.resolve(name)` locates it; scoped names (`@scope/pkg`) are quoted.
+fn skin_insert_row(package: &str, id: &str) -> String {
+    let name = if package.contains('/') {
+        format!("'{package}'")
+    } else {
+        package.to_string()
+    };
+    format!("    - id: {id}\n      name: {name}\n")
+}
+
+/// Compile the instance's skin packages into its profile `cordis.patch.yml` —
+/// the same single-source-of-truth pattern as [`sync_mcp_patch`], but keyed on
+/// package name (the `name:` field DSH resolves) instead of `@deepseek-ai/dsh-
+/// mcp-client`. `enabled` gates whether a skin's row survives into the insert
+/// block; absent from the insert *is* disabled.
+///
+/// 1. Read the current patch.
+/// 2. Drop every launcher-owned skin insert block (see
+///    [`remove_skin_insert_blocks`](crate::remove_skin_insert_blocks)) — MCP
+///    rows, plugin rows, comments, and user content are left as-is.
+/// 3. The enabled skins become **one** `- insert:` block; none enabled → empty.
+/// 4. Non-empty → append via [`append_block_to_text`]; empty →
+///    [`restore_placeholder`].
+pub fn sync_skin_patch(instance: &InstanceManifest, skins: &[SkinPackage]) -> Result<()> {
+    let patch_path = DshAdapter::profile_dir(instance).join("cordis.patch.yml");
+    let text = std::fs::read_to_string(&patch_path).unwrap_or_default();
+    let stripped = crate::remove_skin_insert_blocks(&text);
+
+    let enabled: Vec<&SkinPackage> = skins.iter().filter(|s| s.enabled).collect();
+    let next = if enabled.is_empty() {
+        crate::restore_placeholder(&stripped)
+    } else {
+        let mut block = String::from("- insert:\n");
+        let mut used: HashSet<String> = HashSet::new();
+        for skin in enabled {
+            let base = skin_id_from_package(&skin.package);
+            let mut id = base.clone();
+            let mut n = 2;
+            while used.contains(&id) {
+                id = format!("{base}-{n}");
+                n += 1;
+            }
+            used.insert(id.clone());
+            block.push_str(&skin_insert_row(&skin.package, &id));
+        }
+        crate::append_block_to_text(&stripped, &block)
+    };
+    std::fs::write(&patch_path, next).with_context(|| format!("write {}", patch_path.display()))
+}
+
+/// Read the npm package name (`package.json.name`) from an install directory.
+/// Returns `None` when the directory has no `package.json` or no `name` — the
+/// signal that this is *not* the real skin package (e.g. a github monorepo root
+/// shell), and the subdirectory fallback should keep looking.
+pub fn skin_package_name(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("package.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value.get("name")?.as_str().map(String::from)
+}
+
+/// Does the installed skin declare `dsh.bundle`? When it does, `dsh plugin add`
+/// has already registered it into the profile bundles, so the launcher must
+/// *not* write an insert row (that would double-mount). Reads the installed
+/// package under the profile's `node_modules`.
+pub fn skin_has_bundle(instance: &InstanceManifest, package: &str) -> bool {
+    let pkg = DshAdapter::profile_dir(instance)
+        .join("node_modules")
+        .join(package)
+        .join("package.json");
+    let Ok(text) = std::fs::read_to_string(pkg) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    value.pointer("/dsh/bundle").is_some()
+}
+
 /// Structured validation of an MCP entry's config, returned as machine-readable
 /// issue codes the frontend maps to localized hints. Install is intentionally
 /// *not* blocked here: a curated catalog legitimately omits `command`/`url` on
@@ -752,6 +858,7 @@ mod tests {
             skills: Vec::new(),
             mcp: Vec::new(),
             skins: Vec::new(),
+            skin_packages: Vec::new(),
             workspace: ws.display().to_string(),
         };
         (instance, ws)
@@ -890,6 +997,117 @@ mod tests {
         assert_eq!(text.lines().filter(|l| l.starts_with("- insert:")).count(), 2, "{text}");
         assert!(text.trim_end().ends_with("env: {}"), "launcher block appended last:\n{text}");
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    fn skin(key: &str, package: &str, enabled: bool) -> SkinPackage {
+        SkinPackage {
+            key: key.into(),
+            package: package.into(),
+            enabled,
+        }
+    }
+
+    #[test]
+    fn skin_id_from_package_derives_stable_slug() {
+        assert_eq!(skin_id_from_package("dsh-skin-sakura"), "skin-sakura");
+        assert_eq!(skin_id_from_package("dsh-client-ui-aqua"), "skin-ui-aqua");
+        assert_eq!(skin_id_from_package("@deepseek-ai/dsh-skin-dark"), "skin-dark");
+        assert_eq!(skin_id_from_package("plain"), "skin-plain");
+        assert_eq!(skin_id_from_package("dsh-skin"), "skin");
+    }
+
+    #[test]
+    fn skin_insert_row_quotes_scoped_names() {
+        assert_eq!(
+            skin_insert_row("dsh-skin-sakura", "skin-sakura"),
+            "    - id: skin-sakura\n      name: dsh-skin-sakura\n"
+        );
+        assert_eq!(
+            skin_insert_row("@scope/pkg", "skin-pkg"),
+            "    - id: skin-pkg\n      name: '@scope/pkg'\n"
+        );
+    }
+
+    #[test]
+    fn sync_skin_patch_compiles_enabled_skins_into_single_block() {
+        let (instance, ws) = test_instance("skin-sync-multi");
+        std::fs::write(patch_path(&instance), "[]\n").unwrap();
+        let skins = vec![
+            skin("owner/sakura", "dsh-skin-sakura", true),
+            skin("owner/dark", "dsh-skin-dark", true),
+        ];
+        sync_skin_patch(&instance, &skins).unwrap();
+        let text = std::fs::read_to_string(patch_path(&instance)).unwrap();
+        assert_eq!(text.lines().filter(|l| l.starts_with("- insert:")).count(), 1, "{text}");
+        assert!(text.contains("skin-sakura"), "{text}");
+        assert!(text.contains("skin-dark"), "{text}");
+        assert!(text.contains("# []"), "{text}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn sync_skin_patch_disable_reenable_and_uninstall() {
+        let (instance, ws) = test_instance("skin-sync-toggle");
+        let sakura = skin("owner/sakura", "dsh-skin-sakura", true);
+        let dark = skin("owner/dark", "dsh-skin-dark", true);
+        let both = |sakura_enabled: bool| vec![
+            SkinPackage {
+                enabled: sakura_enabled,
+                ..sakura.clone()
+            },
+            dark.clone(),
+        ];
+
+        sync_skin_patch(&instance, &both(true)).unwrap();
+
+        sync_skin_patch(&instance, &both(false)).unwrap();
+        let text = std::fs::read_to_string(patch_path(&instance)).unwrap();
+        assert!(!text.contains("skin-sakura"), "{text}");
+        assert!(text.contains("skin-dark"), "{text}");
+        assert_eq!(text.lines().filter(|l| l.starts_with("- insert:")).count(), 1);
+
+        sync_skin_patch(&instance, &both(true)).unwrap();
+        let text = std::fs::read_to_string(patch_path(&instance)).unwrap();
+        assert!(text.contains("skin-sakura"), "{text}");
+
+        sync_skin_patch(&instance, &[]).unwrap();
+        let text = std::fs::read_to_string(patch_path(&instance)).unwrap();
+        assert!(!text.contains("- insert:"), "{text}");
+        assert_eq!(text.trim(), "[]", "placeholder restored, got:\n{text}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn sync_skin_patch_preserves_mcp_and_plugin_rows() {
+        let (instance, ws) = test_instance("skin-sync-preserve");
+        std::fs::write(
+            patch_path(&instance),
+            "# launcher comment\n- insert:\n    - id: mcp-a\n      name: '@deepseek-ai/dsh-mcp-client'\n- id: timer\n  disabled: true\n",
+        )
+        .unwrap();
+        sync_skin_patch(&instance, &[skin("owner/sakura", "dsh-skin-sakura", true)]).unwrap();
+        let text = std::fs::read_to_string(patch_path(&instance)).unwrap();
+        assert!(text.contains("# launcher comment"), "{text}");
+        assert!(text.contains("mcp-a"), "{text}");
+        assert!(text.contains("- id: timer\n  disabled: true"), "{text}");
+        assert!(text.contains("skin-sakura"), "{text}");
+        // MCP block kept; skin block appended → two insert blocks.
+        assert_eq!(text.lines().filter(|l| l.starts_with("- insert:")).count(), 2, "{text}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn skin_package_name_reads_json_name() {
+        let root = std::env::temp_dir().join(format!("ahl-skin-pkg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("package.json"), r#"{"name":"dsh-skin-sakura"}"#).unwrap();
+        assert_eq!(skin_package_name(&root), Some("dsh-skin-sakura".into()));
+
+        let empty = root.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(skin_package_name(&empty), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
