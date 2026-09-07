@@ -5,11 +5,11 @@
 <h1 align="center">DeepSeek Harness Launcher</h1>
 
 <p align="center">
-  <strong>DeepSeek Harness 的 Windows / Ubuntu 原生桌面启动器 —— 运行时安装、实例隔离、模型供应商配置、插件管理、一键启动。</strong>
+  <strong>DeepSeek Harness 的本地运行与生态管理平台 —— 统一管理运行时、实例、模型供应商、Plugins、Skills、MCP 与启动环境。</strong>
 </p>
 
 <p align="center">
-  无需终端、无需 Node.js、无需源码，下载即用。万物皆插件，桌面本身也是插件。
+  无需手动配置运行环境，开箱即用。Desktop Shell 只是其中一种交互方式；运行时、实例与生态内容由 DSHL 统一管理。
 </p>
 
 <p align="center">
