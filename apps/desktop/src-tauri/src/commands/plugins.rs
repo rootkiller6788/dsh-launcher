@@ -10,9 +10,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, State};
 
+use crate::commands::content::land_install_disabled;
 use crate::commands::process::{emit_log, make_sink};
 use crate::error::AppError;
 use crate::jobs::{enqueue_install, run_instance_job, HeavyJobKind, JobCtx};
@@ -288,6 +289,20 @@ pub(crate) fn rebuild_library_inventory_cache_from_disk(
     reason: &str,
 ) -> Result<(), AppError> {
     let instance = InstanceManifest::get(&state.paths, id)?;
+    // Quarantine a leftover client bundle with no built entry BEFORE the disk
+    // scan derives enabled state — an interrupted install's source-only bundle
+    // (`dsh plugin add` linked it, then the job died before the install gate /
+    // `land_install_disabled`) would otherwise read back as enabled and shadow
+    // the real state. Disabling its loader rows keeps the next boot safe; the
+    // user removes the package from Library to uninstall it.
+    for pkg in content_adapter::quarantine_unloadable_client_bundles(&instance) {
+        emit_log(
+            app,
+            &format!(
+                "{id} · quarantined {pkg}: no built client entry — remove it in Library to uninstall"
+            ),
+        );
+    }
     let cached = read_library_inventory_cache(state, id);
     let profile = DshAdapter::installed_plugins(&instance);
     // Drop stale profile-sourced entries first: `merge_plugin_sources` only
@@ -866,6 +881,23 @@ fn github_root_package_name(entry: &RegistryPlugin) -> Option<String> {
     }
 }
 
+/// GitHub plugin cache clones get their own budget, not `GIT_TIMEOUT`'s 180 s:
+/// a multi-MB skin repo (e.g. 26 MB) at github's ~40 KB/s throttle to a China
+/// link outruns 180 s every time and would be killed mid-transfer (the
+/// dsh-rhodes-angelina stall). A genuinely stalled transfer still fails cleanly
+/// at this bound with Retry available — plugins/skins github fetch only; skills
+/// and MCP keep their own shorter timeouts.
+const GITHUB_CACHE_TIMEOUT: Duration = Duration::from_secs(900);
+
+/// Reverse-proxy prefix for GitHub fetches when the Install Center mirror
+/// toggle (`settings.github_mirror`) is on. gh-proxy relays git smart-HTTP, so
+/// switching is purely a URL rewrite — depth, checkout, and the broken-cache
+/// handling below are identical either way. Default off: the repo bytes only
+/// pass through this third party when the user explicitly flips the toggle,
+/// which is the fix for multi-MB skin repos that cannot complete a direct clone
+/// on a throttled China→github link even at `GITHUB_CACHE_TIMEOUT`.
+const GITHUB_MIRROR_BASE: &str = "https://gh-proxy.com/";
+
 async fn run_git(args: &[String], cwd: Option<&Path>) -> Result<(), AppError> {
     // Collect streamed lines so a non-zero exit can surface the real git error
     // detail, as before. The shared timed runner enforces GIT_TIMEOUT and kills
@@ -886,7 +918,7 @@ async fn run_git(args: &[String], cwd: Option<&Path>) -> Result<(), AppError> {
         cwd.unwrap_or(Path::new(".")),
         &[],
         collector,
-        dsh_adapter::GIT_TIMEOUT,
+        GITHUB_CACHE_TIMEOUT,
     )
     .await
     .map_err(|e| {
@@ -943,64 +975,159 @@ fn find_skin_subdir(dir: &Path) -> Option<PathBuf> {
     hits.into_iter().next()
 }
 
+/// True when `cache_dir/.git` exists but the clone never finished: a stale
+/// `shallow.lock` or an in-flight `objects/pack/tmp_pack_*` means a shallow
+/// fetch/clone was interrupted, and an empty working tree (no files beside
+/// `.git`) means the checkout never completed. Fetching into such a dir only
+/// re-fails on the same half-written pack — the caller must wipe it and start a
+/// fresh shallow clone.
+fn clone_cache_broken(cache_dir: &Path) -> bool {
+    let git = cache_dir.join(".git");
+    if !git.is_dir() {
+        return false;
+    }
+    if git.join("shallow.lock").exists() {
+        return true;
+    }
+    let pack = git.join("objects").join("pack");
+    if let Ok(entries) = std::fs::read_dir(&pack) {
+        if entries
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with("tmp_pack_"))
+        {
+            return true;
+        }
+    }
+    // Any entry at the repo root other than `.git` means a tree was checked out.
+    let mut checked_out = false;
+    if let Ok(entries) = std::fs::read_dir(cache_dir) {
+        for e in entries.flatten() {
+            if e.file_name() != ".git" {
+                checked_out = true;
+                break;
+            }
+        }
+    }
+    !checked_out
+}
+
+/// The git URL a `github:` plugin spec clones/fetches from. Mirror ON rewrites
+/// the upstream URL through the gh-proxy relay (see `GITHUB_MIRROR_BASE`); OFF
+/// is the plain upstream. Transport only — every downstream step (shallow
+/// clone, checkout, broken-cache wipe) is shared.
+fn github_remote_url(owner: &str, repo: &str, mirror: bool) -> String {
+    let direct = format!("https://github.com/{owner}/{repo}.git");
+    if mirror {
+        format!("{GITHUB_MIRROR_BASE}{direct}")
+    } else {
+        direct
+    }
+}
+
 pub(crate) async fn resolve_plugin_install_target(
     state: &AppState,
     app: &AppHandle,
     id: &str,
     target: &str,
     entry: Option<&RegistryPlugin>,
-) -> String {
+) -> Result<String, AppError> {
     let Some(spec) = parse_github_plugin_spec(target) else {
-        return target.to_string();
+        // Not a `github:`-prefixed spec — an npm package name or a local path.
+        return Ok(target.to_string());
     };
 
     let cache_dir = github_plugin_cache_dir(&state.paths.cache, &spec);
-    let url = format!("https://github.com/{}/{}.git", spec.owner, spec.repo);
+    // `github_mirror` (Install Center toggle, default off) routes the fetch
+    // through gh-proxy instead of hitting github.com directly — the escape
+    // hatch for multi-MB skin repos that time out even at `GITHUB_CACHE_TIMEOUT`.
+    // Read live on each resolve so a mid-run toggle takes effect on the next
+    // op; a poisoned settings lock degrades to direct (the safe default).
+    let mirror = state
+        .settings
+        .lock()
+        .map(|s| s.github_mirror)
+        .unwrap_or(false);
+    let transport = if mirror { " (via gh-proxy)" } else { "" };
+    let url = github_remote_url(&spec.owner, &spec.repo, mirror);
     let display = spec
         .reference
         .as_ref()
         .map(|r| format!("{}/{}#{r}", spec.owner, spec.repo))
         .unwrap_or_else(|| format!("{}/{}", spec.owner, spec.repo));
 
-    let result = if cache_dir.join(".git").exists() {
+    let broken = clone_cache_broken(&cache_dir);
+    let result = if cache_dir.join(".git").exists() && !broken {
         emit_log(
             app,
-            &format!("{id} · updating cached GitHub plugin {display}…"),
+            &format!(
+                "{id} · updating cached GitHub plugin {display}…{transport}"
+            ),
         );
-        let fetch_ref = spec.reference.clone().unwrap_or_else(|| "HEAD".to_string());
-        let fetch = run_git(
+        // Repoint `origin` at the transport the current mirror toggle picks so
+        // flipping it applies to updates of an existing clone, not just fresh
+        // clones. A no-op when the setting is unchanged.
+        let set_url = run_git(
             &[
                 "-C".to_string(),
                 cache_dir.to_string_lossy().to_string(),
-                "fetch".to_string(),
-                "--depth".to_string(),
-                "1".to_string(),
+                "remote".to_string(),
+                "set-url".to_string(),
                 "origin".to_string(),
-                fetch_ref,
+                url.clone(),
             ],
             None,
         )
         .await;
-        match fetch {
+        match set_url {
             Ok(()) => {
-                run_git(
+                let fetch_ref =
+                    spec.reference.clone().unwrap_or_else(|| "HEAD".to_string());
+                let fetch = run_git(
                     &[
                         "-C".to_string(),
                         cache_dir.to_string_lossy().to_string(),
-                        "checkout".to_string(),
-                        "--force".to_string(),
-                        "FETCH_HEAD".to_string(),
+                        "fetch".to_string(),
+                        "--depth".to_string(),
+                        "1".to_string(),
+                        "origin".to_string(),
+                        fetch_ref,
                     ],
                     None,
                 )
-                .await
+                .await;
+                match fetch {
+                    Ok(()) => {
+                        run_git(
+                            &[
+                                "-C".to_string(),
+                                cache_dir.to_string_lossy().to_string(),
+                                "checkout".to_string(),
+                                "--force".to_string(),
+                                "FETCH_HEAD".to_string(),
+                            ],
+                            None,
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                }
             }
             Err(e) => Err(e),
         }
     } else {
+        if broken {
+            emit_log(
+                app,
+                &format!(
+                    "{id} · cached clone for GitHub plugin {display} is incomplete (interrupted fetch) — re-cloning from scratch"
+                ),
+            );
+        }
         emit_log(
             app,
-            &format!("{id} · shallow cloning GitHub plugin {display}…"),
+            &format!(
+                "{id} · shallow cloning GitHub plugin {display}…{transport}"
+            ),
         );
         let _ = std::fs::create_dir_all(
             cache_dir
@@ -1039,14 +1166,9 @@ pub(crate) async fn resolve_plugin_install_target(
                 );
                 subdir
             } else {
-                emit_log(
-                    app,
-                    &format!(
-                        "{id} · local GitHub target is not an installable package: {}",
-                        install_dir.display()
-                    ),
-                );
-                return target.to_string();
+                return Err(AppError::msg(format!(
+                    "local GitHub clone {display} is not an installable package (no root package.json or dsh client subdir) — check the catalog source and Retry"
+                )));
             };
             emit_log(
                 app,
@@ -1055,14 +1177,20 @@ pub(crate) async fn resolve_plugin_install_target(
                     install_dir.display()
                 ),
             );
-            install_dir.to_string_lossy().to_string()
+            Ok(install_dir.to_string_lossy().to_string())
         }
         Err(e) => {
+            // A `github:` spec only resolves over git; routing the same spec back
+            // to `dsh plugin add` would make pnpm re-fetch the very source that
+            // just failed (the old "fall back to pnpm" dead end). Surface the
+            // cause instead and let the row's Retry run a clean clone.
             emit_log(
                 app,
-                &format!("{id} · GitHub plugin cache unavailable for {target}: {e}; falling back to pnpm"),
+                &format!("{id} · GitHub plugin cache failed for {target}: {e}"),
             );
-            target.to_string()
+            Err(AppError::msg(format!(
+                "could not fetch GitHub source {display}: {e} (check the repo and your network, then Retry)"
+            )))
         }
     }
 }
@@ -1216,7 +1344,7 @@ pub(crate) async fn plugin_install_job(
             }
         }
     }
-    let install_target = resolve_plugin_install_target(state, app, id, target, entry).await;
+    let install_target = resolve_plugin_install_target(state, app, id, target, entry).await?;
     ctx.progress("dsh-install", 40);
     let code = state
         .adapter
@@ -1233,31 +1361,71 @@ pub(crate) async fn plugin_install_job(
             "dsh plugin add exited with code {code} — the package name/version may be wrong or the npm registry unreachable. Check the spec and your network, then Retry (pnpm detail in Activity logs)"
         )));
     }
-    ctx.progress("recording", 65);
-    if entry.is_some_and(|entry| entry.kind == ContentKind::Theme) {
-        if let Some(entry) = entry {
-            let key = if entry.owner.trim().is_empty() {
-                entry.name.clone()
-            } else {
-                format!("{}/{}", entry.owner, entry.name)
-            };
-            // The real npm package name comes from the installed target's own
-            // `package.json.name` (a github subdir), or the bare npm spec when
-            // the target was a registry package.
-            let package = content_adapter::skin_package_name(Path::new(&install_target))
-                .unwrap_or_else(|| install_target.clone());
-            InstanceManifest::add_skin_package(&state.paths, id, &key, &package)?;
-            // Mount the skin by writing its insert row. A package that declares
-            // `dsh.bundle` was already auto-registered by `dsh plugin add`, so
-            // it must not get a duplicate insert row.
-            let updated = InstanceManifest::get(&state.paths, id)?;
-            if !content_adapter::skin_has_bundle(&updated, &package) {
-                content_adapter::sync_skin_patch(&updated, &updated.skin_packages)?;
-            }
+    // Post-install loadability gate — mirror of the one in
+    // `install_bundle_item` (ported from dsh-market's validateAddedPlugins):
+    // `dsh plugin add` exits 0 even for a source-only GitHub checkout, so a
+    // package with no built entry would be recorded and kill the NEXT boot with
+    // ERR_MODULE_NOT_FOUND (the tp7 skin family). This raw `plugin_install`
+    // path must not be the hole the Market flow's gate already plugs: if the
+    // just-added package is not a bundle and ships no loadable entry artifact,
+    // remove it now and fail the install — never leave it for boot.
+    if let Some(pkg) = content_adapter::skin_package_name(Path::new(&install_target)) {
+        if !content_adapter::installed_skin_loadable(&instance, &pkg) {
+            emit_log(
+                app,
+                &format!(
+                    "{id} · plugin {pkg} installed but has no loadable entry — removing to protect the next boot"
+                ),
+            );
+            let _ = state
+                .adapter
+                .run_plugin_command(
+                    &settings,
+                    &instance,
+                    &["remove".to_string(), pkg.clone()],
+                    ctx.sink(),
+                )
+                .await;
+            // `dsh plugin remove` drops the manifest entry but on Windows pnpm
+            // leaves the top-level node_modules dir behind (observed with tp7).
+            // Prune it ourselves — `std::fs::remove_dir_all` never follows
+            // reparse points, so a junction to the source cache is removed as a
+            // link, target untouched.
+            let installed_dir = DshAdapter::profile_dir(&instance)
+                .join("node_modules")
+                .join(&pkg);
+            let _ = std::fs::remove_dir_all(&installed_dir);
+            ctx.set_exit_code(1);
+            return Err(AppError::msg(format!(
+                "installed but not loadable: {pkg} ships no built entry (a source-only checkout) — it was removed; install a published build instead"
+            )));
         }
     }
+    ctx.progress("recording", 65);
     if let Some(entry) = entry {
+        let key = if entry.owner.trim().is_empty() {
+            entry.name.clone()
+        } else {
+            format!("{}/{}", entry.owner, entry.name)
+        };
+        // The real npm package name comes from the installed target's own
+        // `package.json.name` (a github subdir), or the bare npm spec when the
+        // target was a registry package.
+        let package = content_adapter::skin_package_name(Path::new(&install_target))
+            .unwrap_or_else(|| install_target.clone());
+        // New plugin/skin installs land DISABLED — record (skins) + patch state,
+        // but never auto-mount; enabling is an explicit later toggle.
+        if entry.kind == ContentKind::Theme || entry.kind == ContentKind::Plugin {
+            land_install_disabled(state, id, &key, &package, entry.kind)?;
+        }
         record_market_install_metadata(state, id, entry)?;
+    } else {
+        // A raw target install (no registry entry) has no instance record; a
+        // bundle still auto-registers into the profile bundles and would load,
+        // so land it disabled too.
+        if let Some(package) = content_adapter::skin_package_name(Path::new(&install_target)) {
+            land_install_disabled(state, id, &package, &package, ContentKind::Plugin)?;
+        }
     }
     emit_log(app, &format!("{id} · installed {target}"));
     ctx.progress("inventory-sync", 88);
@@ -1348,6 +1516,23 @@ pub async fn plugin_toggle(
         || async {
             ensure_not_running(&state, &id).await?;
             let instance = InstanceManifest::get(&state.paths, &id)?;
+            // Enabling must not re-arm a quarantined brick: a client bundle
+            // (`dsh.bundle` + `dsh.client`) whose built entry is missing will
+            // crash the next boot the moment its loader row mounts. Refuse with
+            // the same guidance the install gate gives — remove, don't re-enable.
+            if enabled {
+                let nm = DshAdapter::profile_dir(&instance)
+                    .join("node_modules")
+                    .join(&name);
+                if content_adapter::skin_has_bundle(&instance, &name)
+                    && content_adapter::package_mounts_client(&nm)
+                    && !content_adapter::entry_artifact_exists(&nm)
+                {
+                    return Err(AppError::msg(format!(
+                        "can't enable {name}: it ships no built client entry (a source-only checkout). Remove it from Library instead"
+                    )));
+                }
+            }
             // Skins toggle through the patch layer, but which rows depends on how
             // the skin mounts. A `dsh.bundle` skin is a profile bundle and turns
             // off via `disabled:` rows on its own entries, exactly like any other
@@ -1647,6 +1832,83 @@ mod tests {
         assert!(
             skin_inventory_plugin("zhijun-dai/Catppuccin-dsh-theme", &[], &inventory).is_none(),
             "name heuristic must NOT link zhijun-dai/Catppuccin-dsh-theme to dsh-catppuccin"
+        );
+    }
+
+    #[test]
+    fn clone_cache_broken_detects_partial_clones() {
+        // Build a cache dir shaped like a github-plugins cache entry.
+        fn make(git: bool) -> std::path::PathBuf {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!("ahl-clone-broken-{nanos}"));
+            let _ = fs::create_dir_all(&dir);
+            if git {
+                let _ = fs::create_dir_all(dir.join(".git").join("objects").join("pack"));
+            }
+            dir
+        }
+
+        // No `.git` → not "broken"; the caller simply runs a fresh clone.
+        let empty = make(false);
+        assert!(!clone_cache_broken(&empty));
+
+        // Completed clone: `.git` plus a checked-out root file.
+        let healthy = make(true);
+        fs::write(healthy.join("package.json"), "{}").unwrap();
+        assert!(!clone_cache_broken(&healthy));
+
+        // `.git` but an empty working tree → checkout never finished.
+        let no_tree = make(true);
+        assert!(clone_cache_broken(&no_tree));
+
+        // Stale shallow-fetch lock (the Angelina-dsh-plugin stall signature).
+        let lock = make(true);
+        fs::write(lock.join(".git").join("shallow.lock"), "lock").unwrap();
+        fs::write(lock.join("package.json"), "{}").unwrap();
+        assert!(clone_cache_broken(&lock));
+
+        // In-flight pack left over from an interrupted transfer.
+        let pack = make(true);
+        fs::write(
+            pack.join(".git").join("objects").join("pack").join("tmp_pack_xjAdEM"),
+            "partial",
+        )
+        .unwrap();
+        fs::write(pack.join("package.json"), "{}").unwrap();
+        assert!(clone_cache_broken(&pack));
+
+        // A normal pack file (no `tmp_pack_` prefix) with a checkout is healthy.
+        let real = make(true);
+        fs::write(
+            real.join(".git").join("objects").join("pack").join("real.pack"),
+            "x",
+        )
+        .unwrap();
+        fs::write(real.join("package.json"), "{}").unwrap();
+        assert!(!clone_cache_broken(&real));
+
+        // Best-effort cleanup of the scratch dirs.
+        for p in [empty, healthy, no_tree, lock, pack, real] {
+            let _ = fs::remove_dir_all(&p);
+        }
+    }
+
+    #[test]
+    fn github_remote_url_prefixes_mirror_only_when_enabled() {
+        // Default (off) is the plain upstream URL — the launcher never routes
+        // through a third party unless the Install Center toggle is on.
+        assert_eq!(
+            github_remote_url("FlowerWater1019", "Angelina-dsh-plugin", false),
+            "https://github.com/FlowerWater1019/Angelina-dsh-plugin.git"
+        );
+        // Mirror ON rewrites through the gh-proxy relay; transport is the only
+        // difference, so `.git` and the repo coordinates survive verbatim.
+        assert_eq!(
+            github_remote_url("FlowerWater1019", "Angelina-dsh-plugin", true),
+            "https://gh-proxy.com/https://github.com/FlowerWater1019/Angelina-dsh-plugin.git"
         );
     }
 }

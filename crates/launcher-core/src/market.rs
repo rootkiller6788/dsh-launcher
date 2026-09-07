@@ -253,7 +253,10 @@ impl RegistryPlugin {
         self.github_spec().unwrap_or_default()
     }
 
-    fn github_spec(&self) -> Option<String> {
+    /// The `github:owner/repo` install spec derived from the record's URL, if
+    /// it is a github.com link. Public so install paths can fall back to the
+    /// GitHub source when a catalog `npm` name turns out to be unpublished.
+    pub fn github_spec(&self) -> Option<String> {
         let rest = self
             .url
             .trim()

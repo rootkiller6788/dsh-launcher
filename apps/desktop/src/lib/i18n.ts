@@ -30,6 +30,10 @@ const en: Dict = {
   'installCenter.cancel': 'Cancel',
   'installCenter.clear': 'Clear',
   'installCenter.clearFinished': 'Clear finished',
+  'installCenter.mirrorOff': 'Direct',
+  'installCenter.mirrorOn': 'Mirror',
+  'installCenter.mirrorHint':
+    'GitHub mirror (gh-proxy) for plugin/skin fetches. On: big repos are cloned via the gh-proxy relay — use when direct clones time out on a slow China→github link; the repo bytes then pass through a third party. Off: always the plain upstream URL.',
   'installCenter.stage.download': 'Downloading',
   'installCenter.stage.clone': 'Cloning repo',
   'installCenter.stage.build': 'Building',
@@ -533,6 +537,10 @@ const zh: Dict = {
   'installCenter.cancel': '取消',
   'installCenter.clear': '清除',
   'installCenter.clearFinished': '清空已完成',
+  'installCenter.mirrorOff': '直连',
+  'installCenter.mirrorOn': '镜像',
+  'installCenter.mirrorHint':
+    '插件/皮肤的 GitHub 镜像(gh-proxy)。开启:大仓库改由 gh-proxy 中转克隆,直连大仓库超时(国内→github 限速)时使用;注意仓库数据会经由第三方。关闭(默认):始终直连官方地址。',
   'installCenter.stage.download': '下载',
   'installCenter.stage.clone': '克隆仓库',
   'installCenter.stage.build': '构建',

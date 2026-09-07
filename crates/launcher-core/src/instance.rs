@@ -570,8 +570,12 @@ impl InstanceManifest {
     /// Record an installed skin with its real npm package name (kept in lockstep
     /// with the bare `skins` key). `package` is `package.json.name`, which
     /// `dsh plugin add` links into the profile and which the `cordis.patch.yml`
-    /// insert row's `name` field must equal. Re-installing refreshes the package
-    /// name and re-enables.
+    /// insert row's `name` field must equal.
+    ///
+    /// A new install lands **disabled** — mounting is an explicit opt-in via the
+    /// launcher's enable toggle (install ≠ enable). Re-installing refreshes the
+    /// package name but preserves the previous `enabled` choice rather than
+    /// re-enabling behind the user's back.
     pub fn add_skin_package(
         paths: &AppPaths,
         id: &str,
@@ -585,12 +589,11 @@ impl InstanceManifest {
         match m.skin_packages.iter_mut().find(|p| p.key == key) {
             Some(existing) => {
                 existing.package = package.to_string();
-                existing.enabled = true;
             }
             None => m.skin_packages.push(SkinPackage {
                 key: key.to_string(),
                 package: package.to_string(),
-                enabled: true,
+                enabled: false,
             }),
         }
         m.save(&paths.instance_file(id))?;

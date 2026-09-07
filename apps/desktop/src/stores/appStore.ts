@@ -143,6 +143,8 @@ interface AppStore {
   switchInstance: (id: string) => Promise<boolean>
   saveProvider: (profile: ProviderProfile, apiKey: string | null) => Promise<boolean>
   saveSettings: (s: AppSettings) => Promise<boolean>
+  /** Flip the plugin/skin GitHub mirror toggle (Install Center); persists the full settings doc. */
+  setGithubMirror: (githubMirror: boolean) => Promise<boolean>
   setLanguage: (lang: Lang) => Promise<boolean>
   setTheme: (t: Theme) => void
   syncTheme: () => Promise<void>
@@ -649,6 +651,22 @@ export const useAppStore = create<AppStore>((set, get) => ({
       return false
     } finally {
       set({ busy: false })
+    }
+  },
+
+  setGithubMirror: async (githubMirror) => {
+    const current = get().settings
+    if (!current) return false
+    // Optimistic flip for an instant UI response; the full settings doc is
+    // what `set_settings` persists (it replaces wholesale, not per-field).
+    const next = { ...current, githubMirror }
+    set({ settings: next })
+    try {
+      set({ settings: await ipc.setSettings(next) })
+      return true
+    } catch (e) {
+      set({ settings: current, error: String(e) })
+      return false
     }
   },
 

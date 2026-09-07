@@ -271,7 +271,29 @@ async fn kick_drainer(app: &AppHandle, instance_id: &str) {
 
 /// Boot-time recovery: after an app restart, drain any instance that still had
 /// `waiting` rows when we exited.
+///
+/// Any `running` row found here is an orphan by construction — drainers never
+/// survive a process exit, so no live worker can be finishing it. Reclaim those
+/// as `failed` first (they would otherwise spin at `running` forever in the
+/// Install Center; `waiting` is the only truly resumable state), then drain the
+/// leftover `waiting` rows per instance.
 pub(crate) async fn resume_pending_jobs(app: &AppHandle) {
+    match app.state::<AppState>().jobs.interrupt_stale_running(0) {
+        Ok(reclaimed) => {
+            for job in &reclaimed {
+                emit_job(app, job);
+            }
+            if !reclaimed.is_empty() {
+                tracing::warn!(
+                    target: "install",
+                    "reclaimed {} orphaned running job(s) left by the previous process",
+                    reclaimed.len()
+                );
+            }
+        }
+        Err(e) => tracing::warn!(target: "install", "reclaim orphaned running jobs at boot: {e}"),
+    }
+
     let instance_ids = match app.state::<AppState>().jobs.waiting_instance_ids() {
         Ok(ids) => ids,
         Err(e) => {

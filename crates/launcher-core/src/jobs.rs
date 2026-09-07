@@ -486,6 +486,51 @@ impl JobStore {
         Self::get_conn(&conn, id).map(|j| j.expect("job row just updated"))
     }
 
+    /// Reclaim `running` rows whose worker is gone: a `running` row that began
+    /// more than `max_age_secs` ago (or never stamped a start) can no longer
+    /// have a live executor — the drainer that claimed it either died mid-run
+    /// or belonged to a previous app process closed while it was installing.
+    /// Flip it to `failed` with the worker-lost reason so the Install Center
+    /// shows Retry instead of a `running` row that never resolves. The caller
+    /// emits a `job-updated` per returned row. Boot recovery passes `0` — right
+    /// after a restart every `running` row is an orphan, since no drainer
+    /// survives a process exit; a sweep while the app is live would pass a
+    /// bound larger than any single install can legitimately take.
+    pub fn interrupt_stale_running(&self, max_age_secs: u64) -> Result<Vec<Job>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("jobs lock poisoned"))?;
+        let oldest_live = now_secs().saturating_sub(max_age_secs);
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM install_jobs
+                 WHERE status = 'running'
+                   AND (started_at IS NULL OR started_at <= ?1)",
+            )
+            .map_err(|e| anyhow!("prepare stale running: {e}"))?;
+        let ids: Vec<i64> = stmt
+            .query_map(rusqlite::params![oldest_live], |r| r.get(0))
+            .map_err(|e| anyhow!("query stale running: {e}"))?
+            .filter_map(Result::ok)
+            .collect();
+        let msg = "interrupted — the launcher exited or the worker was lost mid-run; retry";
+        let mut out = Vec::new();
+        for id in ids {
+            conn.execute(
+                "UPDATE install_jobs
+                 SET status = 'failed', error = ?2, finished_at = ?3
+                 WHERE id = ?1",
+                rusqlite::params![id, msg, now_secs()],
+            )
+            .map_err(|e| anyhow!("interrupt job {id}: {e}"))?;
+            if let Some(job) = Self::get_conn(&conn, id)? {
+                out.push(job);
+            }
+        }
+        Ok(out)
+    }
+
     /// Cancel a job that has not started yet. Running jobs are not force-killed
     /// (external git/pnpm processes), so this only ever flips `waiting`.
     pub fn cancel_if_waiting(&self, id: i64) -> Result<Option<Job>> {
@@ -691,5 +736,62 @@ mod tests {
         store.mark_running(first.id, "install").expect("run");
         let none = store.cancel_if_waiting(first.id).expect("try cancel");
         assert!(none.is_none() || none.unwrap().status == JobStatus::Running);
+    }
+
+    #[test]
+    fn interrupt_stale_running_reclaims_orphans_only() {
+        let (_dir, store) = tmp_db();
+        let plan = JobPlan::Skill {
+            entry: RegistryPlugin {
+                name: "a".into(),
+                ..Default::default()
+            },
+        };
+
+        // A just-claimed running row is younger than the live-app sweep bound.
+        let fresh = store.create("i", "x/fresh", "x/fresh", &plan).expect("create");
+        store.mark_running(fresh.id, "clone").expect("run");
+        assert!(store
+            .interrupt_stale_running(1_000_000)
+            .expect("sweep")
+            .is_empty());
+        assert_eq!(
+            store.get(fresh.id).expect("get").unwrap().status,
+            JobStatus::Running
+        );
+
+        // Boot reclaim (age 0) treats every running row as an orphan — this
+        // includes the fresh one above, since no drainer survives a restart.
+        let orphan = store.create("i", "x/orphan", "x/orphan", &plan).expect("create");
+        store.mark_running(orphan.id, "clone").expect("run");
+        let reclaimed = store.interrupt_stale_running(0).expect("reclaim");
+        assert_eq!(reclaimed.len(), 2);
+        let ids: std::collections::HashSet<i64> =
+            reclaimed.iter().map(|j| j.id).collect();
+        assert!(ids.contains(&fresh.id) && ids.contains(&orphan.id));
+        for id in [fresh.id, orphan.id] {
+            let after = store.get(id).expect("get").unwrap();
+            assert_eq!(after.status, JobStatus::Failed);
+            assert!(after
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("interrupted"));
+            assert!(after.finished_at.is_some());
+        }
+
+        // Waiting and terminal rows are never touched.
+        let waiting = store.create("i", "x/wait", "x/wait", &plan).expect("create");
+        let done = store.create("i", "x/done", "x/done", &plan).expect("create");
+        store.mark_done(done.id).expect("done");
+        assert!(store.interrupt_stale_running(0).expect("sweep").is_empty());
+        assert_eq!(
+            store.get(waiting.id).expect("get").unwrap().status,
+            JobStatus::Waiting
+        );
+        assert_eq!(
+            store.get(done.id).expect("get").unwrap().status,
+            JobStatus::Done
+        );
     }
 }

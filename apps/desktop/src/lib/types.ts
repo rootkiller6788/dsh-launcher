@@ -264,6 +264,8 @@ export interface AppSettings {
   telemetryEnabled?: boolean
   /** User-owned crash-ingest URL. Sending also requires `telemetryEnabled`. */
   telemetryEndpoint?: string | null
+  /** Plugin/skin GitHub fetches route through the gh-proxy relay (Install Center toggle, default off). */
+  githubMirror?: boolean
 }
 
 /** A managed Node runtime, as the Settings → Runtime panel reports it. */

@@ -222,6 +222,21 @@ async fn do_launch(
         );
     }
 
+    // Pre-spawn quarantine: a leftover profile bundle that mounts a web client
+    // but whose built entry is missing (an interrupted `dsh plugin add` that
+    // never reached the install-time gate) would brick THIS boot with
+    // ERR_MODULE_NOT_FOUND — DSH dies before the post-launch reconcile (which
+    // only runs once DSH is up) can act. Disable its loader rows now; the
+    // launch proceeds with the package off and the user removes it in Library.
+    for pkg in dsh_adapter::content::quarantine_unloadable_client_bundles(&instance) {
+        emit_warn(
+            app,
+            &format!(
+                "{id} · quarantined {pkg}: no built client entry — remove it in Library to uninstall"
+            ),
+        );
+    }
+
     let spawn_start = Instant::now();
     let handle = match state
         .adapter

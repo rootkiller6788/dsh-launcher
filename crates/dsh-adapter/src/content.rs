@@ -621,6 +621,133 @@ pub fn skin_has_bundle(instance: &InstanceManifest, package: &str) -> bool {
     value.pointer("/dsh/bundle").is_some()
 }
 
+/// Does the installed package mount a web-app JS client (`dsh.client`)? A
+/// client bundle's own patch inserts a loader row that names the package, so at
+/// boot the loader imports the package entry — a source-only GitHub checkout
+/// (no built artifact) of such a bundle bricks the whole profile on the very
+/// next boot. Resource-only bundles (assets/config, no `dsh.client`) never need
+/// a built entry and stay exempt.
+pub fn package_mounts_client(dir: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join("package.json")) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    value.pointer("/dsh/client").is_some()
+}
+
+/// Does the package's declared entry artifact actually exist on disk? A github
+/// source checkout of a build-required skin ships no `lib/` — ported from
+/// dsh-market's `entryArtifactExists` (profile.ts). `dsh plugin add` exits 0
+/// for such a checkout (it only links the source directory), so without this
+/// check the insert row gets written and the next boot dies with
+/// `ERR_MODULE_NOT_FOUND`. Collects `main`, then `exports["."]` (string or its
+/// object's string values), falling back to `index.js` when none are declared.
+pub fn entry_artifact_exists(dir: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join("package.json")) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(main) = value.get("main").and_then(|v| v.as_str()) {
+        candidates.push(main.to_string());
+    }
+    match value.get("exports") {
+        Some(serde_json::Value::String(s)) => candidates.push(s.clone()),
+        Some(obj) => {
+            if let Some(root) = obj.get(".") {
+                match root {
+                    serde_json::Value::String(s) => candidates.push(s.clone()),
+                    serde_json::Value::Object(map) => {
+                        for v in map.values() {
+                            if let Some(s) = v.as_str() {
+                                candidates.push(s.to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    if candidates.is_empty() {
+        candidates.push("index.js".to_string());
+    }
+    candidates.iter().any(|rel| dir.join(rel).is_file())
+}
+
+/// Is an installed skin safe to leave enabled for the next boot? A *non-bundle*
+/// skin is mounted by an insert row, so the loader must be able to resolve its
+/// entry — without a built artifact it would brick the whole profile. A
+/// *bundle* skin is auto-registered into the profile bundles by `dsh plugin
+/// add`, so it is safe only when it is resource-only (assets/config, no
+/// `dsh.client`); a bundle that mounts a web-app client inserts a loader row
+/// that imports the package, so it needs its own built entry too. A source-only
+/// checkout of such a bundle is the Angelina disease: `dsh plugin add` exits 0
+/// and the next boot dies `ERR_MODULE_NOT_FOUND`.
+pub fn installed_skin_loadable(instance: &InstanceManifest, package: &str) -> bool {
+    let nm = DshAdapter::profile_dir(instance)
+        .join("node_modules")
+        .join(package);
+    if skin_has_bundle(instance, package) && !package_mounts_client(&nm) {
+        return true;
+    }
+    entry_artifact_exists(&nm)
+}
+
+/// Pre-boot quarantine for a leftover brick: a package sitting in
+/// `dsh.profile.bundles` that mounts a web-app client (`dsh.client`) but whose
+/// built entry is missing. That is the signature of an *interrupted* install —
+/// `dsh plugin add` linked a source-only checkout and the job died before the
+/// install-time gate (or `land_install_disabled`) could run. DSH would die
+/// `ERR_MODULE_NOT_FOUND` importing it on the very next boot, and the
+/// post-launch reconcile is too late to protect that boot. Disabling its loader
+/// rows — exactly what `plugin_toggle(false)` does — makes the boot safe.
+/// Returns the package names quarantined so the caller can tell the user to
+/// remove them from Library.
+///
+/// Best-effort: a package we cannot disable (no disableable row, or a write
+/// failure) is skipped rather than propagated — the quarantine must never wedge
+/// the launch that invoked it.
+pub fn quarantine_unloadable_client_bundles(instance: &InstanceManifest) -> Vec<String> {
+    let profile_dir = DshAdapter::profile_dir(instance);
+    let Ok(text) = std::fs::read_to_string(profile_dir.join("package.json")) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(bundles) = value
+        .pointer("/dsh/profile/bundles")
+        .and_then(|b| b.as_array())
+    else {
+        return Vec::new();
+    };
+    let mut quarantined = Vec::new();
+    for bundle in bundles {
+        let Some(name) = bundle.as_str() else {
+            continue;
+        };
+        let nm = profile_dir.join("node_modules").join(name);
+        if !skin_has_bundle(instance, name) || !package_mounts_client(&nm) {
+            continue; // resource-only bundle or non-bundle — nothing auto-imports the package
+        }
+        if entry_artifact_exists(&nm) {
+            continue; // built entry present → loads fine, nothing to quarantine
+        }
+        let ids = DshAdapter::plugin_row_ids(instance, name);
+        if ids.is_empty() || DshAdapter::set_plugin_enabled(instance, name, false).is_err() {
+            continue; // no disableable row, or the write failed — skip, don't propagate
+        }
+        quarantined.push(name.to_string());
+    }
+    quarantined
+}
+
 /// Structured validation of an MCP entry's config, returned as machine-readable
 /// issue codes the frontend maps to localized hints. Install is intentionally
 /// *not* blocked here: a curated catalog legitimately omits `command`/`url` on
@@ -1407,5 +1534,218 @@ mod tests {
         assert_eq!(sha256_hex(&installed), sha256_hex(body));
         assert_eq!(sha256_hex(&installed).len(), 64);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn entry_artifact_exists_matches_declared_entry_files() {
+        // A git checkout whose `main` names a file that does not exist on disk
+        // — tp7's disease. `dsh plugin add` exits 0 for it.
+        // (declared main via the test helper's file param is empty → no file)
+        let dir = std::env::temp_dir().join(format!("ahl-tp7-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"@deepseek-ai/dsh-client-ui-tp7-skin","main":"lib/index.js"}"#,
+        )
+        .unwrap();
+        assert!(!entry_artifact_exists(&dir), "declared-but-missing main is NOT loadable");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A working skin: `main` present on disk.
+        let dir = std::env::temp_dir().join(format!("ahl-silk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        std::fs::write(dir.join("lib/index.js"), b"export {}").unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"silk-background","main":"lib/index.js"}"#,
+        )
+        .unwrap();
+        assert!(entry_artifact_exists(&dir), "present main is loadable");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // No main/exports but an index.js fallback.
+        let dir = std::env::temp_dir().join(format!("ahl-wx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.js"), b"export {}").unwrap();
+        std::fs::write(dir.join("package.json"), r#"{"name":"ui-dsh-wx-skin"}"#).unwrap();
+        assert!(entry_artifact_exists(&dir), "index.js fallback is loadable");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // No main/exports and no index.js — a bare source shell.
+        let dir = std::env::temp_dir().join(format!("ahl-shell-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("package.json"), r#"{"name":"bare-shell"}"#).unwrap();
+        assert!(!entry_artifact_exists(&dir), "no artifact at all is NOT loadable");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // exports["."] as a string form (modern dual-package skins).
+        let dir = std::env::temp_dir().join(format!("ahl-exp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("dist")).unwrap();
+        std::fs::write(dir.join("dist/client.js"), b"export {}").unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"modern-skin","exports":{".":"./dist/client.js"}}"#,
+        )
+        .unwrap();
+        assert!(entry_artifact_exists(&dir), "string exports['.'] is loadable");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // exports["."] naming a missing file — the same brick through exports.
+        let dir = std::env::temp_dir().join(format!("ahl-expmiss-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"exp-miss","exports":{".":"./dist/missing.js"}}"#,
+        )
+        .unwrap();
+        assert!(!entry_artifact_exists(&dir), "missing exports['.'] is NOT loadable");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn installed_skin_loadable_gates_client_bundles_not_resource_bundles() {
+        // The Angelina disease: a `dsh.bundle` skin that ALSO mounts a web-app
+        // client (`dsh.client`) from a source-only checkout (no built entry).
+        // `dsh plugin add` exits 0 and the old gate blessed any bundle — the
+        // next boot died ERR_MODULE_NOT_FOUND. A client bundle with no built
+        // artifact must NOT be loadable.
+        let (instance, ws) = test_instance("loadable-angelina");
+        let pkg = DshAdapter::profile_dir(&instance)
+            .join("node_modules")
+            .join("@flowerwater1019/angelina-dsh-plugin");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{"name":"@flowerwater1019/angelina-dsh-plugin","main":"lib/index.js","dsh":{"bundle":{"patch":"./cordis.patch.yml"},"client":{"platform":"web"}}}"#,
+        )
+        .unwrap();
+        assert!(
+            !installed_skin_loadable(&instance, "@flowerwater1019/angelina-dsh-plugin"),
+            "client bundle with no built entry must be rejected"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+
+        // Same bundle shape but the repo commits its build (catppuccin / glass):
+        // the built entry exists → loadable.
+        let (instance, ws) = test_instance("loadable-client-built");
+        let pkg = DshAdapter::profile_dir(&instance)
+            .join("node_modules")
+            .join("dsh-catppuccin");
+        std::fs::create_dir_all(pkg.join("lib")).unwrap();
+        std::fs::write(pkg.join("lib/index.js"), b"export {}").unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{"name":"dsh-catppuccin","main":"lib/index.js","dsh":{"bundle":{"patch":"./cordis.patch.yml"},"client":{"platform":"web"}}}"#,
+        )
+        .unwrap();
+        assert!(installed_skin_loadable(&instance, "dsh-catppuccin"));
+        let _ = std::fs::remove_dir_all(&ws);
+
+        // Resource-only bundle (no `dsh.client`, no own JS): exempt — a bundle
+        // that only ships assets/config never needs a built entry.
+        let (instance, ws) = test_instance("loadable-resource");
+        let pkg = DshAdapter::profile_dir(&instance)
+            .join("node_modules")
+            .join("dsh-resource-theme");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{"name":"dsh-resource-theme","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}"#,
+        )
+        .unwrap();
+        assert!(installed_skin_loadable(&instance, "dsh-resource-theme"));
+        let _ = std::fs::remove_dir_all(&ws);
+
+        // A non-bundle client skin with a missing built entry (tp7) stays
+        // rejected — unchanged by the client-bundle tightening.
+        let (instance, ws) = test_instance("loadable-tp7");
+        let pkg = DshAdapter::profile_dir(&instance)
+            .join("node_modules")
+            .join("@deepseek-ai/dsh-client-ui-tp7-skin");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{"name":"@deepseek-ai/dsh-client-ui-tp7-skin","main":"lib/index.js"}"#,
+        )
+        .unwrap();
+        assert!(
+            !installed_skin_loadable(&instance, "@deepseek-ai/dsh-client-ui-tp7-skin"),
+            "tp7 source-only skin stays rejected"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn quarantine_disables_only_unloadable_client_bundles() {
+        // A profile whose bundles carry a client bundle with no built entry — the
+        // interrupted-install signature. Quarantine must disable its row (so the
+        // next boot is safe) and leave resource-only + built bundles alone.
+        let (instance, ws) = test_instance("quarantine");
+        let profile = DshAdapter::profile_dir(&instance);
+        let profile_pkg = serde_json::json!({
+            "name": "dsh-profile-web",
+            "dsh": { "profile": { "bundles": ["dsh-brick", "dsh-res", "dsh-built"] } }
+        });
+        std::fs::write(
+            profile.join("package.json"),
+            serde_json::to_string_pretty(&profile_pkg).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(profile.join("cordis.patch.yml"), "[]\n").unwrap();
+
+        let nm = profile.join("node_modules");
+        // The brick: dsh.client bundle, self-named insert row, no built lib/.
+        let brick = nm.join("dsh-brick");
+        std::fs::create_dir_all(&brick).unwrap();
+        std::fs::write(
+            brick.join("package.json"),
+            r#"{"name":"dsh-brick","main":"lib/index.js","dsh":{"bundle":{"patch":"./cordis.patch.yml"},"client":{"platform":"web"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            brick.join("cordis.patch.yml"),
+            "- insert:\n    - id: brick\n      name: 'dsh-brick'\n",
+        )
+        .unwrap();
+        // A resource-only bundle (no dsh.client): safe without a built entry.
+        let res = nm.join("dsh-res");
+        std::fs::create_dir_all(&res).unwrap();
+        std::fs::write(
+            res.join("package.json"),
+            r#"{"name":"dsh-res","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(res.join("cordis.patch.yml"), "[]\n").unwrap();
+        // A client bundle that commits its build: loads fine, no quarantine.
+        let built = nm.join("dsh-built");
+        std::fs::create_dir_all(built.join("lib")).unwrap();
+        std::fs::write(built.join("lib/index.js"), b"export {}").unwrap();
+        std::fs::write(
+            built.join("package.json"),
+            r#"{"name":"dsh-built","main":"lib/index.js","dsh":{"bundle":{"patch":"./cordis.patch.yml"},"client":{"platform":"web"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            built.join("cordis.patch.yml"),
+            "- insert:\n    - id: built\n      name: 'dsh-built'\n",
+        )
+        .unwrap();
+
+        let quarantined = quarantine_unloadable_client_bundles(&instance);
+        assert_eq!(quarantined, vec!["dsh-brick"], "only the brick is quarantined");
+        let text = std::fs::read_to_string(profile.join("cordis.patch.yml")).unwrap();
+        assert!(
+            text.contains("- id: brick\n  disabled: true"),
+            "brick row disabled so the next boot skips it:\n{text}"
+        );
+        assert!(!text.contains("id: built"), "built bundle untouched:\n{text}");
+        assert!(!text.contains("id: res"), "resource bundle untouched:\n{text}");
+        let _ = std::fs::remove_dir_all(&ws);
     }
 }

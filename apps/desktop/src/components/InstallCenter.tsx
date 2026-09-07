@@ -15,6 +15,7 @@ import {
 } from 'lucide-react'
 import { useT } from '../lib/i18n'
 import { useAppStore } from '../stores/appStore'
+import { MirrorToggle } from './MirrorToggle'
 import type { Job, JobStatus } from '../lib/types'
 
 const ACTIVE: JobStatus[] = ['waiting', 'running']
@@ -82,6 +83,7 @@ export function InstallCenter({ embedded = false }: { embedded?: boolean }) {
           </div>
         </div>
         <div className="flex items-center gap-1.5">
+          <MirrorToggle />
           {finished.length > 0 && (
             <button
               onClick={() => void clearFinishedJobs()}

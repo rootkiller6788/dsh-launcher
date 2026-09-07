@@ -1153,6 +1153,57 @@ fn kind_label(kind: ContentKind) -> &'static str {
     }
 }
 
+/// Land a just-installed plugin/skin **disabled** (install ≠ enable): a new
+/// install must not auto-mount at the next boot. Enabling is the user's later
+/// explicit act (launcher toggle → `plugin_toggle`).
+///
+/// - a **skin** is recorded `enabled: false`. A *bundle* skin — auto-registered
+///   into `dsh.profile.bundles` by `dsh plugin add`, which would load it by
+///   default — additionally gets `disabled:` rows so it stays off; a *non-bundle*
+///   skin simply gets no insert row (`sync_skin_patch` also drops any stale row
+///   from an earlier enable on reinstall).
+/// - a **bundle plugin** likewise gets `disabled:` rows; a non-bundle plugin was
+///   installed as a plain dependency (inert until an insert row exists) and
+///   needs nothing.
+pub(crate) fn land_install_disabled(
+    state: &AppState,
+    id: &str,
+    key: &str,
+    package: &str,
+    kind: ContentKind,
+) -> Result<(), AppError> {
+    match kind {
+        ContentKind::Theme => {
+            let updated = InstanceManifest::add_skin_package(&state.paths, id, key, package)?;
+            if content_adapter::skin_has_bundle(&updated, package) {
+                disable_bundle_rows(&updated, package)?;
+            } else {
+                content_adapter::sync_skin_patch(&updated, &updated.skin_packages)?;
+            }
+        }
+        _ => {
+            // Plugins carry no instance record — their state lives purely in the
+            // patch layer (`cordis.patch.yml`).
+            let manifest = InstanceManifest::get(&state.paths, id)?;
+            if content_adapter::skin_has_bundle(&manifest, package) {
+                disable_bundle_rows(&manifest, package)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Write `disabled:` rows for a bundle package's inserted entry ids so its
+/// auto-registered profile layer does not load at the next boot. A bundle whose
+/// patch only reconfigures (inserts no rows) has nothing to disable — leave it.
+fn disable_bundle_rows(instance: &InstanceManifest, package: &str) -> Result<(), AppError> {
+    if dsh_adapter::DshAdapter::plugin_row_ids(instance, package).is_empty() {
+        return Ok(());
+    }
+    dsh_adapter::DshAdapter::set_plugin_enabled(instance, package, false)?;
+    Ok(())
+}
+
 /// Install one bundle item via its kind's installer. Plugin/skin items go
 /// through `dsh plugin add`; skill and MCP items reuse the content installers
 /// and then update the manifest index.
@@ -1180,8 +1231,8 @@ pub(crate) async fn install_bundle_item(
                 return Err(AppError::msg("no install spec (npm/tarball/url)"));
             }
             emit_log(app, &format!("{id} · installing {label} {spec}…"));
-            let install_target =
-                resolve_plugin_install_target(state, app, id, &spec, Some(item)).await;
+            let mut install_target =
+                resolve_plugin_install_target(state, app, id, &spec, Some(item)).await?;
             if let Some(ctx) = ctx {
                 ctx.progress("dsh-install", 40);
             }
@@ -1198,24 +1249,109 @@ pub(crate) async fn install_bundle_item(
                 )
                 .await?;
             if code != 0 {
-                if let Some(ctx) = ctx {
-                    ctx.set_exit_code(i64::from(code));
+                // A catalog `npm` name can be the author's *declared* package
+                // name rather than one actually published to the registry
+                // (e.g. `people-ai` on `95384/DSH-themes-people-ai` fails with
+                // a pnpm 404 on every install). When the record also carries a
+                // GitHub URL, retry once against that source before giving up
+                // (plugins/skins only; skills/MCP route elsewhere). Reusing
+                // `resolve_plugin_install_target` keeps the same cache-then-link
+                // semantics as a native github-spec install.
+                let fallback = item.github_spec().filter(|gh| gh != &spec);
+                let second = if let Some(gh) = &fallback {
+                    emit_log(
+                        app,
+                        &format!(
+                            "{id} · {label} install via {spec} failed (code {code}) — retrying from GitHub {gh}"
+                        ),
+                    );
+                    let gh_target =
+                        resolve_plugin_install_target(state, app, id, gh, Some(item)).await?;
+                    let retry_sink = ctx
+                        .map(|c| c.sink())
+                        .unwrap_or_else(|| make_sink(app.clone()));
+                    let code2 = state
+                        .adapter
+                        .run_plugin_command(
+                            settings,
+                            instance,
+                            &["add".to_string(), gh_target.clone()],
+                            retry_sink,
+                        )
+                        .await?;
+                    if code2 == 0 {
+                        install_target = gh_target;
+                    }
+                    code2
+                } else {
+                    code
+                };
+                if second != 0 {
+                    if let Some(ctx) = ctx {
+                        ctx.set_exit_code(i64::from(second));
+                    }
+                    let tried = fallback
+                        .map(|gh| format!(" (tried {spec} and {gh})"))
+                        .unwrap_or_default();
+                    return Err(AppError::msg(format!(
+                        "dsh plugin add exited with code {second}{tried} — check the install spec resolves on npm or GitHub and your network can reach the source (detail in Activity logs)"
+                    )));
                 }
-                return Err(AppError::msg(format!(
-                    "dsh plugin add exited with code {code} — check the install spec ({spec}) resolves on npm and your network can reach the registry (detail in Activity logs)"
-                )));
+            }
+            // Post-install loadability gate (ported from dsh-market's
+            // validateAddedPlugins): `dsh plugin add` exits 0 even for a
+            // source-only GitHub checkout — it only links the source directory
+            // and never checks the package has a built entry. Writing the insert
+            // row for such a package makes the NEXT boot die with
+            // ERR_MODULE_NOT_FOUND (the tp7 skin family). If the just-added
+            // package is not a bundle and ships no loadable entry artifact,
+            // remove it now and fail the install — never leave it for boot.
+            if let Some(pkg) = content_adapter::skin_package_name(std::path::Path::new(&install_target)) {
+                if !content_adapter::installed_skin_loadable(instance, &pkg) {
+                    emit_log(
+                        app,
+                        &format!(
+                            "{id} · {label} {pkg} installed but has no loadable entry — removing to protect the next boot"
+                        ),
+                    );
+                    let cleanup_sink = ctx
+                        .map(|c| c.sink())
+                        .unwrap_or_else(|| make_sink(app.clone()));
+                    let _ = state
+                        .adapter
+                        .run_plugin_command(
+                            settings,
+                            instance,
+                            &["remove".to_string(), pkg.clone()],
+                            cleanup_sink,
+                        )
+                        .await;
+                    // `dsh plugin remove` drops the manifest entry but on Windows
+                    // pnpm leaves the top-level node_modules dir behind (observed
+                    // with tp7). Prune it ourselves — `std::fs::remove_dir_all`
+                    // never follows reparse points, so a junction to the source
+                    // cache is removed as a link, target untouched.
+                    let installed_dir = dsh_adapter::DshAdapter::profile_dir(instance)
+                        .join("node_modules")
+                        .join(&pkg);
+                    let _ = std::fs::remove_dir_all(&installed_dir);
+                    if let Some(ctx) = ctx {
+                        ctx.set_exit_code(1);
+                    }
+                    return Err(AppError::msg(format!(
+                        "installed but not loadable: {pkg} ships no built entry (a source-only checkout) — it was removed; install a published build instead"
+                    )));
+                }
             }
             if let Some(ctx) = ctx {
                 ctx.progress("recording", 65);
             }
-            if item.kind == ContentKind::Theme {
+            // New plugin/skin installs land DISABLED — record (skins) + patch
+            // state, but never auto-mount. Enabling is an explicit later toggle.
+            if item.kind == ContentKind::Theme || item.kind == ContentKind::Plugin {
                 let package = content_adapter::skin_package_name(std::path::Path::new(&install_target))
                     .unwrap_or_else(|| install_target.clone());
-                InstanceManifest::add_skin_package(&state.paths, id, &key, &package)?;
-                let updated = InstanceManifest::get(&state.paths, id)?;
-                if !content_adapter::skin_has_bundle(&updated, &package) {
-                    content_adapter::sync_skin_patch(&updated, &updated.skin_packages)?;
-                }
+                land_install_disabled(state, id, &key, &package, item.kind)?;
             }
             record_install_metadata_with_source(state, id, item, source)?;
         }

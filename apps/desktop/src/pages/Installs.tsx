@@ -2,6 +2,7 @@ import { Download } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
 import { useT } from '../lib/i18n'
 import { JobRow } from '../components/InstallCenter'
+import { MirrorToggle } from '../components/MirrorToggle'
 
 export function Installs() {
   const t = useT()
@@ -18,6 +19,9 @@ export function Installs() {
               ? t('installCenter.active', { n: active.length, s: active.length === 1 ? '' : 's' })
               : t('installs.subtitle')}
           </p>
+        </div>
+        <div className="flex items-center gap-2 pb-0.5">
+          <MirrorToggle />
         </div>
       </div>
 

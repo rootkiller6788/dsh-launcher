@@ -28,6 +28,14 @@ pub struct AppSettings {
     /// User-owned crash-ingest URL (`https://…`). When unset, consent alone
     /// enables nothing — there is nowhere to send.
     pub telemetry_endpoint: Option<String>,
+    /// Route plugin/skin GitHub fetches through the gh-proxy relay instead of
+    /// github.com directly (Install Center toggle, default off). Large skin
+    /// repos time out on throttled China→github links even at the 900 s cache
+    /// budget; flipping this on is the explicit opt-in to let the repo bytes
+    /// pass through a third party — the launcher otherwise always hits the
+    /// upstream URL.
+    #[serde(default)]
+    pub github_mirror: bool,
 }
 
 impl AppSettings {
