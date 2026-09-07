@@ -49,8 +49,6 @@ DeepSeek Harness Launcher 把 [DeepSeek Harness](https://github.com/deepseek-ai/
 | --- | --- | --- |
 | Windows x64 | [下载安装程序](https://github.com/rootkiller6788/dsh-launcher/releases/latest) | 运行 NSIS 安装程序并按提示完成安装 |
 
-> ⚠️ 安装包目前**未签名**。Windows SmartScreen 首次运行可能告警 —— 点「更多信息 → 仍要运行」即可。
-
 ### 从源码构建
 
 依赖：Node ≥ 22、pnpm ≥ 10、Rust（MSVC 工具链）、WebView2（Win 11 已内置）。
