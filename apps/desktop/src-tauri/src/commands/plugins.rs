@@ -2,15 +2,16 @@ use dsh_adapter::content as content_adapter;
 use dsh_adapter::{DshAdapter, InstalledPlugin, InstalledPluginSource, PluginUpdate};
 use launcher_core::{
     market, InstanceManifest, Job, JobPlan, McpConfigStore, McpEnvRequirement, RegistryPlugin,
+    SkinPackage,
 };
 use market::ContentKind;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, State};
-use tokio::process::Command;
 
 use crate::commands::process::{emit_log, make_sink};
 use crate::error::AppError;
@@ -233,13 +234,26 @@ fn merge_plugin_sources(
     profile: Vec<InstalledPlugin>,
 ) -> Vec<InstalledPlugin> {
     for item in profile {
-        let exists = inventory.iter().any(|inv| {
+        let existing = inventory.iter().position(|inv| {
             inv.name == item.name
                 || inv.entry_id.as_deref() == Some(item.name.as_str())
                 || item.entry_id.as_deref() == Some(inv.name.as_str())
         });
-        if !exists {
-            inventory.push(item);
+        match existing {
+            // The launcher's disk scan is authoritative for the packages it
+            // manages: live DSH rows hardcode `toggleable: false`, so a name
+            // collision must not let the live copy shadow the profile copy's
+            // enabled/toggleable/kind (see `plugin_inventory`). Replace it.
+            Some(pos)
+                if matches!(inventory[pos].source, InstalledPluginSource::Inventory)
+                    && matches!(item.source, InstalledPluginSource::Profile) =>
+            {
+                inventory[pos] = item;
+            }
+            // Same-source collision (e.g. two live rows): keep the first arg —
+            // a just-fetched DSH inventory must win over a cached copy.
+            Some(_) => {}
+            None => inventory.push(item),
         }
     }
     inventory.sort_by(|a, b| {
@@ -276,11 +290,20 @@ pub(crate) fn rebuild_library_inventory_cache_from_disk(
     let instance = InstanceManifest::get(&state.paths, id)?;
     let cached = read_library_inventory_cache(state, id);
     let profile = DshAdapter::installed_plugins(&instance);
+    // Drop stale profile-sourced entries first: `merge_plugin_sources` only
+    // appends what is missing, so without this a toggle's `enabled` flip would
+    // never reach a row that already exists in the cache. The disk scan below
+    // is the authoritative state for profile packages (live DSH entries kept).
+    let live = cached
+        .dsh_inventory
+        .into_iter()
+        .filter(|p| !matches!(p.source, InstalledPluginSource::Profile))
+        .collect();
     let cache = LibraryInventoryCache {
         schema_version: LIBRARY_INVENTORY_CACHE_SCHEMA,
         instance_id: id.to_string(),
         updated_at: now_secs(),
-        dsh_inventory: merge_plugin_sources(cached.dsh_inventory, profile),
+        dsh_inventory: merge_plugin_sources(live, profile),
         launcher_metadata: cached.launcher_metadata,
         install_sources: cached.install_sources,
         skins: instance.skins,
@@ -361,6 +384,28 @@ fn skin_key_matches_plugin(skin: &str, plugin: &InstalledPlugin) -> bool {
     name.contains(&tail) || name == normalized || plugin.entry_id.as_deref() == Some(skin)
 }
 
+/// The installed-plugin record backing a cataloged skin key.
+///
+/// The catalog key (`owner/name`, e.g. `zhijun-dai/Catppuccin-dsh-theme`) is
+/// not a reliable textual match against the npm package name it installs
+/// (`dsh-catppuccin`) — the repo's `package.json.name` need not contain the
+/// catalog's short name. `skin_packages` is the authoritative key→package
+/// link; the text heuristic is only a fallback for entries recorded before
+/// that map existed.
+fn skin_inventory_plugin<'a>(
+    skin: &str,
+    skin_packages: &[SkinPackage],
+    inventory: &'a [InstalledPlugin],
+) -> Option<&'a InstalledPlugin> {
+    let package = skin_packages
+        .iter()
+        .find(|sp| sp.key == skin)
+        .map(|sp| sp.package.as_str());
+    package
+        .and_then(|package| inventory.iter().find(|p| p.name == package))
+        .or_else(|| inventory.iter().find(|p| skin_key_matches_plugin(skin, p)))
+}
+
 fn plugin_library_kind(cache: &LibraryInventoryCache, plugin: &InstalledPlugin) -> ContentKind {
     if plugin.kind == dsh_adapter::InstalledPluginKind::Theme
         || cache
@@ -399,7 +444,21 @@ fn library_inventory_detail_for(
     let cache = read_library_inventory_cache(state, &instance.id);
     let mut items = Vec::new();
 
+    // A plugin that is the installed package of a cataloged skin (per
+    // `skin_packages`) is rendered by the skin loop below under its catalog
+    // key — skip it here so one skin never appears as two rows (the bare
+    // package row and the catalog-keyed row).
+    let cataloged_skin_packages: Vec<&str> = instance
+        .skin_packages
+        .iter()
+        .filter(|s| cache.skins.iter().any(|k| k == &s.key))
+        .map(|s| s.package.as_str())
+        .collect();
+
     for plugin in &cache.dsh_inventory {
+        if cataloged_skin_packages.contains(&plugin.name.as_str()) {
+            continue;
+        }
         let kind = plugin_library_kind(&cache, plugin);
         let metadata = market_metadata_for_plugin_values(&cache.launcher_metadata, plugin).cloned();
         let install_source = metadata
@@ -567,10 +626,7 @@ fn library_inventory_detail_for(
         // A skin is a DSH plugin; when its plugin row is still in the last
         // inventory, surface its real enabled/toggleable state instead of
         // leaving the row as classification-only.
-        let plugin = cache
-            .dsh_inventory
-            .iter()
-            .find(|plugin| skin_key_matches_plugin(skin, plugin));
+        let plugin = skin_inventory_plugin(skin, &instance.skin_packages, &cache.dsh_inventory);
         let (enabled, toggleable, package_name, state_source) = match plugin {
             Some(plugin) => (
                 Some(plugin.enabled),
@@ -737,9 +793,12 @@ pub(crate) async fn reconcile_library_inventory_after_market_change(
     };
     if let Some(port) = running_port {
         refresh_plugin_inventory_cache(state, app, id, port, reason).await?;
-    } else {
-        rebuild_library_inventory_cache_from_disk(state, app, id, reason)?;
     }
+    // Always re-scan the profile from disk as well: `installed_plugins` derives
+    // profile-sourced rows (including skin enable/disable state), which the live
+    // DSH inventory does not carry. Runs after the live refresh so its entries
+    // are preserved and the disk scan remains authoritative.
+    rebuild_library_inventory_cache_from_disk(state, app, id, reason)?;
     Ok(())
 }
 
@@ -808,26 +867,51 @@ fn github_root_package_name(entry: &RegistryPlugin) -> Option<String> {
 }
 
 async fn run_git(args: &[String], cwd: Option<&Path>) -> Result<(), AppError> {
-    let mut cmd = Command::new("git");
-    cmd.args(args);
-    if let Some(cwd) = cwd {
-        cmd.current_dir(cwd);
-    }
-    let output = cmd.output().await.map_err(|e| {
-        AppError::msg(format!(
-            "git is required for GitHub plugin cache but could not start: {e}"
-        ))
+    // Collect streamed lines so a non-zero exit can surface the real git error
+    // detail, as before. The shared timed runner enforces GIT_TIMEOUT and kills
+    // the whole process tree on expiry (a bare `output().await` had no timeout
+    // and wedged the install job at `running` forever on a stalled transfer).
+    let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let collector = {
+        let lines = Arc::clone(&lines);
+        Arc::new(move |line: launcher_core::LogLine| {
+            if let Ok(mut v) = lines.lock() {
+                v.push(line.line);
+            }
+        })
+    };
+    let code = dsh_adapter::run_timed(
+        "git",
+        args,
+        cwd.unwrap_or(Path::new(".")),
+        &[],
+        collector,
+        dsh_adapter::GIT_TIMEOUT,
+    )
+    .await
+    .map_err(|e| {
+        if e.starts_with("spawn ") {
+            AppError::msg(format!(
+                "git is required for GitHub plugin cache but could not start: {e}"
+            ))
+        } else {
+            AppError::msg(format!("git operation failed: {e}"))
+        }
     })?;
-    if output.status.success() {
+    if code == 0 {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let detail = stderr.trim();
-    let detail = if detail.is_empty() {
-        stdout.trim()
-    } else {
-        detail
+    let detail = {
+        let v = lines
+            .lock()
+            .map(|v| v.join("\n"))
+            .unwrap_or_default();
+        let trimmed = v.trim();
+        if trimmed.is_empty() {
+            format!("exit code {code}")
+        } else {
+            trimmed.to_string()
+        }
     };
     Err(AppError::msg(format!("git command failed: {detail}")))
 }
@@ -1264,17 +1348,25 @@ pub async fn plugin_toggle(
         || async {
             ensure_not_running(&state, &id).await?;
             let instance = InstanceManifest::get(&state.paths, &id)?;
-            // Skins toggle via their insert row (mount/unmount), not via bundle
-            // `disabled:` rows — a client-plugin skin has no bundle rows to flip.
+            // Skins toggle through the patch layer, but which rows depends on how
+            // the skin mounts. A `dsh.bundle` skin is a profile bundle and turns
+            // off via `disabled:` rows on its own entries, exactly like any other
+            // bundle plugin. A client-plugin skin (no bundle) mounts solely through
+            // its insert row, so toggling writes/removes that row.
             if let Some(skin) = instance
                 .skin_packages
                 .iter()
                 .find(|p| p.package == name)
                 .cloned()
             {
-                InstanceManifest::set_skin_enabled(&state.paths, &id, &skin.key, enabled)?;
-                let updated = InstanceManifest::get(&state.paths, &id)?;
-                content_adapter::sync_skin_patch(&updated, &updated.skin_packages)?;
+                if content_adapter::skin_has_bundle(&instance, &skin.package) {
+                    DshAdapter::set_plugin_enabled(&instance, &name, enabled)?;
+                    InstanceManifest::set_skin_enabled(&state.paths, &id, &skin.key, enabled)?;
+                } else {
+                    InstanceManifest::set_skin_enabled(&state.paths, &id, &skin.key, enabled)?;
+                    let updated = InstanceManifest::get(&state.paths, &id)?;
+                    content_adapter::sync_skin_patch(&updated, &updated.skin_packages)?;
+                }
             } else {
                 DshAdapter::set_plugin_enabled(&instance, &name, enabled)?;
             }
@@ -1462,21 +1554,29 @@ mod tests {
 
     #[test]
     fn merge_plugin_sources_dedupes_and_prefers_profile() {
+        // A live DSH row hardcodes `toggleable: false`; the profile disk scan
+        // derives the real value (a bundle skin with a patch row is toggleable).
+        let mut live_alpha = plugin("alpha", InstalledPluginSource::Inventory);
+        live_alpha.toggleable = false;
+        let mut profile_alpha = plugin("alpha", InstalledPluginSource::Profile);
+        profile_alpha.toggleable = true;
         let inventory = vec![
-            plugin("alpha", InstalledPluginSource::Inventory),
+            live_alpha,
             plugin("beta", InstalledPluginSource::Inventory),
         ];
-        let profile = vec![
-            plugin("alpha", InstalledPluginSource::Profile),
-            plugin("gamma", InstalledPluginSource::Profile),
-        ];
+        let profile = vec![profile_alpha, plugin("gamma", InstalledPluginSource::Profile)];
         let merged = merge_plugin_sources(inventory, profile);
         let names: Vec<&str> = merged.iter().map(|p| p.name.as_str()).collect();
 
-        // "alpha" appears once (deduped across inventory/profile); profile
-        // sources sort first so the live truth is at the top.
+        // "alpha" appears once (deduped across inventory/profile), and its
+        // profile copy wins the name collision: the disk scan is authoritative,
+        // so the launcher-managed row keeps its toggleable switch rather than
+        // being shadowed by the live row's hardcoded `false`.
         assert_eq!(merged.len(), 3, "alpha must dedupe: {names:?}");
-        assert_eq!(names, vec!["gamma", "alpha", "beta"]);
+        assert_eq!(names, vec!["alpha", "gamma", "beta"]);
+        let alpha = merged.iter().find(|p| p.name == "alpha").expect("alpha row");
+        assert_eq!(alpha.source, InstalledPluginSource::Profile);
+        assert!(alpha.toggleable, "profile copy's toggleable must survive");
         assert_eq!(merged[0].source, InstalledPluginSource::Profile);
     }
 
@@ -1514,5 +1614,39 @@ mod tests {
                 .source,
             LibraryItemSource::MarketInstalled
         ));
+    }
+
+    #[test]
+    fn skin_inventory_plugin_links_catalog_key_to_package_via_skin_packages() {
+        // Real-machine case: the catalog key (`zhijun-dai/Catppuccin-dsh-theme`)
+        // shares no text with the npm package name it installed (`dsh-catppuccin`),
+        // so the name heuristic alone misses the row and the skin shows up with
+        // no toggle. The `skin_packages` key→package map is authoritative.
+        let packages = vec![SkinPackage {
+            key: "zhijun-dai/Catppuccin-dsh-theme".into(),
+            package: "dsh-catppuccin".into(),
+            enabled: false,
+        }];
+        let inventory = vec![InstalledPlugin {
+            name: "dsh-catppuccin".into(),
+            enabled: false,
+            toggleable: true,
+            kind: InstalledPluginKind::Theme,
+            source: InstalledPluginSource::Profile,
+            entry_id: None,
+            fiber_phase: None,
+        }];
+
+        let linked =
+            skin_inventory_plugin("zhijun-dai/Catppuccin-dsh-theme", &packages, &inventory)
+                .expect("skin_packages maps catalog key to its package");
+        assert_eq!(linked.name, "dsh-catppuccin");
+        assert!(linked.toggleable, "installed skin must be toggleable");
+
+        // Without the map the heuristic would come up empty — the old bug.
+        assert!(
+            skin_inventory_plugin("zhijun-dai/Catppuccin-dsh-theme", &[], &inventory).is_none(),
+            "name heuristic must NOT link zhijun-dai/Catppuccin-dsh-theme to dsh-catppuccin"
+        );
     }
 }

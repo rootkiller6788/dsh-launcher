@@ -60,6 +60,16 @@ html[data-theme='light'] {
   --color-amber-400: #d97706;
   --color-orange-400: #c2410c;
   --color-emerald-400: #059669;
+  /* Library's four category accents (blue already above): the dark-theme
+   * pastel 200/300 text shades wash out on light surfaces — deepen each to its
+   * ~700 tone so the plugins / skills / MCP / skins icons read evenly in light
+   * mode (blue maps to #1d4ed8 = blue-700 above). */
+  --color-violet-200: #6d28d9;
+  --color-violet-300: #6d28d9;
+  --color-cyan-200: #0e7490;
+  --color-cyan-300: #0e7490;
+  --color-fuchsia-200: #a21caf;
+  --color-fuchsia-300: #a21caf;
 }
 
 body {

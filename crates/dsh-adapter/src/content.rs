@@ -19,7 +19,6 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -283,19 +282,28 @@ async fn fetch_from_repo(entry: &RegistryPlugin) -> Result<String> {
 
 async fn clone_and_read(repo: &str, tmp: &Path, name: &str) -> Result<String> {
     let url = format!("https://github.com/{repo}");
-    let status = tokio::process::Command::new("git")
-        .args(["clone", "--depth", "1", "--quiet", "--"])
-        .arg(&url)
-        .arg(tmp)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .map_err(|e| anyhow!(
-            "git clone failed — is git installed and on PATH? run `git --version` to check: {e}"
-        ))?;
-    if !status.success() {
+    let args = vec![
+        "clone".to_string(),
+        "--depth".to_string(),
+        "1".to_string(),
+        "--quiet".to_string(),
+        "--".to_string(),
+        url.clone(),
+        tmp.display().to_string(),
+    ];
+    // Route through the shared timed runner so a stalled transfer is killed
+    // after GIT_TIMEOUT (process tree included) instead of hanging forever.
+    let code = crate::run_timed(
+        "git",
+        &args,
+        tmp.parent().unwrap_or(tmp),
+        &[],
+        crate::silent_log_sink(),
+        crate::GIT_TIMEOUT,
+    )
+    .await
+    .map_err(|e| anyhow!("git clone {url} failed: {e}"))?;
+    if code != 0 {
         return Err(anyhow!(
             "git clone {url} failed — check the repo exists and is public, and that your network can reach github.com"
         ));
@@ -557,7 +565,13 @@ pub fn sync_skin_patch(instance: &InstanceManifest, skins: &[SkinPackage]) -> Re
     let text = std::fs::read_to_string(&patch_path).unwrap_or_default();
     let stripped = crate::remove_skin_insert_blocks(&text);
 
-    let enabled: Vec<&SkinPackage> = skins.iter().filter(|s| s.enabled).collect();
+    let enabled: Vec<&SkinPackage> = skins
+        .iter()
+        // A skin declaring `dsh.bundle` is already mounted through the profile
+        // bundles (auto-registered by `dsh plugin add`); it must never also get
+        // an insert row — that would double-mount the same package.
+        .filter(|s| s.enabled && !skin_has_bundle(instance, &s.package))
+        .collect();
     let next = if enabled.is_empty() {
         crate::restore_placeholder(&stripped)
     } else {
@@ -1093,6 +1107,35 @@ mod tests {
         assert!(text.contains("skin-sakura"), "{text}");
         // MCP block kept; skin block appended → two insert blocks.
         assert_eq!(text.lines().filter(|l| l.starts_with("- insert:")).count(), 2, "{text}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn sync_skin_patch_never_inserts_a_bundle_skin() {
+        let (instance, ws) = test_instance("skin-sync-bundle");
+        // catppuccin is installed and declares `dsh.bundle`; sakura is a plain
+        // client skin. Both are enabled in the launcher model.
+        let profile = DshAdapter::profile_dir(&instance);
+        let bundle_dir = profile
+            .join("node_modules")
+            .join("dsh-catppuccin");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(
+            bundle_dir.join("package.json"),
+            r#"{"name":"dsh-catppuccin","keywords":["skin"],"dsh":{"bundle":{"patch":"./cordis.patch.yml"},"client":{"platform":"web"}}}"#,
+        )
+        .unwrap();
+        let skins = vec![
+            skin("owner/catppuccin", "dsh-catppuccin", true),
+            skin("owner/sakura", "dsh-skin-sakura", true),
+        ];
+        sync_skin_patch(&instance, &skins).unwrap();
+        let text = std::fs::read_to_string(patch_path(&instance)).unwrap();
+        assert!(
+            !text.contains("dsh-catppuccin"),
+            "a dsh.bundle skin must not get an insert row (double mount):\n{text}"
+        );
+        assert!(text.contains("skin-sakura"), "client skin still inserted:\n{text}");
         let _ = std::fs::remove_dir_all(&ws);
     }
 

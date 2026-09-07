@@ -13,7 +13,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::oneshot;
 
-use crate::commands::plugins::refresh_plugin_inventory_cache;
+use crate::commands::plugins::reconcile_library_inventory_after_market_change;
 use crate::error::AppError;
 use crate::jobs::{run_instance_job, HeavyJobKind};
 use crate::state::AppState;
@@ -785,7 +785,17 @@ async fn finalize_ready(
                 &job_id,
                 HeavyJobKind::InventorySync,
                 || async {
-                    refresh_plugin_inventory_cache(&state, &app, &instance.id, port, "launch").await
+                    // Full sync on every launch: live refresh (DSH is up) plus a
+                    // disk rebuild, so stale snapshot rows (removed skins, or a
+                    // live row shadowing a launcher-managed one) never survive
+                    // past the next normal start — no manual refresh needed.
+                    reconcile_library_inventory_after_market_change(
+                        &state,
+                        &app,
+                        &instance.id,
+                        "launch",
+                    )
+                    .await
                 },
             )
             .await;

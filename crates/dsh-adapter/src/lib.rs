@@ -19,9 +19,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use launcher_core::process::{spawn_child_with_exit, ChildHandle, ExitSink, LogSink};
+use launcher_core::process::{
+    kill_tree, spawn_child_with_exit, ChildHandle, ExitSink, LogSink,
+};
 use launcher_core::runtime::RuntimeInfo;
 use launcher_core::{
     AppSettings, InstanceManifest, LogLevel, LogLine, LogStream, ResolvedProvider, RuntimeAdapter,
@@ -415,7 +418,17 @@ impl DshAdapter {
                     .unwrap_or(false);
                 let enabled = match kind {
                     InstalledPluginKind::Theme if !skin_is_bundle => insert_names.contains(&name),
-                    InstalledPluginKind::Theme | InstalledPluginKind::Client => deps.contains(&name),
+                    // A `dsh.bundle` skin mounts as a profile bundle, so it
+                    // toggles exactly like one: enabled until a `disabled:` row
+                    // lands on one of its bundle entries.
+                    InstalledPluginKind::Theme => {
+                        if in_bundles {
+                            !disabled
+                        } else {
+                            !ids.is_empty() && !disabled
+                        }
+                    }
+                    InstalledPluginKind::Client => deps.contains(&name),
                     InstalledPluginKind::Plugin => {
                         if in_bundles {
                             !disabled
@@ -424,11 +437,23 @@ impl DshAdapter {
                         }
                     }
                 };
+                // A client-plugin skin (no bundle) toggles through the insert
+                // row, but `plugin_toggle` only routes there when the package
+                // is registered in `skin_packages` — a stray package merely
+                // *named* like a skin (e.g. a leftover dep whose repo root has
+                // no package.json) must not offer a switch it cannot honor.
+                let registered_skin = instance
+                    .skin_packages
+                    .iter()
+                    .any(|sp| sp.package == name);
                 InstalledPlugin {
                     name,
                     enabled,
-                    toggleable: matches!(kind, InstalledPluginKind::Theme if !skin_is_bundle)
-                        || !ids.is_empty(),
+                    toggleable: !ids.is_empty()
+                        || (matches!(
+                            kind,
+                            InstalledPluginKind::Theme if !skin_is_bundle
+                        ) && registered_skin),
                     kind,
                     source: InstalledPluginSource::Profile,
                     entry_id: None,
@@ -555,78 +580,156 @@ impl DshAdapter {
         let node = self
             .resolve_node(settings)
             .ok_or_else(|| anyhow!("Node not found — can't run DSH"))?;
-        let mut cmd = tokio::process::Command::new(&node);
-        cmd.arg(&info.bin_path);
-        cmd.arg("plugin");
-        cmd.arg("--profile");
-        cmd.arg(&instance.profile);
-        for a in args {
-            cmd.arg(a);
-        }
-        cmd.stdin(Stdio::null());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-        cmd.current_dir(&instance.workspace);
-        cmd.env("DSH_HOME", &instance.workspace);
+        let node = node.to_string_lossy().to_string();
+        let mut full = vec![
+            info.bin_path,
+            "plugin".to_string(),
+            "--profile".to_string(),
+            instance.profile.clone(),
+        ];
+        full.extend(args.iter().cloned());
+        let envs = vec![("DSH_HOME".to_string(), instance.workspace.clone())];
+        run_timed(
+            &node,
+            &full,
+            Path::new(&instance.workspace),
+            &envs,
+            on_log,
+            INSTALL_TIMEOUT,
+        )
+        .await
+        .map_err(|e| {
+            let op = args.first().map(|a| a.as_str()).unwrap_or("");
+            anyhow!("dsh plugin {op} {e}")
+        })
+    }
+}
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| anyhow!("failed to spawn dsh plugin: {e}"))?;
-        let mut readers = Vec::new();
-        if let Some(out) = child.stdout.take() {
-            let sink = on_log.clone();
-            readers.push(tokio::spawn(async move {
-                let mut r = BufReader::new(out);
-                let mut buf = String::new();
-                loop {
-                    buf.clear();
-                    match r.read_line(&mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {
-                            let line = buf.trim_end_matches(['\r', '\n']).to_string();
-                            if !line.is_empty() {
-                                sink(LogLine {
-                                    stream: LogStream::Stdout,
-                                    level: LogLevel::Info,
-                                    line,
-                                });
-                            }
+// ---------------------------------------------------------------------------
+// Timed sub-process runner shared by every git/pnpm call site.
+//
+// `git clone --depth 1` / `dsh plugin add` have no built-in timeout: when the
+// TCP connection dies mid-transfer git's `index-pack` waits forever, which used
+// to wedge the install job at `running` indefinitely (no failure, no retry).
+// Every caller now runs through [`run_timed`], which kills the WHOLE process
+// tree on expiry — a bare `start_kill()` would orphan git's
+// `index-pack`/`fetch-pack`/`git-remote-https` grandchildren and the hang
+// would survive the kill.
+// ---------------------------------------------------------------------------
+
+/// A shallow clone / fetch / checkout that must finish or die.
+pub const GIT_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// A `dsh plugin` (pnpm) install or from-source build that must finish or die.
+pub const INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// A log sink that discards every line (skill-clone, probes where output is
+/// already routed elsewhere).
+pub fn silent_log_sink() -> LogSink {
+    std::sync::Arc::new(|_| {})
+}
+
+/// Spawn `program`, stream stdout/stderr lines through `sink`, and wait with a
+/// `timeout`. On expiry the whole process tree is killed (Windows
+/// `taskkill /T /F`, elsewhere `killpg`) so grandchildren die too, then a
+/// readable error is returned. Returns `Ok(exit_code)` — including non-zero —
+/// so callers decide what a failure means; `Err` is reserved for spawn / wait /
+/// timeout.
+pub async fn run_timed(
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    envs: &[(String, String)],
+    sink: LogSink,
+    timeout: Duration,
+) -> Result<i32, String> {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args);
+    cmd.current_dir(cwd);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.kill_on_drop(true);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("spawn {program}: {e}"))?;
+
+    let mut readers = Vec::new();
+    if let Some(out) = child.stdout.take() {
+        let sink = sink.clone();
+        readers.push(tokio::spawn(async move {
+            let mut r = BufReader::new(out);
+            let mut buf = String::new();
+            loop {
+                buf.clear();
+                match r.read_line(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let line = buf.trim_end_matches(['\r', '\n']).to_string();
+                        if !line.is_empty() {
+                            sink(LogLine {
+                                stream: LogStream::Stdout,
+                                level: LogLevel::Info,
+                                line,
+                            });
                         }
                     }
                 }
-            }));
-        }
-        if let Some(err) = child.stderr.take() {
-            let sink = on_log.clone();
-            readers.push(tokio::spawn(async move {
-                let mut r = BufReader::new(err);
-                let mut buf = String::new();
-                loop {
-                    buf.clear();
-                    match r.read_line(&mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {
-                            let line = buf.trim_end_matches(['\r', '\n']).to_string();
-                            if !line.is_empty() {
-                                sink(LogLine {
-                                    stream: LogStream::Stderr,
-                                    level: LogLevel::Warn,
-                                    line,
-                                });
-                            }
+            }
+        }));
+    }
+    if let Some(err) = child.stderr.take() {
+        let sink = sink.clone();
+        readers.push(tokio::spawn(async move {
+            let mut r = BufReader::new(err);
+            let mut buf = String::new();
+            loop {
+                buf.clear();
+                match r.read_line(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let line = buf.trim_end_matches(['\r', '\n']).to_string();
+                        if !line.is_empty() {
+                            sink(LogLine {
+                                stream: LogStream::Stderr,
+                                level: LogLevel::Warn,
+                                line,
+                            });
                         }
                     }
                 }
-            }));
+            }
+        }));
+    }
+
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(status) => {
+            let code = status
+                .map_err(|e| format!("wait {program}: {e}"))?
+                .code()
+                .unwrap_or(1);
+            for r in readers {
+                let _ = r.await;
+            }
+            Ok(code)
         }
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| anyhow!("wait dsh plugin: {e}"))?;
-        for r in readers {
-            let _ = r.await;
+        Err(_) => {
+            if let Some(pid) = child.id() {
+                kill_tree(pid);
+            }
+            let _ = child.wait().await;
+            for r in readers {
+                let _ = r.await;
+            }
+            Err(format!(
+                "{program} timed out after {}s — killed its process tree",
+                timeout.as_secs()
+            ))
         }
-        Ok(status.code().unwrap_or(1))
     }
 }
 
@@ -1175,6 +1278,7 @@ pub(crate) fn remove_skin_insert_blocks(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use launcher_core::SkinPackage;
 
     #[test]
     fn parse_inserted_ids_reads_ids_under_insert() {
@@ -1278,6 +1382,171 @@ mod tests {
         assert!(names.contains("dsh-skin-a"));
         assert!(names.contains("@scope/dsh-skin-b"));
         assert!(!names.contains("@deepseek-ai/cordis-plugin-timer"));
+    }
+
+    /// A throwaway profile fixture with two installed skins: a `dsh.bundle`
+    /// skin (catppuccin) and a client-plugin skin (sakura). Returns the ws dir
+    /// the caller must clean up.
+    fn skin_profile_fixture() -> (InstanceManifest, std::path::PathBuf) {
+        let ws = std::env::temp_dir().join(format!("ahl-skin-sem-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws);
+        let profile = ws.join("profiles").join("web");
+        for pkg in ["dsh-catppuccin", "dsh-skin-sakura"] {
+            std::fs::create_dir_all(profile.join("node_modules").join(pkg)).unwrap();
+        }
+        // Both are deps; catppuccin declares a bundle (mounts via bundles).
+        std::fs::write(
+            profile.join("package.json"),
+            r#"{"dependencies":{"dsh-catppuccin":"link:x","dsh-skin-sakura":"link:y"},"dsh":{"profile":{"bundles":["dsh-catppuccin"]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            profile
+                .join("node_modules")
+                .join("dsh-catppuccin")
+                .join("package.json"),
+            r#"{"name":"dsh-catppuccin","keywords":["skin"],"dsh":{"bundle":{"patch":"./cordis.patch.yml"},"client":{"platform":"web"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            profile
+                .join("node_modules")
+                .join("dsh-catppuccin")
+                .join("cordis.patch.yml"),
+            "- insert:\n    - id: catppuccin\n      name: 'dsh-catppuccin'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            profile
+                .join("node_modules")
+                .join("dsh-skin-sakura")
+                .join("package.json"),
+            r#"{"name":"dsh-skin-sakura","dsh":{"client":{"platform":"web"}}}"#,
+        )
+        .unwrap();
+        let instance = InstanceManifest {
+            id: "test".into(),
+            name: "Test".into(),
+            runtime: launcher_core::RuntimeRef {
+                id: "dsh".into(),
+                version: String::new(),
+            },
+            profile: "web".into(),
+            provider_ref: "default".into(),
+            plugins: vec![],
+            skills: vec![],
+            mcp: vec![],
+            skins: vec![],
+            // Both skins are launcher-installed, so both are tracked in
+            // `skin_packages` (the catalog key → package map). A client skin
+            // only toggles through its insert row when registered here.
+            skin_packages: vec![
+                SkinPackage {
+                    key: "zhijun-dai/Catppuccin-dsh-theme".into(),
+                    package: "dsh-catppuccin".into(),
+                    enabled: true,
+                },
+                SkinPackage {
+                    key: "leo-aba/dsh-skin-sakura".into(),
+                    package: "dsh-skin-sakura".into(),
+                    enabled: false,
+                },
+            ],
+            workspace: ws.display().to_string(),
+        };
+        (instance, ws)
+    }
+
+    fn installed_by_name(instance: &InstanceManifest, name: &str) -> InstalledPlugin {
+        DshAdapter::installed_plugins(instance)
+            .into_iter()
+            .find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("plugin {name} not in installed set"))
+    }
+
+    #[test]
+    fn installed_plugins_bundle_skin_toggles_via_disabled_rows() {
+        let (instance, ws) = skin_profile_fixture();
+        let patch = DshAdapter::profile_dir(&instance).join("cordis.patch.yml");
+
+        // No user rows yet → the bundle skin is on; the client skin has no
+        // insert row so it is off (installed but not mounted).
+        let cat = installed_by_name(&instance, "dsh-catppuccin");
+        assert_eq!(cat.kind, InstalledPluginKind::Theme);
+        assert!(cat.enabled, "bundle skin is enabled by default");
+        assert!(cat.toggleable, "bundle skin has toggleable rows");
+        let sakura = installed_by_name(&instance, "dsh-skin-sakura");
+        assert_eq!(sakura.kind, InstalledPluginKind::Theme);
+        assert!(!sakura.enabled, "client skin without insert row is off");
+        assert!(sakura.toggleable, "client skin toggles via its insert row");
+
+        // Disable the bundle skin the way plugin_toggle now does — write
+        // `disabled: true` on one of its bundle rows.
+        std::fs::write(&patch, "- id: catppuccin\n  disabled: true\n").unwrap();
+        assert!(
+            !installed_by_name(&instance, "dsh-catppuccin").enabled,
+            "bundle skin disables via its bundle `disabled:` row"
+        );
+
+        // Enable the client skin the way plugin_toggle now does — write its
+        // insert row into the user patch.
+        std::fs::write(&patch, "- insert:\n    - id: skin-sakura\n      name: dsh-skin-sakura\n")
+            .unwrap();
+        assert!(
+            installed_by_name(&instance, "dsh-skin-sakura").enabled,
+            "client skin enables via insert row presence"
+        );
+        // Removing the insert row turns it back off (disable).
+        std::fs::write(&patch, "# empty\n").unwrap();
+        assert!(
+            !installed_by_name(&instance, "dsh-skin-sakura").enabled,
+            "client skin disables by dropping its insert row"
+        );
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn unregistered_ghost_skin_is_not_toggleable() {
+        // A stale profile dependency whose repo root ships no package.json is
+        // classified as a theme purely from its *name* — and since the launcher
+        // never registered it in `skin_packages`, toggling it has no mechanism
+        // (no bundle rows, no tracked insert row). It must not present a switch
+        // that `plugin_toggle` would reject at runtime.
+        let ws = std::env::temp_dir().join(format!("ahl-skin-ghost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws);
+        let profile = ws.join("profiles").join("web");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(
+            profile.join("package.json"),
+            r#"{"dependencies":{"leo-aba__dsh-skins":"link:x"},"dsh":{"profile":{"bundles":[]}}}"#,
+        )
+        .unwrap();
+        let instance = InstanceManifest {
+            id: "ghost".into(),
+            name: "Ghost".into(),
+            runtime: launcher_core::RuntimeRef {
+                id: "dsh".into(),
+                version: String::new(),
+            },
+            profile: "web".into(),
+            provider_ref: "default".into(),
+            plugins: vec![],
+            skills: vec![],
+            mcp: vec![],
+            skins: vec![],
+            skin_packages: vec![],
+            workspace: ws.display().to_string(),
+        };
+
+        let ghost = installed_by_name(&instance, "leo-aba__dsh-skins");
+        assert_eq!(ghost.kind, InstalledPluginKind::Theme, "name-heuristic theme");
+        assert!(
+            !ghost.toggleable,
+            "unregistered ghost skin must not offer a toggle it cannot honor"
+        );
+
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

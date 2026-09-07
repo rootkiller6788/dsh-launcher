@@ -18,15 +18,14 @@
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
 
 use launcher_core::process::LogSink;
 use launcher_core::{market::npm_registry, LogLevel, LogLine, LogStream, ResolvedProvider};
-use tokio::io::{AsyncBufReadExt, BufReader};
 
-const CLONE_TIMEOUT: Duration = Duration::from_secs(180);
-const BUILD_TIMEOUT: Duration = Duration::from_secs(600);
+// Single source of truth for the durations lives in lib.rs (`run_timed`).
+pub(crate) const CLONE_TIMEOUT: Duration = crate::GIT_TIMEOUT;
+pub(crate) const BUILD_TIMEOUT: Duration = crate::INSTALL_TIMEOUT;
 /// `.venv`/`node_modules` presence is cheap and decisive; install/build output
 /// streams to the Activity log. Non-zero exit or timeout is a hard error.
 const SKIP_DIRS: [&str; 8] = [
@@ -765,6 +764,9 @@ fn resolve_node() -> Option<PathBuf> {
 
 /// Spawn `program + args` in `cwd`, stream stdout(stderr) to the sink, wait with
 /// a hard timeout. Non-zero exit / timeout / spawn failure is an `Err(String)`.
+/// A thin wrapper over [`crate::run_timed`], which on expiry kills the whole
+/// process tree (not just the direct child — a bare `start_kill()` would orphan
+/// `index-pack`/`fetch-pack` grandchildren and the hang would survive).
 async fn run_cmd(
     program: &str,
     args: &[String],
@@ -773,80 +775,7 @@ async fn run_cmd(
     sink: LogSink,
     timeout: Duration,
 ) -> Result<(), String> {
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.args(args);
-    cmd.current_dir(cwd);
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    for (k, v) in envs {
-        cmd.env(k, v);
-    }
-    cmd.kill_on_drop(true);
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("spawn {program}: {e}"))?;
-
-    let mut readers = Vec::new();
-    if let Some(out) = child.stdout.take() {
-        let sink = sink.clone();
-        readers.push(tokio::spawn(async move {
-            let mut r = BufReader::new(out);
-            let mut buf = String::new();
-            loop {
-                buf.clear();
-                match r.read_line(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {
-                        let line = buf.trim_end_matches(['\r', '\n']).to_string();
-                        if !line.is_empty() {
-                            sink(LogLine {
-                                stream: LogStream::Stdout,
-                                level: LogLevel::Info,
-                                line,
-                            });
-                        }
-                    }
-                }
-            }
-        }));
-    }
-    if let Some(err) = child.stderr.take() {
-        let sink = sink.clone();
-        readers.push(tokio::spawn(async move {
-            let mut r = BufReader::new(err);
-            let mut buf = String::new();
-            loop {
-                buf.clear();
-                match r.read_line(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {
-                        let line = buf.trim_end_matches(['\r', '\n']).to_string();
-                        if !line.is_empty() {
-                            sink(LogLine {
-                                stream: LogStream::Stderr,
-                                level: LogLevel::Warn,
-                                line,
-                            });
-                        }
-                    }
-                }
-            }
-        }));
-    }
-
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(status) => status.map_err(|e| format!("wait {program}: {e}"))?,
-        Err(_) => {
-            let _ = child.start_kill();
-            return Err(format!("{program} timed out after {}s", timeout.as_secs()));
-        }
-    };
-    for r in readers {
-        let _ = r.await;
-    }
-    let code = status.code().unwrap_or(1);
+    let code = crate::run_timed(program, args, cwd, envs, sink, timeout).await?;
     if code == 0 {
         Ok(())
     } else {
