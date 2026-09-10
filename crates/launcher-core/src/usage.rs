@@ -11,7 +11,7 @@
 //! than given a fabricated flat estimate.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{anyhow, Result};
 use rusqlite::types::ToSql;
@@ -117,6 +117,14 @@ pub struct UsageLedger {
 }
 
 impl UsageLedger {
+    /// The ledger's connection, with the poisoned-mutex case mapped to a plain
+    /// error. Every public method opens the connection through here.
+    fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|_| anyhow!("usage lock poisoned"))
+    }
+
     pub fn open(db_path: &Path) -> Result<Self> {
         if let Some(dir) = db_path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -168,10 +176,7 @@ impl UsageLedger {
             .unwrap_or((0.0, false)),
         };
         let timestamp = record.timestamp.unwrap_or_else(now_secs);
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("usage lock poisoned"))?;
+        let conn = self.lock()?;
         conn.execute(
             "INSERT INTO usage_records
                 (instance_id, timestamp, model, input_tokens, output_tokens, total_tokens, cost, api_key_alias, request_id, cost_known)
@@ -197,10 +202,7 @@ impl UsageLedger {
     }
 
     pub fn recent(&self, instance_id: Option<&str>, limit: usize) -> Result<Vec<UsageRecord>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("usage lock poisoned"))?;
+        let conn = self.lock()?;
         let sql = if instance_id.is_some() {
             format!(
                 "SELECT {RECORD_COLS} FROM usage_records WHERE instance_id = ?1
@@ -240,10 +242,7 @@ impl UsageLedger {
             from
         };
         let (where_sql, params) = build_filter(instance_id, model, api_key_alias, from, to);
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("usage lock poisoned"))?;
+        let conn = self.lock()?;
 
         let (
             requests,
@@ -336,10 +335,7 @@ impl UsageLedger {
         model: Option<&str>,
         api_key_alias: Option<&str>,
     ) -> Result<Option<u64>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("usage lock poisoned"))?;
+        let conn = self.lock()?;
         let sql = match (instance_id.is_some(), model.is_some(), api_key_alias.is_some()) {
             (true, true, true) => "SELECT MIN(timestamp) FROM usage_records WHERE instance_id = ?1 AND model = ?2 AND api_key_alias = ?3",
             (true, true, false) => "SELECT MIN(timestamp) FROM usage_records WHERE instance_id = ?1 AND model = ?2",
