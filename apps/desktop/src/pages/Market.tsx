@@ -14,6 +14,7 @@ import {
   X,
 } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
+import { KIND_LABEL } from '../lib/content'
 import { useT } from '../lib/i18n'
 import { ipc } from '../lib/ipc'
 import { Select } from '../components/Select'
@@ -83,14 +84,6 @@ const KINDS: { value: ContentKind; label: string }[] = [
   // 整合包 tab 暂时下线：bundle 生态尚未成熟，等 awesome-agent-bundles 火起来再开。
   // { value: 'bundle', label: 'market.tabBundles' },
 ]
-
-const KIND_LABEL: Record<ContentKind, string> = {
-  plugin: 'market.tabPlugins',
-  theme: 'market.tabThemes',
-  skill: 'market.tabSkills',
-  mcp: 'market.tabMcp',
-  bundle: 'market.tabBundles',
-}
 
 const KIND_NOTES: Record<ContentKind, string[]> = {
   plugin: [

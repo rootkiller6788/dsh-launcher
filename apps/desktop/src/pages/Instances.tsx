@@ -15,19 +15,12 @@ import {
   X,
 } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
+import { KIND_LABEL } from '../lib/content'
 import { useT } from '../lib/i18n'
 import { ipc } from '../lib/ipc'
 import { StatTile } from '../components/StatTile'
 import { StatusDot } from '../components/StatusDot'
-import type { ContentKind, EnvironmentPreviewResult, InstanceManifest, Job } from '../lib/types'
-
-const KIND_LABEL: Record<ContentKind, string> = {
-  plugin: 'market.tabPlugins',
-  theme: 'market.tabThemes',
-  skill: 'market.tabSkills',
-  mcp: 'market.tabMcp',
-  bundle: 'market.tabBundles',
-}
+import type { EnvironmentPreviewResult, InstanceManifest, Job } from '../lib/types'
 
 function DetailRow({ label, value }: { label: string; value: string | number }) {
   return (
