@@ -22,9 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::paths::AppPaths;
 use crate::write_json_atomic;
-
-/// Same Windows Credential Manager service as the provider vault.
-const KEYRING_SERVICE: &str = "ai-harness-launcher";
+use crate::KEYRING_SERVICE;
 
 /// One configured variable: the key name and whether its value is a secret.
 /// Serialized to `config.json`; the value is never part of this struct.

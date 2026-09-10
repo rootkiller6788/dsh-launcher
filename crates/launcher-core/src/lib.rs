@@ -26,6 +26,10 @@ pub mod settings;
 pub mod telemetry;
 pub mod usage;
 
+/// OS credential-store service name. The provider vault and the per-MCP config
+/// store share one service and separate the entries by account name.
+pub const KEYRING_SERVICE: &str = "ai-harness-launcher";
+
 pub use bundle::{BundleItemResult, BundleManifest, BundleSummary};
 pub use capabilities::{
     capability_for, CacheSource, ContentCapability, InstallAuthority, StateAuthority,

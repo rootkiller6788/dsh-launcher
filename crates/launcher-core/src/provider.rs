@@ -3,10 +3,9 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::{write_json_atomic, AppPaths};
+use crate::{write_json_atomic, AppPaths, KEYRING_SERVICE};
 
 pub const DEFAULT_PROVIDER_ID: &str = "default";
-const KEYRING_SERVICE: &str = "ai-harness-launcher";
 
 /// A curated provider preset — the "auto-fill" table. DSH's LLM layer is an
 /// OpenAI-compatible client (`POST {base_url}/chat/completions`), so any
