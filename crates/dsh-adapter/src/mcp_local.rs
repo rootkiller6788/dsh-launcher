@@ -602,7 +602,9 @@ async fn build_python(base: &Path, sink: LogSink) -> Result<LocalLaunch, Resolve
         return Err(ResolveFail::NeedsAi(reason.into()));
     };
     let venv = base.join(".venv");
-    let py = ensure_python_env(&venv, base, sink).await?;
+    // Materialize the venv and its deps; the console script below is what we
+    // launch, so the interpreter path itself is not needed here.
+    ensure_python_env(&venv, base, sink).await?;
     // Console script the editable install generated inside the venv.
     let console = venv_console(&venv, &script);
     if !console.is_file() {
@@ -612,8 +614,6 @@ async fn build_python(base: &Path, sink: LogSink) -> Result<LocalLaunch, Resolve
             console.display()
         )));
     }
-    // Keep the venv python as the interpreter, run the console script path.
-    let _ = py;
     Ok(LocalLaunch {
         command: path_arg(&console),
         args: vec![],
