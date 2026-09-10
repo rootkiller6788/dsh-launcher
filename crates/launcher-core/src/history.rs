@@ -5,7 +5,7 @@
 //! single table of launch sessions so the Activity page survives restarts.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{anyhow, Result};
 use rusqlite::Connection;
@@ -55,12 +55,17 @@ impl LaunchHistory {
         })
     }
 
+    /// The store's connection, with the poisoned-mutex case mapped to a plain
+    /// error. Every public method opens the connection through here.
+    fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|_| anyhow!("history lock poisoned"))
+    }
+
     /// Insert a running session and return its row id.
     pub fn record_start(&self, instance_id: &str) -> Result<i64> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("history lock poisoned"))?;
+        let conn = self.lock()?;
         conn.execute(
             "INSERT INTO launch_sessions (instance_id, started_at, status) VALUES (?1, ?2, 'running')",
             rusqlite::params![instance_id, now_secs()],
@@ -71,10 +76,7 @@ impl LaunchHistory {
 
     /// Close out a running session.
     pub fn record_end(&self, session_id: i64, status: &str, exit_code: Option<i32>) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("history lock poisoned"))?;
+        let conn = self.lock()?;
         conn.execute(
             "UPDATE launch_sessions SET ended_at = ?1, status = ?2, exit_code = ?3 WHERE id = ?4",
             rusqlite::params![now_secs(), status, exit_code, session_id],
@@ -85,10 +87,7 @@ impl LaunchHistory {
 
     /// Most recent sessions, newest first.
     pub fn recent(&self, limit: usize) -> Result<Vec<LaunchSession>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("history lock poisoned"))?;
+        let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, instance_id, started_at, ended_at, exit_code, status
