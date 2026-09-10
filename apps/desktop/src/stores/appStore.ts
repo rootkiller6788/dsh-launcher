@@ -48,6 +48,9 @@ let themeSyncInFlight = false
 /** Same cooldown for the language poll (`dsh_language` / `syncLanguage`). */
 let lastLanguageWriteAt = 0
 
+/** What both polls above wait out before reading DSH back. */
+const SYNC_COOLDOWN_MS = 2500
+
 let pluginInventoryInFlight = false
 let lastPluginInventoryInstance: string | null = null
 let lastPluginInventorySignature = ''
@@ -690,7 +693,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   syncLanguage: async () => {
     // Give a just-pushed write time to land before reading DSH back.
-    if (Date.now() - lastLanguageWriteAt < 2500) return
+    if (Date.now() - lastLanguageWriteAt < SYNC_COOLDOWN_MS) return
     try {
       const lang = await ipc.dshLanguage()
       if (lang && lang !== get().language) {
@@ -719,7 +722,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   syncTheme: async () => {
     // Give a just-pushed launcher write time to land before reading DSH back.
-    if (Date.now() - lastThemeWriteAt < 2500) return
+    if (Date.now() - lastThemeWriteAt < SYNC_COOLDOWN_MS) return
     if (themeSyncInFlight) return
     themeSyncInFlight = true
     try {
