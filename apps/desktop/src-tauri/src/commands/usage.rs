@@ -1,8 +1,8 @@
 use launcher_core::{NewUsageRecord, UsageRecord, UsageSummary};
 use serde::Serialize;
-use std::path::PathBuf;
 use tauri::State;
 
+use crate::commands::paths::downloads_dir;
 use crate::error::AppError;
 use crate::state::AppState;
 
@@ -89,14 +89,6 @@ pub fn usage_export(
         format: ext.into(),
         records: summary.records.len(),
     })
-}
-
-fn downloads_dir() -> PathBuf {
-    std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .map(|p| p.join("Downloads"))
-        .filter(|p| p.exists())
-        .unwrap_or_else(std::env::temp_dir)
 }
 
 fn usage_csv(records: &[UsageRecord]) -> String {

@@ -52,6 +52,17 @@ pub fn reveal_instance_config(state: State<'_, AppState>, id: String) -> Result<
     }
 }
 
+/// The user's Downloads folder, falling back to the temp dir when there is no
+/// `USERPROFILE` or no Downloads inside it. The export commands write their
+/// artifacts here.
+pub(crate) fn downloads_dir() -> PathBuf {
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .map(|p| p.join("Downloads"))
+        .filter(|p| p.exists())
+        .unwrap_or_else(std::env::temp_dir)
+}
+
 fn reveal_path(path: &Path) -> Result<(), AppError> {
     #[cfg(target_os = "windows")]
     {

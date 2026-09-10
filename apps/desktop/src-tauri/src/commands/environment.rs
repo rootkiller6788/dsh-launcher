@@ -16,6 +16,7 @@ use tauri::{AppHandle, State};
 use zip::write::SimpleFileOptions;
 
 use crate::commands::content::install_bundle_item;
+use crate::commands::paths::downloads_dir;
 use crate::commands::plugins::{
     ensure_not_running, reconcile_library_inventory_after_market_change, LibraryItemSource,
 };
@@ -190,14 +191,6 @@ fn validate_package(pkg: &EnvironmentPackage) -> Result<(), AppError> {
         return Err(AppError::msg("environment package checksum mismatch"));
     }
     Ok(())
-}
-
-fn downloads_dir() -> PathBuf {
-    std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .map(|p| p.join("Downloads"))
-        .filter(|p| p.exists())
-        .unwrap_or_else(std::env::temp_dir)
 }
 
 fn slug(name: &str) -> String {
