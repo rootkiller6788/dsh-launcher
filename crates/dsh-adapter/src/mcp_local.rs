@@ -58,9 +58,9 @@ pub(crate) enum ResolveFail {
 impl ResolveFail {
     pub(crate) fn into_err(self) -> String {
         match self {
-            ResolveFail::NeedsAi(detail) => detail,
-            ResolveFail::ToolMissing(detail) => detail,
-            ResolveFail::Failed(detail) => detail,
+            ResolveFail::NeedsAi(detail)
+            | ResolveFail::ToolMissing(detail)
+            | ResolveFail::Failed(detail) => detail,
         }
     }
 }
