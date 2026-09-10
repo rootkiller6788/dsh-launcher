@@ -1,6 +1,6 @@
 {
   "updated": "",
-  "count": 1203,
+  "count": 1204,
   "categories": {
     "Advertising Skills by Kim Barrett": {
       "en": "Advertising Skills by Kim Barrett",
@@ -26749,6 +26749,29 @@
       "replacement": null,
       "kind": "skill",
       "fetch": "https://raw.githubusercontent.com/czlonkowski/n8n-skills/main/skills/n8n-workflow-patterns/SKILL.md"
+    },
+    {
+      "name": "mathmodel-skill",
+      "owner": "rootkiller6788",
+      "url": "https://github.com/rootkiller6788/mathmodel-skill",
+      "category": [
+        "Specialized Domains"
+      ],
+      "description": {
+        "en": "End-to-end workflow for math-modeling competitions (CUMCM, MCM/ICM, Diangong Cup): 10 stages, modeler/coder/writer roles, 5 quality gates.",
+        "zh": "CUMCM 国赛、MCM/ICM 美赛与电工杯数学建模竞赛的端到端工作流：10 阶段时间线 × 建模手/编程手/论文手三角色 × 5 道质检门禁。"
+      },
+      "npm": null,
+      "tarball": null,
+      "screenshots": [],
+      "stars": null,
+      "downloads": null,
+      "install": "",
+      "added": "",
+      "deprecated": null,
+      "replacement": null,
+      "kind": "skill",
+      "fetch": "https://raw.githubusercontent.com/rootkiller6788/mathmodel-skill/HEAD/SKILL.md"
     }
   ]
 }
