@@ -20,6 +20,10 @@ use tokio::task::JoinHandle;
 
 use crate::now_secs;
 
+/// Poll cadence shared by the child watcher and [`wait_for_port`]: how often the
+/// supervisor asks whether the harness is still alive / listening yet.
+const POLL_INTERVAL: Duration = Duration::from_millis(250);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProcessStatus {
@@ -435,7 +439,7 @@ pub async fn spawn_child_with_exit(
     #[cfg(windows)]
     let wjob = job.clone();
     let watcher = tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_millis(250));
+        let mut tick = tokio::time::interval(POLL_INTERVAL);
         loop {
             tokio::select! {
                 _ = kill_rx.recv() => {
@@ -504,7 +508,7 @@ pub async fn wait_for_port(port: u16, timeout: Duration) -> bool {
         if TcpStream::connect(addr).await.is_ok() {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
     false
 }
