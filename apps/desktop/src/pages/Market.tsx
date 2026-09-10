@@ -14,7 +14,7 @@ import {
   X,
 } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
-import { KIND_LABEL } from '../lib/content'
+import { KIND_LABEL, pluginKey } from '../lib/content'
 import { useT } from '../lib/i18n'
 import { ipc } from '../lib/ipc'
 import { Select } from '../components/Select'
@@ -29,11 +29,6 @@ import type {
   PluginUpdate,
   RegistryPlugin,
 } from '../lib/types'
-
-/** Stable identity: `owner/name` when an owner exists, else the bare name. */
-function pluginKey(p: RegistryPlugin) {
-  return p.owner ? `${p.owner}/${p.name}` : p.name
-}
 
 function repoPackageName(entry: RegistryPlugin) {
   const repoPath = entry.url

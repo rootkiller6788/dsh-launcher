@@ -16,6 +16,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
+import { pluginKey } from '../lib/content'
 import { useT } from '../lib/i18n'
 import { runtimeNeedsConfig, runtimeNoTools } from '../lib/mcpConfig'
 import { InstallCenter } from '../components/InstallCenter'
@@ -91,10 +92,6 @@ function healthTooltip(h: McpRuntimeState | null): string {
   if (h?.error) bits.push(h.error)
   if (h && h.tools.length > 0) bits.push(`${h.tools.length} tools`)
   return bits.join(' · ')
-}
-
-function pluginKey(p: RegistryPlugin) {
-  return p.owner ? `${p.owner}/${p.name}` : p.name
 }
 
 function findCatalogEntry(
