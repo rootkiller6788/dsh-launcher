@@ -23,6 +23,9 @@ const DSH_URL_EVENT: &str = "dsh-url";
 const PROCESS_STATE_EVENT: &str = "process-state";
 /// Payload is the settings namespace that changed (`ui-theme` | `locale`).
 const SETTINGS_CHANGED_EVENT: &str = "dsh-settings-changed";
+/// Emitted whenever a proxied response yields a usage record. Shared with
+/// `usage_proxy`, and matched by the frontend listener in `appStore.ts`.
+pub(crate) const USAGE_EVENT: &str = "usage-recorded";
 
 /// Launch an instance's harness as a managed child, wait for DSH to report its
 /// web URL, then show the UI in a launcher-owned DSH window. One instance runs
@@ -589,7 +592,7 @@ fn make_usage_sink(
         {
             let state = app.state::<AppState>();
             if let Ok(Some(saved)) = state.usage.record(record) {
-                let _ = app.emit("usage-recorded", &saved);
+                let _ = app.emit(USAGE_EVENT, &saved);
             }
         }
         let _ = app.emit(LOG_EVENT, &line);

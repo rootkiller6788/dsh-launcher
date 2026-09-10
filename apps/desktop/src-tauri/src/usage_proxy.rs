@@ -247,7 +247,7 @@ fn maybe_record_usage(ctx: &ProxyContext, request: &[u8], response: &[u8]) {
                 saved.total_tokens, saved.model
             ),
         );
-        let _ = ctx.app.emit("usage-recorded", &saved);
+        let _ = ctx.app.emit(crate::commands::process::USAGE_EVENT, &saved);
     }
 }
 
@@ -465,7 +465,7 @@ fn maybe_record_usage_value(ctx: &ProxyContext, request: &[u8], value: &Value) -
                 saved.total_tokens, saved.model
             ),
         );
-        let _ = ctx.app.emit("usage-recorded", &saved);
+        let _ = ctx.app.emit(crate::commands::process::USAGE_EVENT, &saved);
         return true;
     }
     false
