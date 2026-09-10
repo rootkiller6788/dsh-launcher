@@ -44,6 +44,23 @@ pub struct AppPaths {
 }
 
 impl AppPaths {
+    /// Canonical layout for a data root: every path the launcher owns hangs off
+    /// `root`. The runtime resolver and the test helpers both build through here
+    /// so the two layouts can never drift apart.
+    pub fn rooted_at(root: PathBuf, portable: bool) -> Self {
+        Self {
+            settings: root.join("settings.json"),
+            providers: root.join("providers.json"),
+            runtimes: root.join("runtimes"),
+            instances: root.join("instances"),
+            cache: root.join("cache"),
+            logs: root.join("logs"),
+            launcher_log: root.join("logs").join("launcher.log"),
+            root,
+            portable,
+        }
+    }
+
     pub fn from_env() -> Result<Self> {
         let exe_dir = std::env::current_exe()
             .ok()
@@ -56,17 +73,7 @@ impl AppPaths {
             ahl_portable.as_deref(),
         )
         .ok_or_else(|| anyhow!("cannot resolve base directories"))?;
-        Ok(Self {
-            root: base.clone(),
-            portable,
-            settings: base.join("settings.json"),
-            providers: base.join("providers.json"),
-            runtimes: base.join("runtimes"),
-            instances: base.join("instances"),
-            cache: base.join("cache"),
-            logs: base.join("logs"),
-            launcher_log: base.join("logs").join("launcher.log"),
-        })
+        Ok(Self::rooted_at(base, portable))
     }
 
     /// Idempotently create every directory the launcher owns.

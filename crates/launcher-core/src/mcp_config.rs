@@ -184,17 +184,7 @@ mod tests {
     fn test_store(tag: &str) -> (McpConfigStore, PathBuf) {
         let dir = std::env::temp_dir().join(format!("ahl-mcpcfg-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let paths = AppPaths {
-            root: dir.clone(),
-            portable: false,
-            settings: dir.join("settings.json"),
-            providers: dir.join("providers.json"),
-            runtimes: dir.join("runtimes"),
-            instances: dir.join("instances"),
-            cache: dir.join("cache"),
-            logs: dir.join("logs"),
-            launcher_log: dir.join("logs").join("launcher.log"),
-        };
+        let paths = AppPaths::rooted_at(dir.clone(), false);
         (McpConfigStore::new(paths), dir)
     }
 

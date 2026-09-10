@@ -1706,17 +1706,7 @@ mod tests {
             .as_nanos();
         let root = std::env::temp_dir().join(format!("ahl-snapshot-{label}-{nanos}"));
         let _ = fs::create_dir_all(&root);
-        AppPaths {
-            portable: false,
-            settings: root.join("settings.json"),
-            providers: root.join("providers.json"),
-            runtimes: root.join("runtimes"),
-            instances: root.join("instances"),
-            cache: root.join("cache"),
-            logs: root.join("logs"),
-            launcher_log: root.join("logs").join("launcher.log"),
-            root,
-        }
+        AppPaths::rooted_at(root, false)
     }
 
     fn sample_state(label: &str) -> AppState {

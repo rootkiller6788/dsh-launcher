@@ -745,17 +745,7 @@ mod tests {
     fn tmp_paths(tag: &str) -> AppPaths {
         let root = std::env::temp_dir().join(format!("ahl-instance-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        AppPaths {
-            root: root.clone(),
-            portable: false,
-            settings: root.join("settings.json"),
-            providers: root.join("providers.json"),
-            runtimes: root.join("runtimes"),
-            instances: root.join("instances"),
-            cache: root.join("cache"),
-            logs: root.join("logs"),
-            launcher_log: root.join("logs").join("launcher.log"),
-        }
+        AppPaths::rooted_at(root, false)
     }
 
     /// Write a minimal instance.json whose `mcp` field is exactly `mcp_json`.
