@@ -27,6 +27,7 @@ use crate::commands::plugins::{
     remove_market_install_metadata, resolve_plugin_install_target, LibraryItemSource,
 };
 use crate::commands::process::{emit_log, make_sink};
+use crate::commands::settings::settings_snapshot;
 use crate::error::AppError;
 use crate::jobs::{enqueue_install, run_instance_job, HeavyJobKind, JobCtx};
 use crate::state::AppState;
@@ -417,11 +418,7 @@ pub(crate) async fn mcp_install_job(
     if cls == InstallClass::RegistryPackage {
         let plan = plan.as_ref().expect("registry_pkg implies a plan");
         ctx.progress("download", 20);
-        let settings = state
-            .settings
-            .lock()
-            .map_err(|_| AppError::msg("settings lock poisoned"))?
-            .clone();
+        let settings = settings_snapshot(state)?;
         let node = state.adapter.resolve_node(&settings);
         emit_log(
             app,
@@ -456,11 +453,7 @@ pub(crate) async fn mcp_install_job(
         match mcp_local::github_source(&entry.url) {
             Some((clone_url, _, _)) => {
                 let repo_dir = state.paths.mcp_dir(id, &record.id).join("repo");
-                let settings = state
-                    .settings
-                    .lock()
-                    .map_err(|_| AppError::msg("settings lock poisoned"))?
-                    .clone();
+                let settings = settings_snapshot(state)?;
                 let node = state.adapter.resolve_node(&settings);
                 // The AI fallback is optional: resolve the provider key lazily so
                 // a deterministic build works even with none configured.
@@ -768,11 +761,7 @@ async fn probe_and_persist(
         return Err(AppError::msg(format!("MCP '{server}' is not installed")));
     };
 
-    let settings = state
-        .settings
-        .lock()
-        .map_err(|_| AppError::msg("settings lock poisoned"))?
-        .clone();
+    let settings = settings_snapshot(state)?;
     let node = state.adapter.resolve_node(&settings);
 
     let runtime_file = state.paths.mcp_runtime_file(id, &record.id);
@@ -1419,11 +1408,7 @@ pub(crate) async fn bundle_import_job(
 ) -> Result<(), AppError> {
     ensure_not_running(state, id).await?;
     let instance = InstanceManifest::get(&state.paths, id)?;
-    let settings = state
-        .settings
-        .lock()
-        .map_err(|_| AppError::msg("settings lock poisoned"))?
-        .clone();
+    let settings = settings_snapshot(state)?;
 
     emit_log(
         app,
@@ -1530,11 +1515,7 @@ pub(crate) async fn market_install_job(
     }
     ensure_not_running(state, id).await?;
     let instance = InstanceManifest::get(&state.paths, id)?;
-    let settings = state
-        .settings
-        .lock()
-        .map_err(|_| AppError::msg("settings lock poisoned"))?
-        .clone();
+    let settings = settings_snapshot(state)?;
 
     let label = kind_label(entry.kind);
     let key = entry.key();

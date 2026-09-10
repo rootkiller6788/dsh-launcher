@@ -4,6 +4,7 @@ use launcher_core::RuntimeAdapter;
 use sysinfo::Disks;
 use tauri::State;
 
+use crate::commands::settings::settings_snapshot;
 use crate::error::AppError;
 use crate::state::AppState;
 
@@ -19,11 +20,7 @@ pub struct SystemInfo {
 /// One-shot environment snapshot for the Settings "detect" panel.
 #[tauri::command]
 pub fn system_info(state: State<'_, AppState>) -> Result<SystemInfo, AppError> {
-    let settings = state
-        .settings
-        .lock()
-        .map_err(|_| AppError::msg("settings lock poisoned"))?
-        .clone();
+    let settings = settings_snapshot(&state)?;
     let node = check_tool("node", "--version");
     let git = check_tool("git", "--version");
     let (dsh, dsh_error) = match state.adapter.detect(&settings) {

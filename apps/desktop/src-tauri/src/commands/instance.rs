@@ -1,6 +1,7 @@
 use launcher_core::InstanceManifest;
 use tauri::State;
 
+use crate::commands::settings::{settings_lock, settings_snapshot};
 use crate::error::AppError;
 use crate::state::AppState;
 
@@ -38,10 +39,7 @@ pub fn create_instance(
     request: NameRequest,
 ) -> Result<InstanceManifest, AppError> {
     let manifest = InstanceManifest::create(&state.paths, &request.name)?;
-    let mut guard = state
-        .settings
-        .lock()
-        .map_err(|_| AppError::msg("settings lock poisoned"))?;
+    let mut guard = settings_lock(&state)?;
     if guard.last_instance.is_none() {
         guard.last_instance = Some(manifest.id.clone());
         guard.save(&state.paths)?;
@@ -87,10 +85,7 @@ pub async fn delete_instance(state: State<'_, AppState>, id: String) -> Result<(
     drop(guard);
     InstanceManifest::delete(&state.paths, &id)?;
     // If the deleted instance was active, move the active marker elsewhere.
-    let mut settings = state
-        .settings
-        .lock()
-        .map_err(|_| AppError::msg("settings lock poisoned"))?;
+    let mut settings = settings_lock(&state)?;
     if settings.last_instance.as_deref() == Some(id.as_str()) {
         let fallback = InstanceManifest::list(&state.paths)?
             .into_iter()
@@ -109,10 +104,7 @@ pub fn switch_instance(
 ) -> Result<InstanceManifest, AppError> {
     // Verify it exists first.
     let manifest = InstanceManifest::get(&state.paths, &id)?;
-    let mut guard = state
-        .settings
-        .lock()
-        .map_err(|_| AppError::msg("settings lock poisoned"))?;
+    let mut guard = settings_lock(&state)?;
     guard.last_instance = Some(id);
     guard.save(&state.paths)?;
     Ok(manifest)
@@ -125,12 +117,7 @@ pub(crate) fn active_instance(
     if let Some(id) = explicit {
         return Ok(InstanceManifest::get(&state.paths, id)?);
     }
-    let last = state
-        .settings
-        .lock()
-        .map_err(|_| AppError::msg("settings lock poisoned"))?
-        .last_instance
-        .clone();
+    let last = settings_snapshot(state)?.last_instance.clone();
     if let Some(id) = last {
         if let Ok(manifest) = InstanceManifest::get(&state.paths, &id) {
             return Ok(manifest);

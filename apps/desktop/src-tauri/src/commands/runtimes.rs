@@ -8,9 +8,9 @@
 use std::path::PathBuf;
 
 use dsh_adapter::runtimes::{NodeInfo, RuntimeEntry, Runtimes, VerifyReport};
-use launcher_core::AppSettings;
 use tauri::State;
 
+use crate::commands::settings::settings_snapshot;
 use crate::error::AppError;
 use crate::state::AppState;
 
@@ -30,17 +30,9 @@ fn manager(state: &AppState) -> Runtimes {
     Runtimes::new(state.paths.runtimes.clone())
 }
 
-fn locked_settings(state: &AppState) -> Result<AppSettings, AppError> {
-    Ok(state
-        .settings
-        .lock()
-        .map_err(|_| AppError::msg("settings lock poisoned"))?
-        .clone())
-}
-
 #[tauri::command]
 pub fn runtime_list(state: State<'_, AppState>) -> Result<RuntimeManagerView, AppError> {
-    let settings = locked_settings(&state)?;
+    let settings = settings_snapshot(&state)?;
     let (node, node_err) = match state.adapter.node_info(&settings) {
         Ok((version, path)) => (
             NodeInfo {
@@ -108,7 +100,7 @@ pub fn runtime_verify(
     state: State<'_, AppState>,
     version: String,
 ) -> Result<VerifyReport, AppError> {
-    let settings = locked_settings(&state)?;
+    let settings = settings_snapshot(&state)?;
     let node = state.adapter.resolve_node(&settings);
     manager(&state)
         .verify(&version, node.as_deref())
@@ -122,7 +114,7 @@ pub async fn runtime_repair(
     version: String,
     source: Option<String>,
 ) -> Result<RuntimeEntry, AppError> {
-    let settings = locked_settings(&state)?;
+    let settings = settings_snapshot(&state)?;
     let node = state.adapter.resolve_node(&settings);
     let mgr = manager(&state);
     let src = source.map(|s| PathBuf::from(s.trim()));

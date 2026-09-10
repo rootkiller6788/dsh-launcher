@@ -14,6 +14,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::oneshot;
 
 use crate::commands::plugins::reconcile_library_inventory_after_market_change;
+use crate::commands::settings::settings_snapshot;
 use crate::error::AppError;
 use crate::jobs::{run_instance_job, HeavyJobKind};
 use crate::state::AppState;
@@ -85,11 +86,7 @@ async fn do_launch(
         }
     }
 
-    let settings = state
-        .settings
-        .lock()
-        .map_err(|_| AppError::msg("settings lock poisoned"))?
-        .clone();
+    let settings = settings_snapshot(state)?;
     let instance = InstanceManifest::get(&state.paths, &id)?;
     let provider = state.vault.resolve(&instance.provider_ref)?;
     let mut env = state.adapter.build_env(&provider, &instance)?;

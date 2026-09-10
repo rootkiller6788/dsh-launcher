@@ -1,6 +1,7 @@
 use dsh_adapter::theme;
 use tauri::State;
 
+use crate::commands::settings::settings_lock;
 use crate::error::AppError;
 use crate::state::AppState;
 
@@ -14,10 +15,7 @@ pub async fn set_theme(state: State<'_, AppState>, theme: String) -> Result<Stri
         return Err(AppError::msg(format!("invalid theme `{theme}`")));
     }
     {
-        let mut settings = state
-            .settings
-            .lock()
-            .map_err(|_| AppError::msg("settings lock poisoned"))?;
+        let mut settings = settings_lock(&state)?;
         settings.theme = Some(theme.clone());
         settings.save(&state.paths)?;
     }

@@ -21,6 +21,7 @@ use crate::commands::plugins::{
     ensure_not_running, reconcile_library_inventory_after_market_change, LibraryItemSource,
 };
 use crate::commands::process::emit_log;
+use crate::commands::settings::settings_snapshot;
 use crate::error::AppError;
 use crate::jobs::{enqueue_install, run_instance_job, HeavyJobKind, JobCtx};
 use crate::state::AppState;
@@ -508,11 +509,7 @@ pub(crate) async fn environment_import_job(
 ) -> Result<(), AppError> {
     ensure_not_running(state, id).await?;
     let instance = InstanceManifest::get(&state.paths, id)?;
-    let settings = state
-        .settings
-        .lock()
-        .map_err(|_| AppError::msg("settings lock poisoned"))?
-        .clone();
+    let settings = settings_snapshot(state)?;
 
     emit_log(
         app,

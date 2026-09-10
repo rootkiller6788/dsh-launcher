@@ -15,6 +15,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::content::land_install_disabled;
 use crate::commands::process::{emit_log, make_sink};
+use crate::commands::settings::settings_snapshot;
 use crate::error::AppError;
 use crate::jobs::{enqueue_install, run_instance_job, HeavyJobKind, JobCtx};
 use crate::state::AppState;
@@ -1311,11 +1312,7 @@ pub(crate) async fn plugin_install_job(
 ) -> Result<(), AppError> {
     ensure_not_running(state, id).await?;
     let instance = InstanceManifest::get(&state.paths, id)?;
-    let settings = state
-        .settings
-        .lock()
-        .map_err(|_| AppError::msg("settings lock poisoned"))?
-        .clone();
+    let settings = settings_snapshot(state)?;
 
     emit_log(app, &format!("{id} · installing plugin {target}…"));
     if let Some(entry) = entry {
@@ -1438,11 +1435,7 @@ pub async fn plugin_uninstall(
     run_instance_job(&state, &app, &job_id, HeavyJobKind::Uninstall, || async {
         ensure_not_running(&state, &id).await?;
         let instance = InstanceManifest::get(&state.paths, &id)?;
-        let settings = state
-            .settings
-            .lock()
-            .map_err(|_| AppError::msg("settings lock poisoned"))?
-            .clone();
+        let settings = settings_snapshot(&state)?;
 
         // Capture the plugin's patch rows BEFORE `dsh plugin remove` deletes its
         // node_modules, then clear them so a removed plugin leaves no orphan
@@ -1654,11 +1647,7 @@ pub(crate) async fn plugin_update_job(
 ) -> Result<(), AppError> {
     ensure_not_running(state, id).await?;
     let instance = InstanceManifest::get(&state.paths, id)?;
-    let settings = state
-        .settings
-        .lock()
-        .map_err(|_| AppError::msg("settings lock poisoned"))?
-        .clone();
+    let settings = settings_snapshot(state)?;
 
     emit_log(app, &format!("{id} · updating plugin {name}…"));
     ctx.progress("dsh-install", 40);

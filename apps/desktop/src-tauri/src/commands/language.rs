@@ -1,6 +1,7 @@
 use dsh_adapter::language;
 use tauri::State;
 
+use crate::commands::settings::settings_lock;
 use crate::error::AppError;
 use crate::state::AppState;
 
@@ -17,10 +18,7 @@ pub async fn set_language(
         return Err(AppError::msg(format!("invalid language `{language}`")));
     }
     {
-        let mut settings = state
-            .settings
-            .lock()
-            .map_err(|_| AppError::msg("settings lock poisoned"))?;
+        let mut settings = settings_lock(&state)?;
         settings.language = Some(language.clone());
         settings.save(&state.paths)?;
     }
