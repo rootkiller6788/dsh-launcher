@@ -55,8 +55,8 @@ async fn do_launch(
         let mut guard = state.child.lock().await;
 
         // One-at-a-time: if something else is running, stop it (and close its DSH
-        // window). `Degraded` counts as live — it's a still-booting child waiting
-        // on its URL in the background, not a dead one.
+        // window). `Starting` and `Degraded` both count as live — either way the
+        // child process is up, so a second launch must not spawn a second tree.
         if let Some(running) = guard.as_ref() {
             let status = running.handle.state().status;
             if matches!(
@@ -313,10 +313,17 @@ async fn do_launch(
         None => {
             // The 20s ceiling is too short for a cold first boot (fresh `web`
             // profile materialize + pnpm install of its bundles can take over a
-            // minute). Don't give up on the process — mark degraded for the UI,
-            // keep it running, and hand the rest of the wait to a background
-            // task that opens the DSH window the moment the URL finally lands.
-            handle.set_status(ProcessStatus::Degraded);
+            // minute). Don't give up on the process — keep it running and hand
+            // the rest of the wait to a background task that opens the DSH
+            // window the moment the URL finally lands.
+            //
+            // Status deliberately stays `Starting` rather than flipping to
+            // `Degraded`: the child is mid-boot, not degraded, and the UI reads
+            // `degraded` as a failure badge — which is exactly the "it said it
+            // failed, then came up on its own" flicker users reported. The
+            // frontend shows a disabled "starting" button for as long as this
+            // holds, and `finalize_ready` moves it to `Running` when the URL
+            // lands.
             emit_log(
                 app,
                 &format!("{id} · DSH web did not report a URL within 20s — still booting, waiting in background…"),
@@ -351,6 +358,17 @@ async fn do_launch(
                         }
                     }
                     _ => {
+                        // Four minutes with no URL is no longer "slow boot" —
+                        // this is the genuine degraded state, and the only
+                        // producer of it: the child is alive but never became
+                        // reachable, so the UI should stop promising a boot.
+                        let state = app.state::<AppState>();
+                        let mut guard = state.child.lock().await;
+                        if let Some(r) = guard.as_mut() {
+                            if r.handle.pid == pid {
+                                r.handle.set_status(ProcessStatus::Degraded);
+                            }
+                        }
                         emit_log(
                             &app,
                             &format!("{id_task} · DSH web still not ready after 4 min — check Activity logs"),

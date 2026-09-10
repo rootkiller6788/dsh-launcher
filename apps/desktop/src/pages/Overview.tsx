@@ -362,7 +362,9 @@ export function Overview() {
   const mcpCount = activeInstance?.mcp.length ?? 0
   const skillCount = activeInstance?.skills.length ?? 0
   const recent = history.slice(0, 3)
-  const launchEnabled = !!activeId && !busy
+  // A cold boot outlasts `busy` (the launch IPC returns after the 20s ceiling
+  // while the child keeps starting), so `starting` gates the actions too.
+  const launchEnabled = !!activeId && !busy && status !== 'starting'
 
   const cpuSeries = systemHistory.map((s) => s.cpu)
   const memPct = (s: SystemStats) =>

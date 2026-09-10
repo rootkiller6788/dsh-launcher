@@ -4,6 +4,7 @@ import {
   Boxes,
   Copy,
   LayoutDashboard,
+  Loader2,
   Minus,
   PackageCheck,
   Play,
@@ -17,6 +18,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import type { Page } from './lib/types'
 import { useAppStore } from './stores/appStore'
 import { applyTheme } from './lib/theme'
+import { formatDuration } from './lib/format'
 import { useT } from './lib/i18n'
 import { StatusDot } from './components/StatusDot'
 import logo from './assets/dshl-logo.png'
@@ -75,7 +77,19 @@ function Workspace() {
   const setShellMode = useAppStore((s) => s.setShellMode)
   const status = processState?.status ?? 'stopped'
   const live = status === 'running' || status === 'starting' || status === 'degraded'
+  // Mid-boot: the child is up but has not reported its web URL yet. This can
+  // outlast the launch IPC (`busy`), so the button is gated on the status too —
+  // otherwise it flips back to "Launch DSH" while the boot is still running.
+  const starting = status === 'starting'
   const paintedRef = useRef(false)
+
+  // Re-render every second while booting so the elapsed counter ticks.
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    if (!starting) return
+    const id = window.setInterval(() => setTick((n) => n + 1), 1000)
+    return () => window.clearInterval(id)
+  }, [starting])
 
   // Stage timing (Stage 11): once the workspace iframe first renders after a
   // launch, emit a debug log with the end-to-end launch→paint latency. The
@@ -152,13 +166,23 @@ function Workspace() {
           </button>
           <button
             onClick={() => activeId && void launch(activeId)}
-            disabled={!activeId || busy}
+            disabled={!activeId || busy || starting}
             className="flex h-10 items-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-semibold text-white shadow-lg shadow-blue-950/25 hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <Play className="h-4 w-4" strokeWidth={1.75} />
-            {busy ? t('overview.working') : t('overview.launchDsh')}
+            {starting ? (
+              <Loader2 className="h-4 w-4 animate-spin" strokeWidth={1.75} />
+            ) : (
+              <Play className="h-4 w-4" strokeWidth={1.75} />
+            )}
+            {starting ? t('status.starting') : busy ? t('overview.working') : t('overview.launchDsh')}
           </button>
         </div>
+
+        {starting && (
+          <p className="mt-3 text-right text-xs text-zinc-500">
+            {formatDuration(processState?.startedAt, null)} · {t('workspace.booting')}
+          </p>
+        )}
       </section>
     </div>
   )
