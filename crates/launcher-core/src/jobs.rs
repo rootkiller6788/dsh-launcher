@@ -13,7 +13,7 @@
 //! not a reference the page still happens to hold.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -224,15 +224,20 @@ impl JobStore {
         })
     }
 
+    /// The store's connection, with the poisoned-mutex case mapped to a plain
+    /// error. Every public method opens the connection through here.
+    fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|_| anyhow!("jobs lock poisoned"))
+    }
+
     /// Insert a new `waiting` job and return the persisted row.
     pub fn create(&self, instance_id: &str, key: &str, label: &str, plan: &JobPlan) -> Result<Job> {
         let kind = plan.kind();
         let plan_json = serde_json::to_string(plan)?;
         let created_at = now_secs();
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("jobs lock poisoned"))?;
+        let conn = self.lock()?;
         conn.execute(
             "INSERT INTO install_jobs
                 (instance_id, key, kind, label, status, progress, plan, created_at)
@@ -251,10 +256,7 @@ impl JobStore {
     }
 
     pub fn get(&self, id: i64) -> Result<Option<Job>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("jobs lock poisoned"))?;
+        let conn = self.lock()?;
         Self::get_conn(&conn, id)
     }
 
@@ -262,10 +264,7 @@ impl JobStore {
     /// `running`. The drainer calls this so two waiters can never double-run a
     /// row; it also stamps `started_at` as the real execution begin.
     pub fn claim_next(&self, instance_id: &str) -> Result<Option<Job>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("jobs lock poisoned"))?;
+        let conn = self.lock()?;
         let id: Option<i64> = conn
             .query_row(
                 "SELECT id FROM install_jobs
@@ -291,10 +290,7 @@ impl JobStore {
 
     /// Deserialize the persisted retry plan for a job.
     pub fn plan(&self, id: i64) -> Result<JobPlan> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("jobs lock poisoned"))?;
+        let conn = self.lock()?;
         let json: Option<String> = conn
             .query_row(
                 "SELECT plan FROM install_jobs WHERE id = ?1",
@@ -309,10 +305,7 @@ impl JobStore {
 
     /// Newest first, bounded (Install Center history list).
     pub fn list(&self, limit: usize) -> Result<Vec<Job>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("jobs lock poisoned"))?;
+        let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, instance_id, key, kind, label, status, stage, progress,
@@ -333,10 +326,7 @@ impl JobStore {
     /// All non-terminal jobs for one instance, oldest first — the drainer's
     /// FIFO view of what still needs to run.
     pub fn list_waiting(&self, instance_id: &str) -> Result<Vec<Job>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("jobs lock poisoned"))?;
+        let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, instance_id, key, kind, label, status, stage, progress,
@@ -360,10 +350,7 @@ impl JobStore {
     /// under the drainer-marker lock to avoid the lost-wakeup: it re-checks the
     /// count after `claim_next` returns `None` before retiring a drainer task.
     pub fn waiting_count(&self, instance_id: &str) -> Result<usize> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("jobs lock poisoned"))?;
+        let conn = self.lock()?;
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM install_jobs
@@ -378,10 +365,7 @@ impl JobStore {
     /// Instance ids with at least one leftover `waiting` job — boot-time resume
     /// uses this to spawn a drainer per instance that was mid-queue on exit.
     pub fn waiting_instance_ids(&self) -> Result<Vec<String>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("jobs lock poisoned"))?;
+        let conn = self.lock()?;
         let mut stmt = conn
             .prepare("SELECT DISTINCT instance_id FROM install_jobs WHERE status = 'waiting'")
             .map_err(|e| anyhow!("prepare waiting instances: {e}"))?;
@@ -399,10 +383,7 @@ impl JobStore {
     }
 
     pub fn mark_running(&self, id: i64, stage: &str) -> Result<Job> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("jobs lock poisoned"))?;
+        let conn = self.lock()?;
         conn.execute(
             "UPDATE install_jobs
              SET status = 'running', stage = ?2, started_at = ?3
@@ -416,10 +397,7 @@ impl JobStore {
     /// Advance stage/progress. Progress is coarse-grained and stage-driven (see
     /// executor); it never ticks on its own.
     pub fn update_progress(&self, id: i64, stage: &str, progress: i64) -> Result<Job> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("jobs lock poisoned"))?;
+        let conn = self.lock()?;
         conn.execute(
             "UPDATE install_jobs SET stage = ?2, progress = ?3 WHERE id = ?1",
             rusqlite::params![id, stage, progress],
@@ -430,10 +408,7 @@ impl JobStore {
 
     /// Append a sub-process stderr line to the job's tail (capped).
     pub fn append_stderr(&self, id: i64, line: &str) -> Result<Job> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("jobs lock poisoned"))?;
+        let conn = self.lock()?;
         let existing: Option<String> = conn
             .query_row(
                 "SELECT stderr_tail FROM install_jobs WHERE id = ?1",
@@ -457,10 +432,7 @@ impl JobStore {
     }
 
     pub fn mark_done(&self, id: i64) -> Result<Job> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("jobs lock poisoned"))?;
+        let conn = self.lock()?;
         conn.execute(
             "UPDATE install_jobs
              SET status = 'done', progress = 100, finished_at = ?2
@@ -472,10 +444,7 @@ impl JobStore {
     }
 
     pub fn mark_failed(&self, id: i64, error: &str, exit_code: Option<i64>) -> Result<Job> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("jobs lock poisoned"))?;
+        let conn = self.lock()?;
         conn.execute(
             "UPDATE install_jobs
              SET status = 'failed', error = ?2, exit_code = ?3, finished_at = ?4
@@ -497,10 +466,7 @@ impl JobStore {
     /// survives a process exit; a sweep while the app is live would pass a
     /// bound larger than any single install can legitimately take.
     pub fn interrupt_stale_running(&self, max_age_secs: u64) -> Result<Vec<Job>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("jobs lock poisoned"))?;
+        let conn = self.lock()?;
         let oldest_live = now_secs().saturating_sub(max_age_secs);
         let mut stmt = conn
             .prepare(
@@ -534,10 +500,7 @@ impl JobStore {
     /// Cancel a job that has not started yet. Running jobs are not force-killed
     /// (external git/pnpm processes), so this only ever flips `waiting`.
     pub fn cancel_if_waiting(&self, id: i64) -> Result<Option<Job>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("jobs lock poisoned"))?;
+        let conn = self.lock()?;
         conn.execute(
             "UPDATE install_jobs
              SET status = 'cancelled', finished_at = ?2
@@ -549,10 +512,7 @@ impl JobStore {
     }
 
     pub fn delete(&self, id: i64) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("jobs lock poisoned"))?;
+        let conn = self.lock()?;
         conn.execute(
             "DELETE FROM install_jobs WHERE id = ?1",
             rusqlite::params![id],
@@ -562,10 +522,7 @@ impl JobStore {
     }
 
     pub fn clear_finished(&self) -> Result<usize> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("jobs lock poisoned"))?;
+        let conn = self.lock()?;
         let removed = conn
             .execute(
                 "DELETE FROM install_jobs WHERE status IN ('done', 'failed', 'cancelled')",
