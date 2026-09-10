@@ -17,6 +17,7 @@ import { useAppStore } from '../stores/appStore'
 import { useT } from '../lib/i18n'
 import { ipc } from '../lib/ipc'
 import { Select } from '../components/Select'
+import { StatTile } from '../components/StatTile'
 import type {
   BundleManifest,
   ContentKind,
@@ -127,26 +128,6 @@ const KIND_NOTES: Record<ContentKind, string[]> = {
     'market.noteBundles4',
     'market.noteBundles5',
   ],
-}
-
-function MarketStat({
-  icon: Icon,
-  label,
-  value,
-}: {
-  icon: typeof Package
-  label: string
-  value: string | number
-}) {
-  return (
-    <div className="rounded-lg border border-zinc-800/70 bg-zinc-950/25 px-4 py-3">
-      <div className="flex items-center gap-2 text-[11px] text-zinc-500">
-        <Icon className="h-3.5 w-3.5" strokeWidth={1.75} />
-        <span className="truncate">{label}</span>
-      </div>
-      <div className="mt-1 truncate text-xl font-semibold tabular-nums text-zinc-100">{value}</div>
-    </div>
-  )
 }
 
 /// Prefix proxy for `raw.githubusercontent.com` screenshots (the same gh-proxy
@@ -342,9 +323,9 @@ export function Market() {
       <div className="grid min-h-0 flex-1 grid-cols-12 gap-5">
         <aside className="col-span-4 flex min-h-0 flex-col rounded-lg border border-zinc-800 bg-zinc-900/60 p-5">
           <div className="grid grid-cols-3 gap-3">
-            <MarketStat icon={Package} label={t('market.catalog')} value={registry?.count ?? '-'} />
-            <MarketStat icon={Download} label={t('market.installed')} value={installedCount} />
-            <MarketStat icon={RefreshCw} label={t('market.updates')} value={updatableCount} />
+            <StatTile icon={Package} label={t('market.catalog')} value={registry?.count ?? '-'} />
+            <StatTile icon={Download} label={t('market.installed')} value={installedCount} />
+            <StatTile icon={RefreshCw} label={t('market.updates')} value={updatableCount} />
           </div>
 
           <div className="mt-5">

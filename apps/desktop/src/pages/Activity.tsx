@@ -21,6 +21,7 @@ import { useAppStore } from '../stores/appStore'
 import { ipc } from '../lib/ipc'
 import { useT } from '../lib/i18n'
 import { Select } from '../components/Select'
+import { StatTile } from '../components/StatTile'
 import { StatusDot } from '../components/StatusDot'
 import type { LaunchSession, UsageSummary } from '../lib/types'
 
@@ -136,26 +137,6 @@ function StatusBadge({ status }: { status: string }) {
     <span className={`rounded-full px-2 py-1 text-[10px] font-medium uppercase tracking-wide ${styles[status] ?? styles.stopped}`}>
       {t(`status.${status}`)}
     </span>
-  )
-}
-
-function StatCell({
-  icon: Icon,
-  label,
-  value,
-}: {
-  icon: typeof Terminal
-  label: string
-  value: string | number
-}) {
-  return (
-    <div className="rounded-lg border border-zinc-800/70 bg-zinc-950/25 px-4 py-3">
-      <div className="flex items-center gap-2 text-[11px] text-zinc-500">
-        <Icon className="h-3.5 w-3.5" strokeWidth={1.75} />
-        <span className="truncate">{label}</span>
-      </div>
-      <div className="mt-1 truncate text-xl font-semibold tabular-nums text-zinc-100">{value}</div>
-    </div>
   )
 }
 
@@ -493,14 +474,14 @@ export function Activity() {
           </div>
         </section>
         <section className="col-span-12 grid grid-cols-4 gap-3">
-          <StatCell icon={BarChart3} label={t('activity.totalTokens')} value={fmtTokens(totalTokens)} />
-          <StatCell icon={LineChart} label={t('activity.requests')} value={requests} />
-          <StatCell
+          <StatTile icon={BarChart3} label={t('activity.totalTokens')} value={fmtTokens(totalTokens)} />
+          <StatTile icon={LineChart} label={t('activity.requests')} value={requests} />
+          <StatTile
             icon={Coins}
             label={t('activity.estimatedCost')}
             value={`$${estimatedCost.toFixed(3)}${unknownCost > 0 ? ` · ${t('activity.unpricedHint', { n: unknownCost })}` : ''}`}
           />
-          <StatCell icon={WalletCards} label={t('activity.topModel')} value={modelUsage[0]?.label ?? '-'} />
+          <StatTile icon={WalletCards} label={t('activity.topModel')} value={modelUsage[0]?.label ?? '-'} />
         </section>
 
         {/* Merged token + cost timeline (x = time, primary y = tokens, overlay = cost). */}
@@ -598,11 +579,11 @@ export function Activity() {
       ) : (
       <div className="grid min-h-0 flex-1 grid-cols-12 grid-rows-[auto_minmax(0,1fr)] gap-5">
         <section className="col-span-12 grid grid-cols-5 gap-3">
-          <StatCell icon={ActivityIcon} label={t('activity.current')} value={runningName} />
-          <StatCell icon={Gauge} label={t('activity.status')} value={t(`status.${status}`)} />
-          <StatCell icon={History} label={t('activity.today')} value={todaySessions.length} />
-          <StatCell icon={ScrollText} label={t('activity.logLines')} value={logs.length} />
-          <StatCell icon={TriangleAlert} label={t('activity.crashes')} value={crashed} />
+          <StatTile icon={ActivityIcon} label={t('activity.current')} value={runningName} />
+          <StatTile icon={Gauge} label={t('activity.status')} value={t(`status.${status}`)} />
+          <StatTile icon={History} label={t('activity.today')} value={todaySessions.length} />
+          <StatTile icon={ScrollText} label={t('activity.logLines')} value={logs.length} />
+          <StatTile icon={TriangleAlert} label={t('activity.crashes')} value={crashed} />
         </section>
 
         <section className="col-span-8 flex min-h-0 flex-col overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900/60">
@@ -658,10 +639,10 @@ export function Activity() {
               <StatusDot status={status} />
             </div>
             <div className="mt-4 grid grid-cols-2 gap-3">
-              <StatCell icon={Play} label={t('activity.started')} value={formatClock(processState?.startedAt)} />
-              <StatCell icon={Clock3} label={t('activity.uptime')} value={formatDuration(processState?.startedAt, null)} />
-              <StatCell icon={Square} label="PID" value={processState?.pid ?? '-'} />
-              <StatCell icon={ListRestart} label={t('activity.avgRun')} value={formatSeconds(avgSeconds)} />
+              <StatTile icon={Play} label={t('activity.started')} value={formatClock(processState?.startedAt)} />
+              <StatTile icon={Clock3} label={t('activity.uptime')} value={formatDuration(processState?.startedAt, null)} />
+              <StatTile icon={Square} label="PID" value={processState?.pid ?? '-'} />
+              <StatTile icon={ListRestart} label={t('activity.avgRun')} value={formatSeconds(avgSeconds)} />
             </div>
           </section>
 
