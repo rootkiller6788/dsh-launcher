@@ -140,7 +140,7 @@ async fn prefetch_npm(
 
 /// Decide how to invoke npm: `node <npm-cli.js>` when a node with a bundled npm
 /// is available (env-isolated), else `cmd /C npm` / `npm` from PATH as a fallback.
-fn npm_program(node: Option<&Path>) -> (String, Vec<String>) {
+pub(crate) fn npm_program(node: Option<&Path>) -> (String, Vec<String>) {
     if let Some(node_exe) = node {
         if let Some(cli) = bundled_cli(node_exe, "npm") {
             return (node_exe.display().to_string(), vec![cli.display().to_string()]);

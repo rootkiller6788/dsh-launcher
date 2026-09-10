@@ -560,7 +560,7 @@ async fn run_npm(
     node: Option<&Path>,
     sink: LogSink,
 ) -> Result<(), String> {
-    let (program, mut prefix) = npm_program(node);
+    let (program, mut prefix) = crate::mcp_prefetch::npm_program(node);
     prefix.extend(tail.iter().cloned());
     prefix.extend([
         "--no-audit".to_string(),
@@ -572,21 +572,6 @@ async fn run_npm(
         ("npm_config_update_notifier".into(), "false".into()),
     ];
     run_cmd(&program, &prefix, base, &envs, sink, BUILD_TIMEOUT).await
-}
-
-/// Invoke npm through the bundled node's `npm-cli.js` when one exists, else the
-/// PATH `npm` (cmd shim on Windows) — the same resolution `mcp_prefetch` uses.
-fn npm_program(node: Option<&Path>) -> (String, Vec<String>) {
-    if let Some(node_exe) = node {
-        if let Some(cli) = crate::mcp_prefetch::bundled_cli(node_exe, "npm") {
-            return (node_exe.display().to_string(), vec![cli.display().to_string()]);
-        }
-    }
-    if cfg!(windows) {
-        ("cmd".into(), vec!["/C".into(), "npm".into()])
-    } else {
-        ("npm".into(), vec![])
-    }
 }
 
 async fn build_python(base: &Path, sink: LogSink) -> Result<LocalLaunch, ResolveFail> {
