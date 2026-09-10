@@ -60,6 +60,17 @@ impl McpConfigStore {
         format!("mcp:{instance_id}:{server_id}:{key}")
     }
 
+    /// The OS credential-store entry backing one configured variable. Every
+    /// read/write of a value goes through here so the service + account naming
+    /// stays in one place.
+    fn entry(
+        instance_id: &str,
+        server_id: &str,
+        key: &str,
+    ) -> Result<keyring::Entry, keyring::Error> {
+        keyring::Entry::new(KEYRING_SERVICE, &Self::account(instance_id, server_id, key))
+    }
+
     fn read(&self, instance_id: &str, server_id: &str) -> Result<ConfigFile> {
         let path = self.config_path(instance_id, server_id);
         if !path.exists() {
@@ -112,7 +123,7 @@ impl McpConfigStore {
 
         if let Some(value) = value {
             if !value.trim().is_empty() {
-                let entry = keyring::Entry::new(KEYRING_SERVICE, &Self::account(instance_id, server_id, key))
+                let entry = Self::entry(instance_id, server_id, key)
                     .map_err(|e| anyhow::anyhow!("credential store unavailable: {e}"))?;
                 entry
                     .set_password(value)
@@ -131,7 +142,7 @@ impl McpConfigStore {
         if file.vars.len() != before {
             self.write(instance_id, server_id, &file)?;
         }
-        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &Self::account(instance_id, server_id, key)) {
+        if let Ok(entry) = Self::entry(instance_id, server_id, key) {
             entry.delete_credential().ok();
         }
         Ok(())
@@ -143,10 +154,9 @@ impl McpConfigStore {
     pub fn resolve_env(&self, instance_id: &str, server_id: &str) -> HashMap<String, String> {
         let mut env = HashMap::new();
         for var in self.read(instance_id, server_id).unwrap_or_default().vars {
-            let entry =
-                keyring::Entry::new(KEYRING_SERVICE, &Self::account(instance_id, server_id, &var.key))
-                    .ok()
-                    .and_then(|e| e.get_password().ok());
+            let entry = Self::entry(instance_id, server_id, &var.key)
+                .ok()
+                .and_then(|e| e.get_password().ok());
             if let Some(value) = entry {
                 if !value.trim().is_empty() {
                     env.insert(var.key, value);
