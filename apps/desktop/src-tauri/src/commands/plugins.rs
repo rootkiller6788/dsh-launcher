@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::content::land_install_disabled;
@@ -148,13 +148,6 @@ fn library_inventory_cache_file(state: &AppState, id: &str) -> PathBuf {
 
 fn legacy_plugin_inventory_cache_file(state: &AppState, id: &str) -> PathBuf {
     state.paths.instance_dir(id).join("plugin-inventory.json")
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default()
 }
 
 /// `#` + first 8 chars of a content hash — the "version" label a skill row
@@ -317,7 +310,7 @@ pub(crate) fn rebuild_library_inventory_cache_from_disk(
     let cache = LibraryInventoryCache {
         schema_version: LIBRARY_INVENTORY_CACHE_SCHEMA,
         instance_id: id.to_string(),
-        updated_at: now_secs(),
+        updated_at: launcher_core::now_secs(),
         dsh_inventory: merge_plugin_sources(live, profile),
         launcher_metadata: cached.launcher_metadata,
         install_sources: cached.install_sources,
@@ -703,7 +696,7 @@ pub(crate) async fn refresh_plugin_inventory_cache(
     let cache = LibraryInventoryCache {
         schema_version: LIBRARY_INVENTORY_CACHE_SCHEMA,
         instance_id: id.to_string(),
-        updated_at: now_secs(),
+        updated_at: launcher_core::now_secs(),
         dsh_inventory: merge_plugin_sources(inventory, cached.dsh_inventory),
         launcher_metadata: cached.launcher_metadata,
         install_sources: cached.install_sources,
@@ -739,7 +732,7 @@ pub(crate) fn record_install_metadata_with_source(
 ) -> Result<(), AppError> {
     let mut cache = read_library_inventory_cache(state, id);
     let key = entry.key();
-    let installed_at = now_secs();
+    let installed_at = launcher_core::now_secs();
     cache.launcher_metadata.insert(
         key.clone(),
         MarketInstallMetadata {
@@ -769,7 +762,7 @@ pub(crate) fn record_install_metadata_with_source(
         },
     );
     cache.schema_version = LIBRARY_INVENTORY_CACHE_SCHEMA;
-    cache.updated_at = now_secs();
+    cache.updated_at = launcher_core::now_secs();
     write_library_inventory_cache(state, id, &cache)
 }
 
@@ -787,7 +780,7 @@ pub(crate) fn remove_market_install_metadata(
     let had_source = cache.install_sources.remove(key).is_some();
     if had_metadata || had_source {
         cache.schema_version = LIBRARY_INVENTORY_CACHE_SCHEMA;
-        cache.updated_at = now_secs();
+        cache.updated_at = launcher_core::now_secs();
         write_library_inventory_cache(state, id, &cache)?;
     }
     Ok(())
@@ -1698,6 +1691,7 @@ mod tests {
     use launcher_core::{AppPaths, AppSettings, ProviderVault};
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_paths(label: &str) -> AppPaths {
         let nanos = SystemTime::now()
