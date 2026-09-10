@@ -211,7 +211,7 @@ impl JobCtx {
         let state = app.state::<AppState>();
         match state.jobs.update_progress(self.job_id, stage, pct) {
             Ok(job) => {
-                let _ = app.emit(JOB_EVENT, job);
+                emit_job(&app, &job);
             }
             Err(e) => tracing::warn!(target: "install", "job {} progress: {e}", self.job_id),
         }
@@ -467,7 +467,7 @@ fn job_sink(app: AppHandle, job_id: i64) -> LogSink {
             let state = app.state::<AppState>();
             match state.jobs.append_stderr(job_id, &line.line) {
                 Ok(job) => {
-                    let _ = app.emit(JOB_EVENT, job);
+                    emit_job(&app, &job);
                 }
                 Err(e) => tracing::warn!(target: "install", "append stderr to job {job_id}: {e}"),
             }
