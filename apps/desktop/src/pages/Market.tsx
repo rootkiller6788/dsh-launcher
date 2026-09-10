@@ -71,6 +71,10 @@ function importableMcp(m: ImportedMcp): boolean {
 }
 
 type SortKey = 'stars' | 'new' | 'name'
+
+/** Cards rendered per page, and how many "load more" adds at a time. */
+const PAGE_SIZE = 60
+
 const KINDS: { value: ContentKind; label: string }[] = [
   { value: 'plugin', label: 'market.tabPlugins' },
   { value: 'theme', label: 'market.tabThemes' },
@@ -196,7 +200,7 @@ export function Market() {
   const [category, setCategory] = useState('')
   const [catOpen, setCatOpen] = useState(false)
   const [sort, setSort] = useState<SortKey>('stars')
-  const [visible, setVisible] = useState(60)
+  const [visible, setVisible] = useState(PAGE_SIZE)
   const [shuffleKey, setShuffleKey] = useState(0)
   const [noteIndex, setNoteIndex] = useState(() => Math.floor(Math.random() * 5))
   const [preview, setPreview] = useState<{ urls: string[]; index: number } | null>(null)
@@ -217,7 +221,7 @@ export function Market() {
   }, [activeId, refreshInstalledPlugins, refreshInstalledSkills, refreshInstalledMcps])
 
   useEffect(() => {
-    setVisible(60)
+    setVisible(PAGE_SIZE)
   }, [query, category])
 
   const match = (p: RegistryPlugin): InstalledPlugin | undefined =>
@@ -285,7 +289,7 @@ export function Market() {
   const noteKey = noteKeys[noteIndex % noteKeys.length]
   const switchKind = (kind: ContentKind) => {
     setActiveKind(kind)
-    setVisible(60)
+    setVisible(PAGE_SIZE)
     setQuery('')
     setCategory('')
     setNoteIndex(Math.floor(Math.random() * KIND_NOTES[kind].length))
@@ -551,7 +555,7 @@ export function Market() {
               {shown.length < filtered.length && (
                 <div className="mt-4 text-center">
                   <button
-                    onClick={() => setVisible((v) => v + 60)}
+                    onClick={() => setVisible((v) => v + PAGE_SIZE)}
                     className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800"
                   >
                     {t('market.loadMore', { n: filtered.length - shown.length })}
