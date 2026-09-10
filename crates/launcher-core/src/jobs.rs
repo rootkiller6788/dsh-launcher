@@ -391,7 +391,7 @@ impl JobStore {
             rusqlite::params![id, stage, now_secs()],
         )
         .map_err(|e| anyhow!("mark job running: {e}"))?;
-        Self::get_conn(&conn, id).map(|j| j.expect("job row just updated"))
+        Self::get_updated(&conn, id)
     }
 
     /// Advance stage/progress. Progress is coarse-grained and stage-driven (see
@@ -403,7 +403,7 @@ impl JobStore {
             rusqlite::params![id, stage, progress],
         )
         .map_err(|e| anyhow!("update job progress: {e}"))?;
-        Self::get_conn(&conn, id).map(|j| j.expect("job row just updated"))
+        Self::get_updated(&conn, id)
     }
 
     /// Append a sub-process stderr line to the job's tail (capped).
@@ -428,7 +428,7 @@ impl JobStore {
             rusqlite::params![id, lines.join("\n")],
         )
         .map_err(|e| anyhow!("update stderr tail: {e}"))?;
-        Self::get_conn(&conn, id).map(|j| j.expect("job row just updated"))
+        Self::get_updated(&conn, id)
     }
 
     pub fn mark_done(&self, id: i64) -> Result<Job> {
@@ -440,7 +440,7 @@ impl JobStore {
             rusqlite::params![id, now_secs()],
         )
         .map_err(|e| anyhow!("mark job done: {e}"))?;
-        Self::get_conn(&conn, id).map(|j| j.expect("job row just updated"))
+        Self::get_updated(&conn, id)
     }
 
     pub fn mark_failed(&self, id: i64, error: &str, exit_code: Option<i64>) -> Result<Job> {
@@ -452,7 +452,7 @@ impl JobStore {
             rusqlite::params![id, error, exit_code, now_secs()],
         )
         .map_err(|e| anyhow!("mark job failed: {e}"))?;
-        Self::get_conn(&conn, id).map(|j| j.expect("job row just updated"))
+        Self::get_updated(&conn, id)
     }
 
     /// Reclaim `running` rows whose worker is gone: a `running` row that began
@@ -530,6 +530,12 @@ impl JobStore {
             )
             .map_err(|e| anyhow!("clear finished jobs: {e}"))?;
         Ok(removed)
+    }
+
+    /// Re-read a row the caller has just written on this same connection, so the
+    /// row is known to exist.
+    fn get_updated(conn: &Connection, id: i64) -> Result<Job> {
+        Self::get_conn(conn, id).map(|j| j.expect("job row just updated"))
     }
 
     fn get_conn(conn: &Connection, id: i64) -> Result<Option<Job>> {
