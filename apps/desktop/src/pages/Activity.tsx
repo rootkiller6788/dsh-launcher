@@ -19,6 +19,7 @@ import {
 } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
 import { ipc } from '../lib/ipc'
+import { fmtTokens, formatDuration, formatSeconds } from '../lib/format'
 import { useT } from '../lib/i18n'
 import { Select } from '../components/Select'
 import { StatTile } from '../components/StatTile'
@@ -106,24 +107,6 @@ function buildTimeline(summary: UsageSummary | null | undefined, range: UsageRan
   return points
 }
 
-function formatDuration(start?: number | null, end?: number | null) {
-  if (!start) return '-'
-  const stop = end ?? Math.floor(Date.now() / 1000)
-  const s = Math.max(0, stop - start)
-  const h = Math.floor(s / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const sec = s % 60
-  return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${sec}s` : `${sec}s`
-}
-
-function formatSeconds(seconds: number | null) {
-  if (seconds == null) return '-'
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  const sec = seconds % 60
-  return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${sec}s` : `${sec}s`
-}
-
 function StatusBadge({ status }: { status: string }) {
   const t = useT()
   const styles: Record<string, string> = {
@@ -138,12 +121,6 @@ function StatusBadge({ status }: { status: string }) {
       {t(`status.${status}`)}
     </span>
   )
-}
-
-function fmtTokens(n: number) {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
-  return n.toLocaleString()
 }
 
 /**

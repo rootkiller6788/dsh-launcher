@@ -20,28 +20,14 @@ import {
   Waypoints,
 } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
+import { formatDuration, fmtTokens } from '../lib/format'
 import { useT } from '../lib/i18n'
 import { StatusDot } from '../components/StatusDot'
 import type { LaunchSession, SystemStats, UsageSummary } from '../lib/types'
 
-function formatUptime(startedAt?: number | null): string {
-  if (!startedAt) return '-'
-  const s = Math.max(0, Math.floor(Date.now() / 1000 - startedAt))
-  const h = Math.floor(s / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const sec = s % 60
-  return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${sec}s` : `${sec}s`
-}
-
 function fmtGB(bytes: number): string {
   const gb = bytes / 1024 ** 3
   return gb >= 100 ? gb.toFixed(0) : gb.toFixed(1)
-}
-
-function fmtTokens(n: number) {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
-  return n.toLocaleString()
 }
 
 function ActivityTime({ secs, yesterday }: { secs: number; yesterday: string }) {
@@ -492,7 +478,7 @@ export function Overview() {
               </div>
 
               <div className="mt-auto grid grid-cols-3 gap-3">
-                <Metric icon={Gauge} label={t('overview.uptime')} value={running ? formatUptime(processState?.startedAt) : '-'} />
+                <Metric icon={Gauge} label={t('overview.uptime')} value={running ? formatDuration(processState?.startedAt, null) : '-'} />
                 <Metric icon={Activity} label={t('overview.pid')} value={pid != null ? pid : '-'} />
                 <Metric icon={Puzzle} label={t('overview.plugins')} value={pluginCount} />
                 <Metric icon={Waypoints} label={t('overview.mcpServers')} value={mcpCount} />
