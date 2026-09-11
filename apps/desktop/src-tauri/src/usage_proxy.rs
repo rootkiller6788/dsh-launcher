@@ -70,6 +70,11 @@ struct ProxyContext {
 }
 
 async fn handle(mut stream: TcpStream, ctx: Arc<ProxyContext>) -> anyhow::Result<()> {
+    // The response is forwarded chunk by chunk, so a small write per token
+    // must go out immediately — with Nagle on, the OS would sit on it for up to
+    // ~40 ms waiting for company, which is exactly the latency this proxy is
+    // supposed to preserve.
+    let _ = stream.set_nodelay(true);
     let mut buf = Vec::new();
     let mut tmp = [0_u8; 4096];
     let header_end;
@@ -135,7 +140,7 @@ async fn handle(mut stream: TcpStream, ctx: Arc<ProxyContext>) -> anyhow::Result
             .cloned()
             .unwrap_or_else(|| "application/json".into()),
     );
-    let resp = req.body(body.clone()).send().await?;
+    let mut resp = req.body(body.clone()).send().await?;
     let status = resp.status();
     let content_type = resp
         .headers()
@@ -143,19 +148,234 @@ async fn handle(mut stream: TcpStream, ctx: Arc<ProxyContext>) -> anyhow::Result
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/json")
         .to_string();
-    let bytes = resp.bytes().await?.to_vec();
-    maybe_record_usage(&ctx, &body, &bytes);
+
     let status_text = status.canonical_reason().unwrap_or("OK");
+    // 1xx/204/304 carry no body, and RFC 7230 forbids framing them with
+    // `transfer-encoding` — a client that honours the spec would wait for a
+    // chunk terminator the status says cannot exist. Answer in one piece, the
+    // way the pre-streaming proxy did.
+    if status.is_informational()
+        || status == reqwest::StatusCode::NO_CONTENT
+        || status == reqwest::StatusCode::NOT_MODIFIED
+    {
+        let head = format!(
+            "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ncontent-length: 0\r\naccess-control-allow-origin: *\r\n\r\n",
+            status.as_u16(),
+            status_text,
+            content_type
+        );
+        stream.write_all(head.as_bytes()).await?;
+        return Ok(());
+    }
+
+    // No `content-length`: the body is forwarded as it arrives, so its length
+    // is not known when the head has to go out. Chunked framing lets the client
+    // start rendering the first token while the rest is still in flight, which
+    // is the whole point — buffering here turned every streamed reply into
+    // "spinner, then the entire answer at once".
     let head = format!(
-        "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ncontent-length: {}\r\naccess-control-allow-origin: *\r\n\r\n",
+        "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ntransfer-encoding: chunked\r\naccess-control-allow-origin: *\r\n\r\n",
         status.as_u16(),
         status_text,
-        content_type,
-        bytes.len()
+        content_type
     );
     stream.write_all(head.as_bytes()).await?;
-    stream.write_all(&bytes).await?;
+
+    let mut tee = UsageTee::for_content_type(&content_type);
+    loop {
+        let chunk = match resp.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            // Clean end of body: terminate the chunked framing.
+            Ok(None) => {
+                stream.write_all(b"0\r\n\r\n").await?;
+                break;
+            }
+            Err(e) => {
+                // The head is long gone, so the status cannot be corrected. Stop
+                // without the terminator: the client sees a truncated body
+                // rather than a body that claims to have ended cleanly.
+                emit_proxy_log(
+                    &ctx.app,
+                    &ctx.instance_id,
+                    &format!("usage proxy upstream stream failed mid-response: {e}"),
+                );
+                return Ok(());
+            }
+        };
+        if chunk.is_empty() {
+            continue;
+        }
+        let size = format!("{:x}\r\n", chunk.len());
+        stream.write_all(size.as_bytes()).await?;
+        stream.write_all(&chunk).await?;
+        stream.write_all(b"\r\n").await?;
+        tee.push(&chunk);
+    }
+    tee.record(&ctx, &body);
     Ok(())
+}
+
+/// Collects just enough of a forwarded response to record usage for it,
+/// without holding the body back from the client.
+///
+/// An SSE stream cannot be summarised from a slice at the end — it is never
+/// held as one — and it cannot be summarised from a tail either: Anthropic
+/// reports `input_tokens` on the *first* frame and `output_tokens` on the last,
+/// so either end dropped is a lost record. Hence folding frames as they pass.
+/// Non-SSE bodies are ordinary JSON, where usage is one object somewhere in the
+/// middle of a small document, so those are buffered whole — exactly what the
+/// proxy did before it streamed, and no extra memory on top.
+enum UsageTee {
+    Sse(SseUsage),
+    Whole(Vec<u8>),
+}
+
+impl UsageTee {
+    fn for_content_type(content_type: &str) -> Self {
+        if content_type.starts_with("text/event-stream") {
+            Self::Sse(SseUsage::default())
+        } else {
+            Self::Whole(Vec::new())
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        match self {
+            Self::Sse(acc) => acc.push(chunk),
+            Self::Whole(buf) => buf.extend_from_slice(chunk),
+        }
+    }
+
+    fn record(self, ctx: &ProxyContext, request: &[u8]) {
+        match self {
+            Self::Sse(acc) => {
+                if let Some(value) = acc.finish() {
+                    maybe_record_usage_value(ctx, request, &value);
+                } else {
+                    emit_proxy_log(
+                        &ctx.app,
+                        &ctx.instance_id,
+                        "usage proxy SSE stream had no usage field",
+                    );
+                }
+            }
+            Self::Whole(bytes) => maybe_record_usage(ctx, request, &bytes),
+        }
+    }
+}
+
+/// Folds SSE frames into one usage value as the bytes flow past.
+///
+/// Only complete lines are considered, so a frame split across two chunks is
+/// still read correctly; `finish` flushes whatever the last chunk left
+/// unterminated.
+#[derive(Default)]
+struct SseUsage {
+    /// Bytes of the newest chunk that did not yet end in a newline.
+    pending: Vec<u8>,
+    input: Option<u64>,
+    output: Option<u64>,
+    model: Option<String>,
+    id: Option<String>,
+    /// The first frame that carried a usage *object* — the fallback when no
+    /// merged pair can be formed (see [`SseUsage::finish`]).
+    first: Option<Value>,
+}
+
+impl SseUsage {
+    fn push(&mut self, chunk: &[u8]) {
+        self.pending.extend_from_slice(chunk);
+        while let Some(end) = self.pending.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=end).collect();
+            self.frame(&line[..line.len() - 1]);
+        }
+    }
+
+    fn frame(&mut self, line: &[u8]) {
+        let Ok(text) = std::str::from_utf8(line) else {
+            return;
+        };
+        let Some(data) = text.trim_start().strip_prefix("data:") else {
+            return;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            return;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            return;
+        };
+        let Some(usage) = usage_of(&value) else {
+            return;
+        };
+        // Take the *last* non-null input/output: Anthropic reports a
+        // placeholder `output_tokens` on `message_start`, then the real value on
+        // `message_delta`.
+        if let Some(v) = first_u64(usage, INPUT_KEYS) {
+            self.input = Some(v);
+        }
+        if let Some(v) = first_u64(usage, OUTPUT_KEYS) {
+            self.output = Some(v);
+        }
+        if self.model.is_none() {
+            self.model = value
+                .get("model")
+                .or_else(|| value.get("message").and_then(|m| m.get("model")))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        if self.id.is_none() {
+            self.id = value
+                .get("id")
+                .or_else(|| value.get("request_id"))
+                .or_else(|| value.get("requestId"))
+                .or_else(|| value.get("message").and_then(|m| m.get("id")))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        if self.first.is_none() && usage.is_object() {
+            self.first = Some(value);
+        }
+    }
+
+    /// Drop anything the last chunk left unterminated, running it through the
+    /// same parse (a stream may end without a final newline).
+    fn flush(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let tail = std::mem::take(&mut self.pending);
+        self.frame(&tail);
+    }
+
+    /// Both halves seen, synthesised into one OpenAI-shaped value.
+    fn merged(&mut self) -> Option<Value> {
+        self.flush();
+        let (input, output) = (self.input?, self.output?);
+        let mut usage = serde_json::Map::new();
+        usage.insert("input_tokens".into(), Value::from(input));
+        usage.insert("output_tokens".into(), Value::from(output));
+        usage.insert("total_tokens".into(), Value::from(input + output));
+        let mut obj = serde_json::Map::new();
+        if let Some(m) = &self.model {
+            obj.insert("model".into(), Value::String(m.clone()));
+        }
+        if let Some(i) = &self.id {
+            obj.insert("id".into(), Value::String(i.clone()));
+        }
+        obj.insert("usage".into(), Value::Object(usage));
+        Some(Value::Object(obj))
+    }
+
+    /// The merged value when both halves arrived, else the first frame that
+    /// carried a usage object.
+    fn finish(mut self) -> Option<Value> {
+        if let Some(merged) = self.merged() {
+            return Some(merged);
+        }
+        self.flush();
+        self.first
+    }
 }
 
 fn maybe_record_usage(ctx: &ProxyContext, request: &[u8], response: &[u8]) {
@@ -270,8 +490,17 @@ fn ensure_stream_usage(body: Vec<u8>) -> Vec<u8> {
     serde_json::to_vec(&value).unwrap_or(body)
 }
 
+/// Fold a whole SSE body through the same accumulator the streaming path uses.
+/// Reaching here means the body arrived in one piece (a non-SSE content-type
+/// that still turned out to be SSE), so the folding is just not chunk-aligned.
+fn sse_usage_fold(response: &[u8]) -> Option<Value> {
+    let mut acc = SseUsage::default();
+    acc.push(response);
+    acc.finish()
+}
+
 fn record_sse_usage(ctx: &ProxyContext, request: &[u8], response: &[u8]) -> bool {
-    if let Some(value) = sse_accumulate_usage(response).or_else(|| sse_usage_value(response)) {
+    if let Some(value) = sse_usage_fold(response) {
         return maybe_record_usage_value(ctx, request, &value);
     }
     emit_proxy_log(
@@ -282,105 +511,12 @@ fn record_sse_usage(ctx: &ProxyContext, request: &[u8], response: &[u8]) -> bool
     false
 }
 
-fn sse_usage_value(response: &[u8]) -> Option<Value> {
-    let text = String::from_utf8_lossy(response);
-    for line in text.lines() {
-        let Some(data) = line.trim_start().strip_prefix("data:") else {
-            continue;
-        };
-        let data = data.trim();
-        if data == "[DONE]" || data.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(data) else {
-            continue;
-        };
-        let Some(usage) = value.get("usage") else {
-            continue;
-        };
-        if usage.is_object() {
-            return Some(value);
-        }
-    }
-    None
-}
-
 /// A stream frame's `usage` object — top-level (OpenAI / Anthropic
 /// `message_delta`) or nested under `message` (Anthropic `message_start`).
 fn usage_of(value: &Value) -> Option<&Value> {
     value
         .get("usage")
         .or_else(|| value.get("message").and_then(|m| m.get("usage")))
-}
-
-/// Merge token counts split across SSE events. Anthropic streams emit
-/// `input_tokens` on `message_start` (nested under `message`) and
-/// `output_tokens` on `message_delta` (top-level), so no single frame carries
-/// both — unlike OpenAI's `include_usage` final chunk. This walks every frame,
-/// takes the last non-null input/output each, and synthesizes a single
-/// OpenAI-shaped `{ usage: { input_tokens, output_tokens, total_tokens } }`
-/// value for [`maybe_record_usage_value`].
-fn sse_accumulate_usage(response: &[u8]) -> Option<Value> {
-    let text = String::from_utf8_lossy(response);
-    let mut input: Option<u64> = None;
-    let mut output: Option<u64> = None;
-    let mut model: Option<String> = None;
-    let mut id: Option<String> = None;
-    for line in text.lines() {
-        let Some(data) = line.trim_start().strip_prefix("data:") else {
-            continue;
-        };
-        let data = data.trim();
-        if data == "[DONE]" || data.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(data) else {
-            continue;
-        };
-        let Some(usage) = usage_of(&value) else {
-            continue;
-        };
-        // Take the *last* non-null input/output: Anthropic reports a
-        // placeholder `output_tokens` on `message_start`, then the real value on
-        // `message_delta`.
-        if let Some(v) = first_u64(usage, INPUT_KEYS) {
-            input = Some(v);
-        }
-        if let Some(v) = first_u64(usage, OUTPUT_KEYS) {
-            output = Some(v);
-        }
-        if model.is_none() {
-            model = value
-                .get("model")
-                .or_else(|| value.get("message").and_then(|m| m.get("model")))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-        }
-        if id.is_none() {
-            id = value
-                .get("id")
-                .or_else(|| value.get("request_id"))
-                .or_else(|| value.get("requestId"))
-                .or_else(|| value.get("message").and_then(|m| m.get("id")))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-        }
-    }
-    let input = input?;
-    let output = output?;
-    let mut usage = serde_json::Map::new();
-    usage.insert("input_tokens".into(), Value::from(input));
-    usage.insert("output_tokens".into(), Value::from(output));
-    usage.insert("total_tokens".into(), Value::from(input + output));
-    let mut obj = serde_json::Map::new();
-    if let Some(m) = model {
-        obj.insert("model".into(), Value::String(m));
-    }
-    if let Some(i) = id {
-        obj.insert("id".into(), Value::String(i));
-    }
-    obj.insert("usage".into(), Value::Object(usage));
-    Some(Value::Object(obj))
 }
 
 fn maybe_record_usage_value(ctx: &ProxyContext, request: &[u8], value: &Value) -> bool {
@@ -534,6 +670,23 @@ async fn write_response(
 mod tests {
     use super::*;
 
+    /// Fold a whole SSE body the way the streaming path folds it chunk by
+    /// chunk: the merge of a split `input_tokens`/`output_tokens` pair.
+    fn merged(response: &[u8]) -> Option<Value> {
+        let mut acc = SseUsage::default();
+        acc.push(response);
+        acc.merged()
+    }
+
+    /// The fallback when no merge is possible: the first frame whose `usage` is
+    /// an object, so a `"usage":null` frame is skipped rather than recorded.
+    fn first_usage_frame(response: &[u8]) -> Option<Value> {
+        let mut acc = SseUsage::default();
+        acc.push(response);
+        acc.flush();
+        acc.first
+    }
+
     #[test]
     fn stream_requests_are_marked_for_usage() {
         let body = br#"{"model":"deepseek-chat","stream":true,"messages":[]}"#.to_vec();
@@ -550,7 +703,7 @@ mod tests {
 data: {\"id\":\"a\",\"choices\":[]}\n\n\
 data: {\"id\":\"a\",\"model\":\"deepseek-chat\",\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":7,\"total_tokens\":10}}\n\n\
 data: [DONE]\n\n";
-        let value = sse_usage_value(sse).unwrap();
+        let value = first_usage_frame(sse).unwrap();
         assert_eq!(value["usage"]["prompt_tokens"].as_u64(), Some(3));
         assert_eq!(value["usage"]["completion_tokens"].as_u64(), Some(7));
     }
@@ -566,7 +719,7 @@ event: content_block_delta\n\
 data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n\
 event: message_delta\n\
 data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":15}}\n\n";
-        let value = sse_accumulate_usage(sse).unwrap();
+        let value = merged(sse).unwrap();
         assert_eq!(value["usage"]["input_tokens"].as_u64(), Some(25));
         assert_eq!(value["usage"]["output_tokens"].as_u64(), Some(15));
         assert_eq!(value["usage"]["total_tokens"].as_u64(), Some(40));
@@ -577,8 +730,62 @@ data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usa
     #[test]
     fn sse_accumulate_captures_request_id_variant() {
         let sse = b"data: {\"requestId\":\"req-9\",\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}\n\n";
-        let value = sse_accumulate_usage(sse).unwrap();
+        let value = merged(sse).unwrap();
         assert_eq!(value["id"].as_str(), Some("req-9"));
+    }
+
+    #[test]
+    fn sse_fold_matches_whole_body_parse_when_chunks_split_frames() {
+        let sse = b"event: message_start\n\
+data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":25,\"output_tokens\":1}}}\n\n\
+event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n\
+event: message_delta\n\
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":15}}\n\n";
+        let whole = merged(sse).unwrap();
+        // Feed the same bytes one at a time, so every frame boundary lands
+        // mid-chunk: the fold may not depend on chunk alignment.
+        let mut acc = SseUsage::default();
+        for byte in sse {
+            acc.push(std::slice::from_ref(byte));
+        }
+        assert_eq!(acc.finish().unwrap(), whole);
+    }
+
+    #[test]
+    fn sse_fold_reads_a_final_frame_without_a_trailing_newline() {
+        let mut acc = SseUsage::default();
+        acc.push(b"data: {\"usage\":{\"input_tokens\":4,\"output_tokens\":6}}");
+        let value = acc.finish().unwrap();
+        assert_eq!(value["usage"]["input_tokens"].as_u64(), Some(4));
+        assert_eq!(value["usage"]["output_tokens"].as_u64(), Some(6));
+    }
+
+    #[test]
+    fn sse_fold_falls_back_to_the_first_usage_object() {
+        // Only one half of the split pair ever arrives, so no merge is possible
+        // and the first frame carrying a usage *object* is the record — the
+        // `"usage":null` frame before it must not be mistaken for one.
+        let mut acc = SseUsage::default();
+        acc.push(b"data: {\"model\":\"m\",\"usage\":null}\n\n");
+        acc.push(b"data: {\"model\":\"m\",\"usage\":{\"prompt_tokens\":3}}\n\n");
+        let value = acc.finish().unwrap();
+        assert_eq!(value["usage"]["prompt_tokens"].as_u64(), Some(3));
+        assert_eq!(value["model"].as_str(), Some("m"));
+    }
+
+    #[test]
+    fn usage_tee_routes_on_content_type() {
+        let mut json = UsageTee::for_content_type("application/json; charset=utf-8");
+        json.push(b"{\"us");
+        json.push(b"age\":{}}");
+        let UsageTee::Whole(bytes) = json else {
+            panic!("a JSON content-type must be buffered, not folded as SSE");
+        };
+        assert_eq!(bytes, b"{\"usage\":{}}");
+
+        let sse = UsageTee::for_content_type("text/event-stream; charset=utf-8");
+        assert!(matches!(sse, UsageTee::Sse(_)));
     }
 
     #[test]
