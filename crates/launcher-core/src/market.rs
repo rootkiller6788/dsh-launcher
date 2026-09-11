@@ -1341,6 +1341,73 @@ mod tests {
         assert_eq!(gh.install_spec(), "github:o/r");
     }
 
+    /// `github_spec` is the URL a *failed* market install retries against (see
+    /// `install_bundle_item`), so it decides what gets installed for everyone
+    /// whose catalog `npm` name turned out to be unpublished. It had no test.
+    #[test]
+    fn github_spec_reduces_a_link_to_its_repo_root() {
+        let spec = |url: &str| {
+            RegistryPlugin {
+                url: url.into(),
+                ..Default::default()
+            }
+            .github_spec()
+        };
+
+        assert_eq!(spec("https://github.com/o/r").as_deref(), Some("github:o/r"));
+        // A browser link carries a branch and a path; the install target must
+        // not — `github:o/r/tree/main/sub` is not a repo that can be cloned.
+        assert_eq!(
+            spec("https://github.com/o/r/tree/main/sub").as_deref(),
+            Some("github:o/r")
+        );
+        assert_eq!(
+            spec("https://github.com/o/r/blob/main/README.md").as_deref(),
+            Some("github:o/r")
+        );
+        // Fragment, trailing slash and clone suffix are all the same repo.
+        assert_eq!(spec("https://github.com/o/r#readme").as_deref(), Some("github:o/r"));
+        assert_eq!(spec("https://github.com/o/r/").as_deref(), Some("github:o/r"));
+        assert_eq!(spec("https://github.com/o/r.git").as_deref(), Some("github:o/r"));
+        assert_eq!(spec("http://github.com/o/r").as_deref(), Some("github:o/r"));
+
+        // Not a github link, or a github link with no repo in it. The fallback
+        // has to be *unavailable* here, not an empty `github:` that fails the
+        // retry for a second, unrelated reason.
+        assert_eq!(spec("https://gitlab.com/o/r"), None);
+        assert_eq!(spec("https://github.com"), None);
+        assert_eq!(spec("https://github.com/"), None);
+        assert_eq!(spec(""), None);
+    }
+
+    /// The retry is only worth making when it names a source the first attempt
+    /// did not use — `install_bundle_item` compares exactly this pair before
+    /// falling back, so a record where they agree must have no fallback.
+    #[test]
+    fn github_fallback_is_a_different_source_or_none() {
+        let npm = RegistryPlugin {
+            npm: Some("@scope/pkg".into()),
+            url: "https://github.com/o/r".into(),
+            ..Default::default()
+        };
+        assert_eq!(npm.install_spec(), "@scope/pkg");
+        assert_eq!(npm.github_spec().as_deref(), Some("github:o/r"));
+        assert_ne!(npm.install_spec(), npm.github_spec().unwrap());
+
+        // Already a github install: the fallback would repeat the same target.
+        let gh = RegistryPlugin {
+            url: "https://github.com/o/r".into(),
+            ..Default::default()
+        };
+        assert_eq!(gh.install_spec(), "github:o/r");
+        assert_eq!(gh.install_spec(), gh.github_spec().unwrap());
+
+        // No source at all: nothing to install, so nothing to fall back to.
+        let bare = RegistryPlugin::default();
+        assert_eq!(bare.install_spec(), "");
+        assert_eq!(bare.github_spec(), None);
+    }
+
     #[test]
     fn kind_defaults_to_plugin() {
         let json = r#"{"name":"p","owner":"o","url":"https://github.com/o/p"}"#;
