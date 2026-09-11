@@ -39,6 +39,16 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(30);
 // print anything. Killing it then would badge a healthy install as an error. Total
 // window is INIT_TIMEOUT + COLD_START_GRACE.
 const COLD_START_GRACE: Duration = Duration::from_secs(90);
+/// The knob for both windows above. A registry hop behind a slow proxy can
+/// outlast even the cold-start grace, and the user watching the 检查 button is
+/// the only one who knows that about their network — so the window is
+/// overridable instead of argued about. Read per probe, so it needs no plumbing
+/// through every call site.
+const INIT_TIMEOUT_ENV: &str = "AHL_MCP_PROBE_TIMEOUT_SECS";
+/// Bounds on the override: below a few seconds a healthy cold server cannot
+/// answer (the flag would only manufacture failures), and above ten minutes a
+/// typo would look like a hang.
+const INIT_TIMEOUT_RANGE: (u64, u64) = (5, 600);
 const TOOLS_TIMEOUT: Duration = Duration::from_secs(3);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_TOOLS: usize = 40;
@@ -56,6 +66,81 @@ const HTTP_TRANSPORT_MARKERS: [&str; 6] = [
     "server is running at",
     "streamable http",
 ];
+
+/// Parse an override value: whole seconds, clamped to
+/// [`INIT_TIMEOUT_RANGE`]. `None` for anything that is not a number, so a typo
+/// falls back to the default rather than to a 0-second window.
+fn parse_init_timeout(raw: &str) -> Option<Duration> {
+    let secs: u64 = raw.trim().parse().ok()?;
+    let (lo, hi) = INIT_TIMEOUT_RANGE;
+    Some(Duration::from_secs(secs.clamp(lo, hi)))
+}
+
+/// How long to wait for the first initialize response.
+///
+/// The default is unchanged; the override exists for a network where even a
+/// cold `npx` fetch inside the grace window is not enough. A value that is not a
+/// number is ignored (with a line in the probe log, so a typo is visible rather
+/// than silently ignored).
+fn init_timeout() -> Duration {
+    let Ok(raw) = std::env::var(INIT_TIMEOUT_ENV) else {
+        return INIT_TIMEOUT;
+    };
+    match parse_init_timeout(&raw) {
+        Some(d) => d,
+        None => {
+            tracing::warn!(
+                value = %raw,
+                "{INIT_TIMEOUT_ENV} is not a whole number of seconds — using {}s",
+                INIT_TIMEOUT.as_secs()
+            );
+            INIT_TIMEOUT
+        }
+    }
+}
+
+/// The cold-start extension: three times the init window, never less than the
+/// historical 90s. A cold `npx` that downloads a browser (server-puppeteer →
+/// Chromium) is the case this covers, and its cost does not shrink because the
+/// user lowered the first window.
+fn cold_start_grace(init: Duration) -> Duration {
+    (init * 3).max(COLD_START_GRACE)
+}
+
+/// Text markers for "the package itself installed, but the *runtime asset* it
+/// downloads for itself did not" — a browser (server-puppeteer → Chromium) or a
+/// prebuilt binary.
+///
+/// This is the other half of the cold-start story: the install script runs
+/// during `npx`, its download fails (a CDN the network cannot reach, no disk, a
+/// proxy that only serves the registry), and the process exits non-zero having
+/// never reached initialize. The server's own code is complete and the failure
+/// is a fixable missing dependency, so the probe must not report it as a failed
+/// install — an install rollback here would delete a working server over a
+/// browser it did not need on the next run.
+const RUNTIME_ASSET_MARKERS: [&str; 8] = [
+    "failed to download chromium",
+    "failed to download chrome",
+    "failed to set up chrome",
+    "failed to download browser",
+    "failed to install browser",
+    "browser download failed",
+    "could not find expected browser",
+    "unable to download chrome",
+];
+
+fn runtime_asset_hint(text: &str) -> Option<&'static str> {
+    let lower = text.to_ascii_lowercase();
+    RUNTIME_ASSET_MARKERS
+        .iter()
+        .find(|m| lower.contains(*m))
+        .map(|_| {
+            "the package installed but its browser/binary download did not, so it exited \
+             before initialize — the server itself is installed and will start once that \
+             dependency is available (retry the check, install the browser yourself, or set \
+             PUPPETEER_SKIP_DOWNLOAD=1 if a browser is already present)"
+        })
+}
 
 fn http_transport_hint(text: &str) -> Option<&'static str> {
     let lower = text.to_ascii_lowercase();
@@ -330,8 +415,10 @@ async fn probe_stdio(record: &McpServerRecord, node: Option<&Path>, sink: LogSin
     // `npx` fetch whose postinstall downloads a browser/binary can take far longer than
     // INIT_TIMEOUT to first print anything, and killing it would badge a healthy server
     // as an install error (the puppeteer/Chromium case).
+    let init_timeout = init_timeout();
+    let cold_grace = cold_start_grace(init_timeout);
     let start = tokio::time::Instant::now();
-    let mut deadline = start + INIT_TIMEOUT;
+    let mut deadline = start + init_timeout;
     let mut cold_grace_granted = false;
     let mut http_seen = false; // the child announced an HTTP listener on stdout
     let mut init_outcome = ParseOutcome::None_;
@@ -354,12 +441,13 @@ async fn probe_stdio(record: &McpServerRecord, node: Option<&Path>, sink: LogSin
                         &sink,
                         &format!(
                             "health: no initialize within {}s and the process is still alive — \
-                             granting a cold-start extension (npx may still be installing)",
-                            INIT_TIMEOUT.as_secs()
+                             granting a cold-start extension of {}s (npx may still be installing)",
+                            init_timeout.as_secs(),
+                            cold_grace.as_secs()
                         ),
                     );
                     cold_grace_granted = true;
-                    deadline = tokio::time::Instant::now() + COLD_START_GRACE;
+                    deadline = tokio::time::Instant::now() + cold_grace;
                     continue;
                 }
             }
@@ -475,16 +563,32 @@ async fn probe_stdio(record: &McpServerRecord, node: Option<&Path>, sink: LogSin
                 let t = out_tail.lock().unwrap();
                 t.join(" | ")
             };
-            let state = MCP_STATE_ERROR;
+            // Degraded, not error, when the only thing missing is a runtime asset
+            // the package downloads for itself: the install is fine and a rollback
+            // would destroy it over a browser that a retry (or the user's own
+            // Chrome) supplies. See RUNTIME_ASSET_MARKERS.
+            let asset_miss = runtime_asset_hint(&tail);
+            let state = if asset_miss.is_some() {
+                MCP_STATE_DEGRADED
+            } else {
+                MCP_STATE_ERROR
+            };
             let detail = if http_seen || http_transport_hint(&tail).is_some() {
                 format!("server never answered a stdio initialize — {hint}", hint = http_transport_hint(&tail).unwrap_or("it started an HTTP/streamable listener instead"))
+            } else if let Some(hint) = asset_miss {
+                format!("server exited before initialize — {hint}")
             } else {
                 match code {
                     Some(c) => format!("server exited with code {c} before initialize response"),
                     None => {
-                        let total = INIT_TIMEOUT.as_secs()
-                            + if cold_grace_granted { COLD_START_GRACE.as_secs() } else { 0 };
-                        format!("no initialize response within {total}s")
+                        let total = init_timeout.as_secs()
+                            + if cold_grace_granted { cold_grace.as_secs() } else { 0 };
+                        // Name the knob: this is the message a user on a slow
+                        // registry hits, and it is the one they can act on.
+                        format!(
+                            "no initialize response within {total}s — a cold package fetch can \
+                             exceed this; raise {INIT_TIMEOUT_ENV} to wait longer"
+                        )
                     }
                 }
             };
@@ -716,5 +820,64 @@ mod tests {
         assert!(rec.command.is_empty());
         assert!(rec.url.is_empty());
         assert_eq!(rec.transport, "stdio");
+    }
+
+    #[test]
+    fn probe_timeout_override_is_clamped_and_falls_back_on_junk() {
+        // The default is the historical window; an override is taken at face
+        // value only between the bounds.
+        assert_eq!(INIT_TIMEOUT, Duration::from_secs(30));
+        assert_eq!(parse_init_timeout("90"), Some(Duration::from_secs(90)));
+        assert_eq!(parse_init_timeout("  120  "), Some(Duration::from_secs(120)));
+        // Too small to let a healthy cold server answer → the floor.
+        assert_eq!(parse_init_timeout("1"), Some(Duration::from_secs(5)));
+        assert_eq!(parse_init_timeout("0"), Some(Duration::from_secs(5)));
+        // A typo'd huge value would read as a hang → the ceiling.
+        assert_eq!(parse_init_timeout("999999"), Some(Duration::from_secs(600)));
+        // Not a number at all: no duration, so the caller keeps the default
+        // rather than waiting zero seconds.
+        assert_eq!(parse_init_timeout("soon"), None);
+        assert_eq!(parse_init_timeout("30s"), None);
+        assert_eq!(parse_init_timeout("-5"), None);
+        assert_eq!(parse_init_timeout(""), None);
+    }
+
+    #[test]
+    fn runtime_asset_failure_reads_as_degraded_not_a_failed_install() {
+        // The server-puppeteer cold case: the package is installed, Chromium is
+        // not. Matched from either stream, and case-insensitively.
+        assert!(runtime_asset_hint("ERROR: Failed to download Chromium!").is_some());
+        assert!(runtime_asset_hint("npm ERR! Failed to set up chrome").is_some());
+        assert!(runtime_asset_hint("Error: Could not find expected browser (chrome) locally").is_some());
+        assert!(runtime_asset_hint("browser download failed").is_some());
+        // A missing browser must never be classified as an HTTP-transport
+        // mismatch — those point at the catalog entry, this points at the network.
+        assert!(http_transport_hint("Failed to download Chrome").is_none());
+    }
+
+    #[test]
+    fn runtime_asset_hint_leaves_ordinary_failures_alone() {
+        // A package that simply is not there, or dies for its own reasons, is a
+        // genuine failed install and must still be reported as one — softening
+        // these would keep broken records in the library.
+        assert!(runtime_asset_hint("npm ERR! 404 Not Found - GET /nonexistent").is_none());
+        assert!(runtime_asset_hint("server exited with code 1 before initialize response").is_none());
+        assert!(runtime_asset_hint("").is_none());
+        assert!(runtime_asset_hint("Server listening on stdio").is_none());
+        // Mentioning a browser is not enough — it has to be a download failure.
+        assert!(runtime_asset_hint("launching chrome at /usr/bin/chrome").is_none());
+        assert!(runtime_asset_hint("using existing Chrome installation").is_none());
+    }
+
+    #[test]
+    fn cold_start_grace_never_shrinks_below_the_historical_window() {
+        // The default must be byte-identical to the pre-override behaviour.
+        assert_eq!(cold_start_grace(INIT_TIMEOUT), COLD_START_GRACE);
+        assert_eq!(COLD_START_GRACE, Duration::from_secs(90));
+        // A lowered first window must not shorten the grace: a browser download
+        // does not get faster because the user set a small timeout.
+        assert_eq!(cold_start_grace(Duration::from_secs(5)), COLD_START_GRACE);
+        // A raised one does widen it, so the two stay proportionate.
+        assert_eq!(cold_start_grace(Duration::from_secs(120)), Duration::from_secs(360));
     }
 }
