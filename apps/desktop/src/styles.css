@@ -36,7 +36,15 @@ html {
  * palette (design-platform.css), and deepen the accent text shades that sit on
  * light surfaces, so the same utility classes read correctly in both modes.
  * Tailwind v4 emits `--color-*` on `:root`; overriding them on
- * `html[data-theme="light"]` swaps every `bg-*`/`text-*`/`border-*` at once. */
+ * `html[data-theme="light"]` swaps every `bg-*`/`text-*`/`border-*` at once.
+ *
+ * The accent entries below are not decoration: a `text-*` shade left out of
+ * this list keeps its dark-theme pastel and washes out on white (emerald-300 is
+ * 1.5:1, amber-200 1.2:1). The rule is that the *paler* a shade reads on dark,
+ * the darker its light-mode mapping has to be, so 200 -> ~800 and 300 -> ~600.
+ * Saturated `bg-*-500`/`border-*-500` fills are deliberately absent — they carry
+ * white text and read the same in both modes. When a new pale `text-*` shade
+ * appears, deepen it here too. */
 html[data-theme='light'] {
   color-scheme: light;
   --color-zinc-50: #0f1115;
@@ -53,12 +61,19 @@ html[data-theme='light'] {
   --color-blue-100: #1e3a8a;
   --color-blue-200: #1d4ed8;
   --color-blue-300: #1d4ed8;
+  /* blue-400 is the hover tone of `text-blue-400 hover:text-blue-300` (Market's
+   * show-more), so it stays one step lighter than blue-300's mapping — one tone
+   * apart rather than collapsed, or the hover would stop being visible. */
+  --color-blue-400: #2563eb;
   --color-red-200: #dc2626;
   --color-red-300: #b91c1c;
   --color-red-400: #dc2626;
+  --color-amber-200: #92400e;
   --color-amber-300: #b45309;
   --color-amber-400: #d97706;
   --color-orange-400: #c2410c;
+  --color-emerald-200: #065f46;
+  --color-emerald-300: #047857;
   --color-emerald-400: #059669;
   /* Library's four category accents (blue already above): the dark-theme
    * pastel 200/300 text shades wash out on light surfaces — deepen each to its
