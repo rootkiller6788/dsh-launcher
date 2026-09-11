@@ -1,5 +1,5 @@
 use launcher_core::{market, RecommendResult, Registry};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::error::AppError;
 use crate::state::AppState;
@@ -19,23 +19,31 @@ async fn ensure_registry(state: &AppState) -> Result<Registry, AppError> {
 
 /// Load (or return the cached) non-plugin content (themes/skills/MCP), fetching
 /// from the hosted endpoint on first use and falling back to the bundled
-/// snapshots when a kind is unreachable.
-async fn ensure_content(state: &AppState) -> Result<Registry, AppError> {
+/// snapshots when a kind is unreachable. Cached in the state so the four files
+/// are fetched once per session, not once per command.
+///
+/// The fallback is otherwise invisible — the catalog looks the same whether the
+/// hosted files answered or the bundled snapshots did — so the first load that
+/// had to fall back says so in Activity, where the user will actually see it.
+pub(crate) async fn ensure_content(state: &AppState, app: &AppHandle) -> Registry {
     if let Some(c) = state.content.lock().ok().and_then(|g| g.as_ref().cloned()) {
-        return Ok(c);
+        return c;
     }
-    let content = market::fetch_content().await?;
+    let (content, failures) = market::fetch_content_report().await;
+    if !failures.is_empty() {
+        crate::commands::process::emit_warn(app, &market::content_failure_summary(&failures));
+    }
     if let Ok(mut g) = state.content.lock() {
         *g = Some(content.clone());
     }
-    Ok(content)
+    content
 }
 
 /// Fetched plugins + live-fetched content merged into the single catalog both
 /// commands below serve. The merge lives here so the two cannot drift.
-async fn merged_catalog(state: &AppState) -> Result<Registry, AppError> {
+async fn merged_catalog(state: &AppState, app: &AppHandle) -> Result<Registry, AppError> {
     let plugins = ensure_registry(state).await?;
-    let content = ensure_content(state).await?;
+    let content = ensure_content(state, app).await;
     Ok(market::extend_with_content(plugins, content))
 }
 
@@ -44,8 +52,11 @@ async fn merged_catalog(state: &AppState) -> Result<Registry, AppError> {
 /// with its [`ContentKind`]. Smart search stays plugin-only, so content is only
 /// appended here at the response boundary.
 #[tauri::command]
-pub async fn market_registry(state: State<'_, AppState>) -> Result<Registry, AppError> {
-    merged_catalog(&state).await
+pub async fn market_registry(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<Registry, AppError> {
+    merged_catalog(&state, &app).await
 }
 
 /// Smart search: natural-language need → 3 validated bundle plans drawn from
@@ -54,10 +65,11 @@ pub async fn market_registry(state: State<'_, AppState>) -> Result<Registry, App
 #[tauri::command]
 pub async fn market_recommend(
     state: State<'_, AppState>,
+    app: AppHandle,
     need: String,
 ) -> Result<RecommendResult, AppError> {
     let instance = crate::commands::instance::active_instance(&state, None)?;
     let provider = state.vault.resolve(&instance.provider_ref)?;
-    let registry = merged_catalog(&state).await?;
+    let registry = merged_catalog(&state, &app).await?;
     Ok(market::recommend(&registry, &provider, &need).await?)
 }

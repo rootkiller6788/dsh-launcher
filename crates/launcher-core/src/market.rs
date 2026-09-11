@@ -498,41 +498,179 @@ pub async fn fetch_registry(paths: &AppPaths) -> Result<Registry> {
 /// GitHub Pages root).
 const CONTENT_BASE_DEFAULT: &str = "https://awesome-dsh-plugin.com/";
 
+/// One hosted content file: `(kind, file name, bundled snapshot)`.
+type ContentKindSpec = (&'static str, &'static str, fn() -> Registry);
+
+/// The four hosted content files. Report order, so a failure list reads
+/// themes → skills → mcps → bundles.
+const CONTENT_KINDS: [ContentKindSpec; 4] = [
+    ("themes", "content-themes.json", bundled_themes),
+    ("skills", "content-skills.json", bundled_skills),
+    ("mcps", "content-mcps.json", bundled_mcps),
+    ("bundles", "content-bundles.json", bundled_bundles),
+];
+
+/// One content file the hosted endpoint did not answer, so its bundled snapshot
+/// was used instead.
+///
+/// The fallback is invisible by design — the Market renders the same either way —
+/// which is exactly why the miss has to be carried back to the caller: a host
+/// that 404s all four files looks identical to one serving a catalog nobody
+/// updates, and the only trace used to be a `404` in a log file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentFetchFailure {
+    /// `themes` / `skills` / `mcps` / `bundles`.
+    pub kind: &'static str,
+    /// The URL that did not answer.
+    pub url: String,
+    /// Why, in one line (`HTTP 404 Not Found`, a transport error, bad JSON).
+    pub reason: String,
+    /// The HTTP status when the host answered at all; `None` = never reached.
+    pub status: Option<u16>,
+}
+
+impl ContentFetchFailure {
+    /// The host answered "this file is not here": the snapshot is the only
+    /// source by design, not a transient failure worth retrying.
+    pub fn is_not_published(&self) -> bool {
+        self.status == Some(404)
+    }
+}
+
+/// One actionable line describing a content-fetch fallback, shared by the log
+/// and the Activity entry so the two cannot drift.
+pub fn content_failure_summary(failures: &[ContentFetchFailure]) -> String {
+    let detail = failures
+        .iter()
+        .map(|f| format!("{}: {}", f.kind, f.reason))
+        .collect::<Vec<_>>()
+        .join("; ");
+    if !failures.is_empty() && failures.iter().all(ContentFetchFailure::is_not_published) {
+        format!(
+            "live content catalogs are not published on the host ({detail}) — \
+             using the snapshots bundled with this build. Point AHL_CONTENT_URL at a \
+             base URL serving content-*.json to use a live catalog."
+        )
+    } else {
+        format!("live content catalogs unreachable ({detail}) — using the bundled snapshots")
+    }
+}
+
+/// The reason one content file could not be used, and the status if the host
+/// answered. Kept apart from `anyhow` so a caller can tell "the endpoint does
+/// not publish this file" from "we could not reach the endpoint" — they call for
+/// different diagnostics.
+#[derive(Debug, Clone)]
+struct ContentMiss {
+    reason: String,
+    status: Option<u16>,
+}
+
 /// Fetch each content kind from the hosted endpoint, falling back to its
 /// bundled snapshot when that file is unreachable. Always returns a merged
 /// registry of all four kinds (bundled content guarantees non-empty results).
 /// The four fetches run concurrently so a slow/hostile endpoint costs at most
 /// one timeout, not four.
 pub async fn fetch_content() -> Result<Registry> {
-    let client = reqwest::Client::builder()
-        .timeout(CATALOG_TIMEOUT)
-        .build()?;
-    let base = env_override("AHL_CONTENT_URL").unwrap_or_else(|| CONTENT_BASE_DEFAULT.to_string());
+    Ok(fetch_content_report().await.0)
+}
 
-    let themes_url = format!("{base}content-themes.json");
-    let skills_url = format!("{base}content-skills.json");
-    let mcps_url = format!("{base}content-mcps.json");
-    let bundles_url = format!("{base}content-bundles.json");
+/// [`fetch_content`] plus the failures behind it, so a caller can tell the user
+/// that a snapshot answered instead of the live catalog — see
+/// [`ContentFetchFailure`]. Not an error: the registry is always usable.
+pub async fn fetch_content_report() -> (Registry, Vec<ContentFetchFailure>) {
+    let base = env_override("AHL_CONTENT_URL").unwrap_or_else(|| CONTENT_BASE_DEFAULT.to_string());
+    fetch_content_from(&base).await
+}
+
+/// [`fetch_content_report`] with the base URL passed in, so a test can point it
+/// at a local server rather than mutate the process environment.
+async fn fetch_content_from(base: &str) -> (Registry, Vec<ContentFetchFailure>) {
+    let client = match reqwest::Client::builder().timeout(CATALOG_TIMEOUT).build() {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::warn!(error = %e, "catalog HTTP client unavailable — serving the bundled snapshots");
+            let failures = CONTENT_KINDS
+                .iter()
+                .map(|(kind, file, _)| ContentFetchFailure {
+                    kind,
+                    url: format!("{base}{file}"),
+                    reason: format!("HTTP client unavailable: {e}"),
+                    status: None,
+                })
+                .collect();
+            return (bundled_content(), failures);
+        }
+    };
+
+    // One URL per kind, built here so the report and the request cannot disagree
+    // about which file was asked for.
+    let urls: Vec<String> = CONTENT_KINDS
+        .iter()
+        .map(|(_, file, _)| format!("{base}{file}"))
+        .collect();
     let (themes, skills, mcps, bundles) = tokio::join!(
-        fetch_url_catalog(&client, &themes_url),
-        fetch_url_catalog(&client, &skills_url),
-        fetch_url_catalog(&client, &mcps_url),
-        fetch_url_catalog(&client, &bundles_url),
+        fetch_content_catalog(&client, &urls[0]),
+        fetch_content_catalog(&client, &urls[1]),
+        fetch_content_catalog(&client, &urls[2]),
+        fetch_content_catalog(&client, &urls[3]),
     );
 
     let mut content = Registry::default();
-    for (remote, bundled) in [
-        (themes, bundled_themes as fn() -> Registry),
-        (skills, bundled_skills as fn() -> Registry),
-        (mcps, bundled_mcps as fn() -> Registry),
-        (bundles, bundled_bundles as fn() -> Registry),
-    ] {
-        let kind = remote.unwrap_or_else(|_| bundled());
-        content.plugins.extend(kind.plugins);
-        content.categories.extend(kind.categories);
+    let mut failures = Vec::new();
+    let results = [themes, skills, mcps, bundles];
+    for (i, remote) in results.into_iter().enumerate() {
+        let (kind, _, bundled) = CONTENT_KINDS[i];
+        match remote {
+            Ok(reg) => {
+                content.plugins.extend(reg.plugins);
+                content.categories.extend(reg.categories);
+            }
+            Err(miss) => {
+                let url = urls[i].clone();
+                tracing::debug!(kind, url = %url, reason = %miss.reason, "content catalog unavailable — serving the bundled snapshot");
+                failures.push(ContentFetchFailure {
+                    kind,
+                    url,
+                    reason: miss.reason,
+                    status: miss.status,
+                });
+                let snapshot = bundled();
+                content.plugins.extend(snapshot.plugins);
+                content.categories.extend(snapshot.categories);
+            }
+        }
     }
     content.count = content.plugins.len();
-    Ok(content)
+    // One warn for the whole batch, after the per-kind debug lines: a run where
+    // the endpoint is dead should not bury the rest of the log in four copies of
+    // the same complaint.
+    if !failures.is_empty() {
+        tracing::warn!("{}", content_failure_summary(&failures));
+    }
+    (content, failures)
+}
+
+/// Fetch one hosted content file, reporting the status separately from the
+/// transport error so the caller can word the diagnostic correctly.
+async fn fetch_content_catalog(
+    client: &reqwest::Client,
+    url: &str,
+) -> std::result::Result<Registry, ContentMiss> {
+    let miss = |reason: String, status: Option<u16>| ContentMiss { reason, status };
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| miss(format!("{e:#}"), None))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err(miss(format!("HTTP {status}"), Some(status.as_u16())));
+    }
+    let text = resp.text().await.map_err(|e| miss(format!("{e:#}"), None))?;
+    serde_json::from_str(&text)
+        .map(hydrate)
+        .map_err(|e| miss(format!("unreadable JSON: {e:#}"), None))
 }
 
 async fn fetch_url_catalog(client: &reqwest::Client, url: &str) -> Result<Registry> {
@@ -1260,5 +1398,180 @@ mod tests {
 
         assert_eq!(file_from_tarball(&gz, "package/plugins.json").unwrap(), content);
         assert!(file_from_tarball(&gz, "package/nope.json").is_none());
+    }
+
+    // ---- hosted content catalog: the fallback must be reported, not silent ----
+
+    /// Read one HTTP/1.1 request head off the socket. (The download tests keep
+    /// their own copy — this one only needs the request line.)
+    async fn read_request_line(sock: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 2048];
+        while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = sock.read(&mut tmp).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        String::from_utf8_lossy(&buf)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// Answer `requests` connections, picking the route whose file name appears
+    /// in the request line (404 when none matches), then closing each socket —
+    /// so the four concurrent fetches get four connections.
+    async fn serve_content(
+        listener: tokio::net::TcpListener,
+        routes: Vec<(&'static str, u16, &'static str)>,
+    ) {
+        use tokio::io::AsyncWriteExt;
+        for _ in 0..4 {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let routes = routes.clone();
+            tokio::spawn(async move {
+                let request_line = read_request_line(&mut sock).await;
+                let (status, body) = routes
+                    .iter()
+                    .find(|(file, _, _)| request_line.contains(file))
+                    .map(|(_, status, body)| (*status, *body))
+                    .unwrap_or((404, ""));
+                let head = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(body.as_bytes()).await;
+            });
+        }
+    }
+
+    async fn content_server(
+        routes: Vec<(&'static str, u16, &'static str)>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        (
+            format!("http://{addr}/"),
+            tokio::spawn(serve_content(listener, routes)),
+        )
+    }
+
+    /// Wait for the server task, so a panic inside a handler is not swallowed.
+    async fn join(server: tokio::task::JoinHandle<()>) {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), server).await;
+    }
+
+    #[tokio::test]
+    async fn content_fetch_falls_back_to_the_snapshots_and_says_which_files_are_missing() {
+        // The live host publishes no content-*.json at all (the state this
+        // launcher was in). Every kind must fall back AND be reported.
+        let (base, server) = content_server(vec![]).await;
+        let (content, failures) = fetch_content_from(&base).await;
+        join(server).await;
+
+        assert_eq!(
+            failures.iter().map(|f| f.kind).collect::<Vec<_>>(),
+            ["themes", "skills", "mcps", "bundles"],
+            "one failure per kind, in report order"
+        );
+        for f in &failures {
+            assert_eq!(f.status, Some(404), "{}", f.kind);
+            assert!(f.is_not_published(), "{} reads as not published", f.kind);
+            assert!(f.url.ends_with(&format!("content-{}.json", f.kind)));
+        }
+        let summary = content_failure_summary(&failures);
+        assert!(summary.contains("HTTP 404 Not Found"), "{summary}");
+        assert!(summary.contains("AHL_CONTENT_URL"), "actionable: {summary}");
+
+        let bundled = bundled_content();
+        assert_eq!(
+            content.plugins.len(),
+            bundled.plugins.len(),
+            "the four snapshots still make a full catalog"
+        );
+        assert_eq!(content.count, content.plugins.len());
+    }
+
+    #[tokio::test]
+    async fn content_fetch_keeps_the_remote_copy_and_reports_only_the_rest() {
+        let remote_theme = r#"{"count":1,"categories":{"remote":{"en":"Remote"}},
+            "plugins":[{"name":"remote-theme","owner":"o","kind":"theme",
+            "url":"https://github.com/o/remote-theme"}]}"#;
+        let (base, server) = content_server(vec![("content-themes.json", 200, remote_theme)]).await;
+        let (content, failures) = fetch_content_from(&base).await;
+        join(server).await;
+
+        assert!(
+            content.plugins.iter().any(|p| p.name == "remote-theme"),
+            "the served copy is used, not the snapshot"
+        );
+        assert_eq!(
+            failures.iter().map(|f| f.kind).collect::<Vec<_>>(),
+            ["skills", "mcps", "bundles"]
+        );
+        assert!(content.categories.contains_key("remote"));
+        // The snapshot themes are gone — the served file replaced that kind.
+        // (Parsed once: the snapshot is ~1 MB and the catalog is thousands of rows.)
+        let snapshot_keys: HashSet<String> =
+            bundled_themes().plugins.iter().map(|p| p.key()).collect();
+        assert!(!content
+            .plugins
+            .iter()
+            .any(|p| snapshot_keys.contains(&p.key())));
+    }
+
+    #[tokio::test]
+    async fn content_fetch_calls_an_unreachable_host_unreachable_not_missing() {
+        // A bound-then-dropped port: nothing is listening, so the fetches fail
+        // without ever getting a status — a different diagnostic from a 404.
+        let addr = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap()
+        };
+        let (content, failures) = fetch_content_from(&format!("http://{addr}/")).await;
+
+        assert_eq!(failures.len(), 4);
+        for f in &failures {
+            assert_eq!(f.status, None, "{}: no HTTP status was received", f.kind);
+            assert!(!f.is_not_published());
+            assert!(!f.reason.is_empty());
+        }
+        let summary = content_failure_summary(&failures);
+        assert!(summary.contains("unreachable"), "{summary}");
+        assert!(
+            !summary.contains("AHL_CONTENT_URL"),
+            "a dead host is not a publishing problem: {summary}"
+        );
+        assert_eq!(content.plugins.len(), bundled_content().plugins.len());
+    }
+
+    #[test]
+    fn content_failure_summary_separates_missing_from_unreachable() {
+        let missing = ContentFetchFailure {
+            kind: "skills",
+            url: "https://example.com/content-skills.json".into(),
+            reason: "HTTP 404 Not Found".into(),
+            status: Some(404),
+        };
+        let refused = ContentFetchFailure {
+            status: None,
+            reason: "error sending request".into(),
+            ..missing.clone()
+        };
+        // All-404: the host does not publish the files — name the way out.
+        let summary = content_failure_summary(&[missing.clone(), missing.clone()]);
+        assert!(summary.contains("not published"), "{summary}");
+        assert!(summary.contains("AHL_CONTENT_URL"), "{summary}");
+        // One of them unreachable: do not claim the host does not publish them.
+        let summary = content_failure_summary(&[missing, refused]);
+        assert!(summary.contains("unreachable"), "{summary}");
+        assert!(!summary.contains("AHL_CONTENT_URL"), "{summary}");
     }
 }

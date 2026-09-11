@@ -250,7 +250,7 @@ fn fallback_plugin(name: &str) -> RegistryPlugin {
     }
 }
 
-pub(crate) async fn merged_registry(state: &AppState) -> Registry {
+pub(crate) async fn merged_registry(state: &AppState, app: &AppHandle) -> Registry {
     let plugins = if let Some(reg) = state.registry.lock().ok().and_then(|g| g.as_ref().cloned()) {
         reg
     } else {
@@ -258,13 +258,10 @@ pub(crate) async fn merged_registry(state: &AppState) -> Registry {
             .await
             .unwrap_or_else(|_| Registry::default())
     };
-    let content = if let Some(reg) = state.content.lock().ok().and_then(|g| g.as_ref().cloned()) {
-        reg
-    } else {
-        market::fetch_content()
-            .await
-            .unwrap_or_else(|_| market::bundled_content())
-    };
+    // Same cached content path as the Market commands: this used to fetch the
+    // four content files on every call without ever filling the cache, so any
+    // command that landed here paid a fresh round trip each time.
+    let content = crate::commands::market::ensure_content(state, app).await;
     market::extend_with_content(plugins, content)
 }
 
@@ -341,7 +338,7 @@ pub async fn environment_export(
         HeavyJobKind::EnvironmentExport,
         || async {
             let instance = InstanceManifest::get(&state.paths, &id)?;
-            let registry = merged_registry(&state).await;
+            let registry = merged_registry(&state, &app).await;
             let entries = registry_index(&registry);
             let installed = DshAdapter::installed_plugins(&instance);
             let mut items = Vec::new();

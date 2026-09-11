@@ -153,7 +153,7 @@ pub async fn skill_updates(
     run_instance_job(&state, &app, &job_id, HeavyJobKind::UpdateCheck, || async {
         let instance = InstanceManifest::get(&state.paths, &id)?;
         let records = content_adapter::installed_skills(&instance);
-        let registry = merged_registry(&state).await;
+        let registry = merged_registry(&state, &app).await;
         let entries = registry_index(&registry);
         // Phase 1 — resolve each record's probe URL + installed baseline
         // synchronously. The slow part is the network: fetching upstream hashes
@@ -278,7 +278,7 @@ pub async fn skill_update(
     id: String,
     skill: String,
 ) -> Result<Job, AppError> {
-    let registry = merged_registry(&state).await;
+    let registry = merged_registry(&state, &app).await;
     let entries = registry_index(&registry);
     let entry = find_by_key(&entries, ContentKind::Skill, &skill).ok_or_else(|| {
         AppError::msg(format!(
