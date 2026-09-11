@@ -1891,4 +1891,64 @@ mod tests {
             "https://gh-proxy.com/https://github.com/FlowerWater1019/Angelina-dsh-plugin.git"
         );
     }
+
+    /// Baseline for the full-size instance, against the real cache on this
+    /// machine (178 plugins, 22 market records) rather than a constructed
+    /// fixture: the question is what a Library build costs when the instance is
+    /// as large as it gets, and only real data answers it.
+    ///
+    /// Ignored by default — it needs this machine's `%LOCALAPPDATA%`. Run with
+    /// `cargo test -p ai-harness-launcher -- --ignored --nocapture library_projection`.
+    ///
+    /// The bound is deliberately loose: it is a tripwire for a change that makes
+    /// the projection quadratic in a *new* way, not a benchmark to tune against.
+    #[test]
+    #[ignore = "real-machine baseline: reads this machine's library-inventory.json"]
+    fn library_projection_at_full_size_scales_with_the_instance() {
+        let local = std::env::var("LOCALAPPDATA").expect("LOCALAPPDATA is set");
+        let path = PathBuf::from(local)
+            .join("AIHarnessLauncher")
+            .join("instances")
+            .join("default")
+            .join("library-inventory.json");
+        let text = match fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => panic!("read {}: {e}", path.display()),
+        };
+        let cache: LibraryInventoryCache = serde_json::from_str(&text).expect("cache parses");
+        assert!(
+            cache.dsh_inventory.len() >= 100,
+            "expected a large instance, got {} plugins",
+            cache.dsh_inventory.len()
+        );
+
+        // The match that pairs each plugin with its Market record is the only
+        // part of the projection that is not a straight walk, so it is the one
+        // worth timing: it scans every record for every plugin.
+        const BUILDS: u32 = 100;
+        let start = std::time::Instant::now();
+        let mut matched = 0usize;
+        for _ in 0..BUILDS {
+            for plugin in &cache.dsh_inventory {
+                if market_metadata_for_plugin_values(&cache.launcher_metadata, plugin).is_some() {
+                    matched += 1;
+                }
+            }
+        }
+        let per_build = start.elapsed() / BUILDS;
+
+        println!(
+            "library projection baseline: {} plugins x {} market records = {} pairs, \
+             {per_build:?} per build ({matched} matches over {BUILDS} builds)",
+            cache.dsh_inventory.len(),
+            cache.launcher_metadata.len(),
+            cache.dsh_inventory.len() * cache.launcher_metadata.len(),
+        );
+
+        assert!(
+            per_build < std::time::Duration::from_millis(500),
+            "projection took {per_build:?} per build at {} plugins — a real regression",
+            cache.dsh_inventory.len()
+        );
+    }
 }
