@@ -165,9 +165,23 @@ fn preview_for(pkg: &EnvironmentPackage) -> EnvironmentPreviewResult {
     }
 }
 
+/// SHA-256 (hex) of the manifest's canonical JSON.
+///
+/// The round trip through `Value` is load-bearing, not decoration. The manifest
+/// carries map-valued fields (`RegistryPlugin.description` is a
+/// `HashMap<String, String>`, `env`/`headers` likewise), and a Rust `HashMap`
+/// serializes in its own iteration order — which is randomized per instance and
+/// not the order the bytes were read back in. Hashing the struct directly meant
+/// export hashed one key order and import re-hashed another, so a package this
+/// launcher had just written could fail its own checksum (a coin flip for a
+/// two-key description) with "checksum mismatch" in the import preview.
+/// `Value`'s object is a `BTreeMap` (no `preserve_order` in this workspace's
+/// `serde_json`), so it re-emits every nested object with sorted keys on both
+/// sides and the checksum becomes a function of the content and nothing else.
 fn manifest_checksum(manifest: &EnvironmentManifest) -> Result<String, AppError> {
-    let bytes =
-        serde_json::to_vec(manifest).context("serialize environment manifest for checksum")?;
+    let value = serde_json::to_value(manifest)
+        .context("serialize environment manifest for checksum")?;
+    let bytes = serde_json::to_vec(&value).context("render the environment manifest for hashing")?;
     let hash = Sha256::digest(bytes);
     Ok(hash.iter().map(|b| format!("{b:02x}")).collect())
 }
@@ -189,7 +203,11 @@ fn validate_package(pkg: &EnvironmentPackage) -> Result<(), AppError> {
     }
     let expected = manifest_checksum(&pkg.manifest)?;
     if expected != pkg.checksum {
-        return Err(AppError::msg("environment package checksum mismatch"));
+        return Err(AppError::msg(
+            "environment package checksum mismatch — the file no longer matches the SHA-256 it \
+             shipped with, which means environment.json was edited or the archive was truncated. \
+             Export the environment again and import that copy.",
+        ));
     }
     Ok(())
 }
@@ -684,5 +702,48 @@ mod tests {
             "unresolved source flagged: {:?}",
             preview.conflicts
         );
+    }
+
+    #[test]
+    fn exported_checksum_survives_the_reparse_the_importer_does() {
+        // Map-valued manifest fields are `HashMap`s, whose serialization order is
+        // randomized per instance. Hashing the struct directly made export and
+        // import disagree about a package's own checksum, and the import preview
+        // rejected files this launcher had just written. The loop is the test:
+        // each round trip re-parses `environment.json` into fresh `HashMap`s, so
+        // a checksum that is not order-independent fails on one of these passes
+        // with overwhelming probability (5-in-6 per pass for a 3-key map).
+        let manifest = EnvironmentManifest {
+            items: vec![RegistryPlugin {
+                kind: ContentKind::Mcp,
+                name: "server-github".into(),
+                transport: Some("stdio".into()),
+                command: Some("npx".into()),
+                description: HashMap::from([
+                    ("en".to_string(), "GitHub tools".to_string()),
+                    ("zh".to_string(), "GitHub 工具".to_string()),
+                    ("ja".to_string(), "GitHub ツール".to_string()),
+                ]),
+                env: Some(HashMap::from([
+                    ("GITHUB_TOKEN".to_string(), "${GITHUB_TOKEN}".to_string()),
+                    ("LOG_LEVEL".to_string(), "info".to_string()),
+                ])),
+                ..Default::default()
+            }],
+            ..sample_manifest()
+        };
+        let pkg = EnvironmentPackage {
+            checksum: manifest_checksum(&manifest).expect("checksum"),
+            manifest,
+        };
+
+        for pass in 0..64 {
+            let json = package_json(&pkg).expect("serialize package");
+            let reparsed: EnvironmentPackage =
+                serde_json::from_str(&json).expect("reparse package");
+            validate_package(&reparsed).unwrap_or_else(|e| {
+                panic!("pass {pass}: an exported package failed its own checksum: {e}")
+            });
+        }
     }
 }
