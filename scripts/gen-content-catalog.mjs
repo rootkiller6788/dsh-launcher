@@ -1,6 +1,7 @@
 // Generates the bundled content catalogs that ship inside the launcher binary:
 //   crates/launcher-core/data/content-themes.json  <- awesome-dsh-themes/data/themes.json
 //   crates/launcher-core/data/content-skills.json  <- awesome-agent-skills/README.md
+//                                                    + scripts/data/skill-overrides.json (hand-added)
 //   crates/launcher-core/data/content-mcps.json    <- scripts/data/mcp-overrides.json + mcp-bulk.json,
 //                                                    then resolver-stamped from scripts/data/mcp-resolved.json
 //   crates/launcher-core/data/content-bundles.json <- awesome-agent-bundles/data/bundles.json
@@ -20,6 +21,12 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { mcpCoverage, stampPlugins } from './resolver/stamp.mjs'
+import {
+  mergeSkillOverrides,
+  parseSkillsMd,
+  skillId,
+  skillIdDelta,
+} from './lib/skills.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '..')
@@ -200,132 +207,26 @@ function genThemes() {
   console.log(`content-themes.json: ${skins.length} verified skins`)
 }
 
-// Skill README line shape:  `- **[owner/name](URL)** - description`
-// The URL is an officialskills.sh deep-link or a github.com blob/tree/repo link.
-// `repo` is the canonical github.com repo (the clone/install target); `fetch` is
-// a best-effort raw SKILL.md URL — a fast path that works for the well-formed
-// layouts but is wrong for repos with an unconventional tree (install falls back
-// to a shallow clone + SKILL.md search when it 404s).
-function resolveSkill(url) {
-  let m
-  // officialskills.sh/<owner>/<repo>/<name>  →  github.com/<owner>/<repo>
-  m = url.match(/^https?:\/\/officialskills\.sh\/([^/]+)\/([^/]+)\/([^/]+)\/?$/)
-  if (m) {
-    const [, o, r, name] = m
-    return {
-      owner: o,
-      name,
-      repo: `https://github.com/${o}/${r}`,
-      fetch: `https://raw.githubusercontent.com/${o}/${r}/HEAD/skills/${name}/SKILL.md`,
-    }
-  }
-  // github blob: keep the full path (which ends in SKILL.md)
-  m = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/(.+)$/)
-  if (m) {
-    const [, o, r, branch, path] = m
-    return {
-      owner: o,
-      name: lastSkillSegment(path) || r,
-      repo: `https://github.com/${o}/${r}`,
-      fetch: `https://raw.githubusercontent.com/${o}/${r}/${branch}/${path}`,
-    }
-  }
-  // github tree: append SKILL.md to the subdir
-  m = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/([^/]+)\/(.+)$/)
-  if (m) {
-    const [, o, r, branch, path] = m
-    return {
-      owner: o,
-      name: lastSkillSegment(path) || r,
-      repo: `https://github.com/${o}/${r}`,
-      fetch: `https://raw.githubusercontent.com/${o}/${r}/${branch}/${path}/SKILL.md`,
-    }
-  }
-  // github repo root: SKILL.md at the root of the default branch
-  m = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/?$/)
-  if (m) {
-    const [, o, r] = m
-    return {
-      owner: o,
-      name: r,
-      repo: `https://github.com/${o}/${r}`,
-      fetch: `https://raw.githubusercontent.com/${o}/${r}/HEAD/SKILL.md`,
-    }
-  }
-  return null
-}
-
-// The skill folder name = the path segment holding SKILL.md (drop a trailing
-// `SKILL.md` segment first for blob URLs).
-function lastSkillSegment(path) {
-  const segs = path.split('/').filter(Boolean)
-  if (segs.length && segs[segs.length - 1].toLowerCase() === 'skill.md') segs.pop()
-  return segs[segs.length - 1] || ''
-}
-
+// The README walk, the override merge and the delta report live in lib/skills.mjs
+// so they can be unit-tested without the upstream clone (scripts/lib/skills.test.mjs).
+//
+// `content-skills.json` is regenerated from upstream's README every run, so a
+// skill appended straight to the JSON (or one the README drops) disappears
+// silently. Two guards, both needed:
+//   1. scripts/data/skill-overrides.json — the protected zone for hand-added
+//      entries. They are appended after the README-derived set, and an id that
+//      is in both places is emitted once with the override's fields.
+//   2. the dropped-id report below — new/removed ids are always logged, so a
+//      README change that would erase catalog entries is visible in the run
+//      output instead of only in the JSON diff.
 function genSkills() {
+  const overrides = JSON.parse(
+    readFileSync(resolve(__dirname, 'data/skill-overrides.json'), 'utf8'),
+  )
   const md = readFileSync(resolve(CLONES, 'awesome-agent-skills/README.md'), 'utf8')
-  const seen = new Set()
-  const skills = []
-  const cats = new Set()
-  let section = 'General'
-  // Vendor blocks are `<details><summary><h3>Skills by X</h3></summary>…</details>`.
-  // Their nested `### Product` subheadings (NVIDIA's 17 products, Microsoft's
-  // sub-docs) are sub-groupings, not catalog categories — fold them under the
-  // block title instead of promoting each to a top-level category.
-  let inDetails = false
-  for (const raw of md.split('\n')) {
-    if (/^<\/details>/.test(raw)) {
-      inDetails = false
-      continue
-    }
-    if (/^<details/.test(raw)) {
-      inDetails = true
-      continue
-    }
-    // Vendor groups use an HTML heading: `<summary><h3 …>Title</h3></summary>`.
-    const h3 = raw.match(/<h3[^>]*>([^<]+)<\/h3>/)
-    if (h3) {
-      section = h3[1].trim()
-      continue
-    }
-    if (/^###\s/.test(raw)) {
-      if (!inDetails) {
-        const name = sectionName(raw)
-        if (name) section = name
-      }
-      continue
-    }
-    const m = raw.match(/^\s*-\s*\*\*\[([^\]]+)\]\(([^)]+)\)\*\*([\s\S]*)$/)
-    if (!m) continue
-    const [, , url, rest] = m
-    const resolved = resolveSkill(url)
-    if (!resolved) continue
-    const id = `${resolved.owner}/${resolved.name}`
-    if (seen.has(id)) continue
-    seen.add(id)
-    cats.add(section)
-    const dashIdx = rest.search(/[-–—]/)
-    const desc = (dashIdx === -1 ? rest : rest.slice(dashIdx + 1)).trim().slice(0, 200)
-    skills.push({
-      name: resolved.name,
-      owner: resolved.owner,
-      url: resolved.repo,
-      category: [section],
-      description: toDescription(desc),
-      npm: null,
-      tarball: null,
-      screenshots: [],
-      stars: null,
-      downloads: null,
-      install: '',
-      added: '',
-      deprecated: null,
-      replacement: null,
-      kind: 'skill',
-      fetch: resolved.fetch,
-    })
-  }
+  const { skills, cats } = parseSkillsMd(md, { toDescription, sectionName })
+  const fromReadme = new Set(skills.map(skillId))
+  mergeSkillOverrides(skills, cats, overrides)
   const categories = {}
   for (const c of [...cats].sort()) categories[c] = { en: c, zh: zhLabel(c) }
   const out = {
@@ -335,8 +236,37 @@ function genSkills() {
     plugins: skills,
   }
   mkdirSync(dataDir, { recursive: true })
-  writeFileSync(resolve(dataDir, 'content-skills.json'), JSON.stringify(out, null, 2))
-  console.log(`content-skills.json: ${skills.length} skills in ${Object.keys(categories).length} categories`)
+  const target = resolve(dataDir, 'content-skills.json')
+  // Report the delta against the committed catalog: a README that dropped or
+  // renamed a line shows up here as a removal, and an override that stopped
+  // being picked up shows up as an addition the next run would repeat.
+  let delta = ''
+  try {
+    const before = JSON.parse(readFileSync(target, 'utf8')).plugins || []
+    // `erased` = hand-added to the JSON and in neither source, so this run just
+    // dropped it. Name the fix, not only the casualty.
+    const { added, dropped, erased } = skillIdDelta(before, skills, {
+      readmeIds: fromReadme,
+      overrideIds: new Set(overrides.map(skillId)),
+    })
+    if (added.length || dropped.length) {
+      delta =
+        `\n  +${added.length} new: ${added.slice(0, 10).join(', ') || '-'}` +
+        `\n  -${dropped.length} dropped: ${dropped.slice(0, 10).join(', ') || '-'}`
+      if (erased.length) {
+        delta +=
+          `\n  !! ${erased.length} of them were neither in the README nor in skill-overrides.json` +
+          ` — move them there or they are gone for good: ${erased.slice(0, 10).join(', ')}`
+      }
+    }
+  } catch {
+    // No previous catalog to compare against (first run) — nothing to report.
+  }
+  writeFileSync(target, JSON.stringify(out, null, 2))
+  console.log(
+    `content-skills.json: ${skills.length} skills in ${Object.keys(categories).length} categories` +
+      ` (${overrides.length} hand-added)${delta}`,
+  )
 }
 
 // MCP servers ship from two lists: a hand-maintained curated set (verified npm
