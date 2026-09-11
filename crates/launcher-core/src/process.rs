@@ -4,7 +4,7 @@
 //! stdout/stderr through a `LogSink`, a watcher that reaps on exit, and a kill
 //! channel so `ChildHandle::stop()` can ask the watcher to terminate it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -323,6 +323,46 @@ pub struct LedgerEntry {
     pub created_at: Option<u64>,
 }
 
+/// Cross-process lock over the ledger, held for the duration of one
+/// read-modify-write.
+///
+/// Every mutation of the ledger reads the whole file, edits, and writes it
+/// back, so two launchers doing that at once would each clobber the other's
+/// rows — losing a record that the zombie sweep exists to keep. The lock lives
+/// in a *sidecar* file rather than on the ledger itself because an emptied
+/// ledger is deleted, which would take a lock held on it with it.
+///
+/// Released when dropped, and by the OS if the process dies while holding it.
+struct LedgerLock {
+    file: std::fs::File,
+}
+
+impl LedgerLock {
+    fn acquire(path: &Path) -> std::io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Read+write, not append: Windows refuses to lock a handle opened for
+        // append only (LockFileEx wants GENERIC_READ/WRITE, and FILE_APPEND_DATA
+        // is neither). Never truncated — the file is a rendezvous point, and its
+        // contents are meaningless.
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        file.lock()?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for LedgerLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
 /// Persistent record of every harness tree the launcher has spawned. Written on
 /// launch, swept on the next launch, so a hard-killed launcher (or a crash) can
 /// never leave an orphaned harness tree behind — the "startup zombie sweep".
@@ -354,11 +394,41 @@ impl PidLedger {
 
     /// Append an entry if its `pid` is not already recorded.
     pub fn record_entry(&self, entry: LedgerEntry) {
-        let mut entries = self.read();
-        if !entries.iter().any(|e| e.pid == entry.pid) {
-            entries.push(entry);
-        }
+        self.mutate(|mut entries| {
+            if !entries.iter().any(|e| e.pid == entry.pid) {
+                entries.push(entry);
+            }
+            entries
+        });
+    }
+
+    /// The ledger's read-modify-write cycle, under the cross-process lock.
+    fn mutate(&self, f: impl FnOnce(Vec<LedgerEntry>) -> Vec<LedgerEntry>) {
+        let _guard = match self.lock() {
+            Ok(guard) => Some(guard),
+            Err(e) => {
+                // Degrade to an unlocked write rather than dropping the row: an
+                // unrecorded tree is one nothing will ever reap.
+                tracing::warn!(error = %e, "PID ledger lock unavailable, writing unlocked");
+                None
+            }
+        };
+        let entries = f(self.read());
         self.write(&entries);
+    }
+
+    /// Take the ledger's cross-process lock. Callers hold it across a whole
+    /// read-modify-write; `read` and `write` themselves take nothing.
+    fn lock(&self) -> std::io::Result<LedgerLock> {
+        LedgerLock::acquire(&self.lock_path())
+    }
+
+    /// Sidecar to [`Self::lock`]. `spawned.pids` → `spawned.pids.lock`, so the
+    /// two launchers sharing a data root also share the lock.
+    fn lock_path(&self) -> PathBuf {
+        let mut path = self.path.clone();
+        path.set_extension("pids.lock");
+        path
     }
 
     pub fn read(&self) -> Vec<LedgerEntry> {
@@ -380,15 +450,12 @@ impl PidLedger {
     /// launcher on this data root, and their bookkeeping is not ours to drop.
     pub fn forget(&self, pid: u32) {
         let owner = std::process::id();
-        let before = self.read();
-        let after: Vec<LedgerEntry> = before
-            .iter()
-            .filter(|e| !(e.pid == pid && e.owner == Some(owner)))
-            .cloned()
-            .collect();
-        if after.len() != before.len() {
-            self.write(&after);
-        }
+        self.mutate(|entries| {
+            entries
+                .into_iter()
+                .filter(|e| !(e.pid == pid && e.owner == Some(owner)))
+                .collect()
+        });
     }
 
     pub fn clear(&self) {
@@ -446,6 +513,12 @@ fn parse_ledger_line(line: &str) -> Option<LedgerEntry> {
 /// Cross-platform: the per-PID probe (`pid_alive`) and tree-kill (`kill_tree`)
 /// are cfg'd per OS, the sweep loop is not.
 pub fn sweep_leftover(ledger: &PidLedger) -> usize {
+    // The sweep is a read-modify-write too, and it is the writer most likely to
+    // race a *second* launcher's `record` — both run at launch. The kills happen
+    // under the lock so nobody's row can slip in between the read and the
+    // write-back and be silently dropped.
+    let _guard = ledger.lock().ok();
+
     let entries = ledger.read();
     let total = entries.len();
     let mut swept = 0;
@@ -831,6 +904,42 @@ mod tests {
 
         ledger.forget(4242);
         assert_eq!(ledger.read(), vec![theirs]);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Two launchers mutate the shared ledger; the lock is what stops one's
+    /// read-modify-write from clobbering the other's. File locks are enforced
+    /// between open handles, so a second handle here contends exactly as a
+    /// second process would.
+    #[test]
+    fn ledger_lock_is_exclusive_across_writers() {
+        let tmp = std::env::temp_dir().join(format!("ahl-ledger-lock-{}", std::process::id()));
+        let ledger = PidLedger::open(tmp.clone());
+        let lock_path = ledger.lock_path();
+        let open = || {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .expect("open lock file")
+        };
+
+        let held = LedgerLock::acquire(&lock_path).expect("first acquire");
+        assert!(
+            open().try_lock().is_err(),
+            "a second writer got in while the lock was held"
+        );
+
+        drop(held);
+        let after = open();
+        assert!(
+            after.try_lock().is_ok(),
+            "the lock was not released when the holder dropped it"
+        );
+
+        let _ = std::fs::remove_file(&lock_path);
         let _ = std::fs::remove_file(&tmp);
     }
 
