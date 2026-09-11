@@ -472,13 +472,25 @@ impl DshAdapter {
         let mut body = value
             .get("value")
             .cloned()
-            .ok_or_else(|| anyhow!("pluginInventory/list: missing value"))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "DSH returned no plugin inventory — the harness did not answer \
+                     pluginInventory/list. Restart the instance; if it persists, check the DSH \
+                     version in Settings → Runtime."
+                )
+            })?;
         if body.get("ok").and_then(|v| v.as_bool()).is_some() {
             crate::theme::ensure_ok(&body, "pluginInventory/list remote")?;
             body = body
                 .get("value")
                 .cloned()
-                .ok_or_else(|| anyhow!("pluginInventory/list remote: missing value"))?;
+                .ok_or_else(|| {
+                    anyhow!(
+                        "DSH returned no plugin inventory over HTTP — the harness did not answer \
+                         pluginInventory/list. Restart the instance; if it persists, check the DSH \
+                         version in Settings → Runtime."
+                    )
+                })?;
         }
         let snapshot: InventorySnapshot = serde_json::from_value(body)?;
         Ok(snapshot
@@ -526,15 +538,22 @@ impl DshAdapter {
         let profile_dir = Self::profile_dir(instance);
         let ids = inserted_row_ids(&profile_dir, name);
         if ids.is_empty() {
+            // Nothing to fix, and saying so is the point: the switch is missing
+            // because the *plugin* has no bundle rows, not because the launcher
+            // failed. Its Enable/Disable has nothing to point at.
             return Err(anyhow!(
-                "plugin '{name}' has no toggleable bundle rows — its package.json does not declare a `dsh.bundle`, so it cannot be enabled/disabled through the patch layer"
+                "plugin '{name}' is not switchable — its package.json declares no `dsh.bundle`, \
+                 so it has no bundle rows the patch layer could turn off. Nothing is broken and \
+                 there is nothing to retry: this plugin is active whenever it is installed."
             ));
         }
         let patch_path = profile_dir.join("cordis.patch.yml");
         for id in ids {
             if !is_valid_row_id(&id) {
                 return Err(anyhow!(
-                    "row id '{id}' has characters the patch layer cannot write"
+                    "this plugin's bundle declares a row id the patch layer cannot write \
+                     ('{id}') — the plugin's own packaging is at fault rather than the launcher. \
+                     Update the plugin, or install it from its own repo"
                 ));
             }
             if enabled {
@@ -725,8 +744,14 @@ pub async fn run_timed(
             for r in readers {
                 let _ = r.await;
             }
+            // A timeout is almost always the network, not the package: a first
+            // install has to fetch every dependency, and `dsh plugin add` gives
+            // no progress to watch. Say so, and name the one thing the user can
+            // actually do about it.
             Err(format!(
-                "{program} timed out after {}s — killed its process tree",
+                "{program} timed out after {}s and was stopped. The first install of a large \
+                 plugin downloads its whole dependency tree, so a slow or blocked npm/git \
+                 connection is the usual cause — check your network and Retry.",
                 timeout.as_secs()
             ))
         }

@@ -909,10 +909,11 @@ async fn run_git(args: &[String], cwd: Option<&Path>) -> Result<(), AppError> {
     .map_err(|e| {
         if e.starts_with("spawn ") {
             AppError::msg(format!(
-                "git is required for GitHub plugin cache but could not start: {e}"
+                "git is required for the GitHub plugin cache but could not start ({e}). \
+                 Install git and make sure it is on PATH, then Retry."
             ))
         } else {
-            AppError::msg(format!("git operation failed: {e}"))
+            AppError::msg(e)
         }
     })?;
     if code == 0 {
@@ -930,7 +931,14 @@ async fn run_git(args: &[String], cwd: Option<&Path>) -> Result<(), AppError> {
             trimmed.to_string()
         }
     };
-    Err(AppError::msg(format!("git command failed: {detail}")))
+    // The relay toggle is the fix for the case that brings most people here — a
+    // clone that cannot finish against github.com from a throttled network — so
+    // name it rather than leaving "git failed" as the last word.
+    Err(AppError::msg(format!(
+        "git failed for this GitHub cache ({detail}). If the repo exists and is public, the \
+         usual cause is the connection: turn on the GitHub mirror in the Install Center and \
+         Retry, then check your network."
+    )))
 }
 
 /// When a github skin repo lacks a root `package.json` (a monorepo shell), the

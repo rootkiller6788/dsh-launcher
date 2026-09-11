@@ -598,7 +598,9 @@ async fn clone_into(url: &str, dest: &Path) -> Result<()> {
     .map_err(|e| anyhow!("git clone {url} failed: {e}"))?;
     if code != 0 {
         return Err(anyhow!(
-            "git clone {url} failed — check the repo exists and is public, and that your network can reach it"
+            "git clone {url} failed — check the repo exists and is public, and that your \
+             network can reach it. If it is public and you are on a throttled link, turn on \
+             the GitHub mirror in the Install Center and Retry."
         ));
     }
     Ok(())
