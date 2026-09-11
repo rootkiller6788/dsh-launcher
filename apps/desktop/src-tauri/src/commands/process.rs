@@ -457,6 +457,9 @@ pub async fn process_state(
         if close_session(&state, "crashed") {
             // Only drop the handle when we actually owned the session.
             if let Some(mut running) = guard.take() {
+                // The tree ended on its own, so its ledger row has nothing left
+                // to record — see `PidLedger::forget`.
+                PidLedger::open(state.paths.pid_ledger()).forget(running.handle.pid);
                 if let Some(shutdown) = running.usage_proxy_shutdown.take() {
                     let _ = shutdown.send(());
                 }
@@ -492,7 +495,12 @@ async fn do_stop(state: &AppState, app: &AppHandle) -> Result<ProcessState, AppE
         if let Some(shutdown) = running.settings_watch_shutdown.take() {
             let _ = shutdown.send(());
         }
+        let pid = running.handle.pid;
         let _ = running.handle.stop().await;
+        // `stop` awaited the watcher, so the tree is down — the ledger row has
+        // done its job and would otherwise sit there until some future session
+        // swept it.
+        PidLedger::open(state.paths.pid_ledger()).forget(pid);
         close_session(state, "stopped");
         close_dsh_window(app);
     }

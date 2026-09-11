@@ -369,6 +369,28 @@ impl PidLedger {
         content.lines().filter_map(parse_ledger_line).collect()
     }
 
+    /// Drop this launcher's row for a tree that has stopped. Call it on every
+    /// clean stop and every observed exit: the row exists only so a *later*
+    /// session can reap what this one failed to clean up, so once the tree is
+    /// gone keeping it just means the ledger grows a dead row per launch — and
+    /// one this launcher's own sweeps will never take, since its owner (us) is
+    /// still alive.
+    ///
+    /// Only our own row is removed. The ledger is shared with any other
+    /// launcher on this data root, and their bookkeeping is not ours to drop.
+    pub fn forget(&self, pid: u32) {
+        let owner = std::process::id();
+        let before = self.read();
+        let after: Vec<LedgerEntry> = before
+            .iter()
+            .filter(|e| !(e.pid == pid && e.owner == Some(owner)))
+            .cloned()
+            .collect();
+        if after.len() != before.len() {
+            self.write(&after);
+        }
+    }
+
     pub fn clear(&self) {
         let _ = std::fs::remove_file(&self.path);
     }
@@ -776,6 +798,55 @@ mod tests {
         assert!(pid_is_recorded_process(me, None));
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Stopping a tree drops its row, so a launcher that starts and stops all
+    /// day does not accumulate dead rows its own sweeps would never take (they
+    /// skip entries whose owner — itself — is still alive).
+    #[test]
+    fn ledger_forgets_only_its_own_rows() {
+        let tmp = std::env::temp_dir().join(format!("ahl-ledger-forget-{}", std::process::id()));
+        let ledger = PidLedger::open(tmp.clone());
+        let me = std::process::id();
+        let theirs = LedgerEntry {
+            pid: 4243,
+            owner: Some(me + 1), // a second launcher on the same data root
+            created_at: None,
+        };
+        ledger.record(4242); // ours
+        ledger.record_entry(theirs.clone());
+
+        // A pid we never recorded is a no-op, not a clobber.
+        ledger.forget(9999);
+        assert_eq!(ledger.read().len(), 2);
+
+        // Another launcher's row is not ours to drop, even when asked for its
+        // exact pid — only our own rows leave the shared ledger.
+        ledger.forget(theirs.pid);
+        assert_eq!(
+            ledger.read(),
+            vec![LedgerEntry { pid: 4242, owner: Some(me), created_at: None }, theirs.clone()],
+            "another launcher's row must survive our forget"
+        );
+
+        ledger.forget(4242);
+        assert_eq!(ledger.read(), vec![theirs]);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// An emptied ledger is removed rather than left as a blank file — the
+    /// sweep's `read` treats both the same, but a launcher that has stopped
+    /// everything should leave no trace on disk.
+    #[test]
+    fn ledger_forget_removes_the_file_when_it_empties() {
+        let tmp = std::env::temp_dir().join(format!("ahl-ledger-forget-all-{}", std::process::id()));
+        let ledger = PidLedger::open(tmp.clone());
+        ledger.record(4242);
+        assert!(tmp.exists());
+
+        ledger.forget(4242);
+        assert!(ledger.read().is_empty());
+        assert!(!tmp.exists(), "an emptied ledger should be removed, not blanked");
     }
 
     /// A ledger written by a launcher predating ownership records still parses,
