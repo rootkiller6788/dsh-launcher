@@ -323,6 +323,7 @@ async fn do_launch(
                 &handle,
                 url,
                 usage_proxy_base_url.as_deref(),
+                launch_start,
             )
             .await
         }
@@ -351,6 +352,9 @@ async fn do_launch(
             let id_task = id.clone();
             let pid = handle.pid;
             let usage_proxy_base_url = usage_proxy_base_url.clone();
+            // The slow path settles minutes later, so its total has to count from
+            // the launch the user clicked, not from the URL landing.
+            let boot_start = launch_start;
             tauri::async_runtime::spawn(async move {
                 match tokio::time::timeout(Duration::from_secs(240), url_rx.recv()).await {
                     Ok(Some(url)) => {
@@ -368,6 +372,7 @@ async fn do_launch(
                                     &r.handle,
                                     &url,
                                     usage_proxy_base_url.as_deref(),
+                                    boot_start,
                                 )
                                 .await;
                             }
@@ -771,9 +776,56 @@ fn number_after(line: &str, key: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
+/// Stage timings for one boot, from launch to fully-configured.
+///
+/// Every line is debug: Activity's default view holds the user-facing milestones
+/// (spawn, URL ready, web ready) and nothing else, while the segments that
+/// explain *why* a start felt slow — the port settle, the usage-proxy inject,
+/// the inventory sync, the catalog/theme/language stamps — are recorded here and
+/// closed by one total. Without that total there was no way to tell a slow boot
+/// from a slow first paint of it.
+#[derive(Default)]
+struct BootClock {
+    started: Option<Instant>,
+    stages: Vec<(&'static str, u128)>,
+}
+
+impl BootClock {
+    /// Start counting from the launch that owns this boot (not from the point
+    /// the URL landed), so the total covers everything the user waited for.
+    fn since(started: Instant) -> Self {
+        BootClock {
+            started: Some(started),
+            stages: Vec::new(),
+        }
+    }
+
+    /// Record one finished stage. Each is also logged on its own as it lands, so
+    /// a boot that never settles still shows how far it got.
+    fn record(&mut self, stage: &'static str, ms: u128) -> u128 {
+        self.stages.push((stage, ms));
+        ms
+    }
+
+    fn summary(&self) -> String {
+        let total = self
+            .started
+            .map(|s| s.elapsed().as_millis())
+            .unwrap_or_default();
+        let stages = self
+            .stages
+            .iter()
+            .map(|(name, ms)| format!("{name} {ms}ms"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("boot settled {total}ms after launch ({stages})")
+    }
+}
+
 /// The server is up: settle on the port, stamp the launcher theme + model
 /// catalog into the harness, mark it running, and show it in a DSH window.
 /// Shared by the fast path and the slow-boot background continuation.
+#[allow(clippy::too_many_arguments)] // the launch it finalizes: app/provider/settings/instance/handle/url/proxy/clock, each genuinely distinct
 async fn finalize_ready(
     app: &AppHandle,
     provider: &launcher_core::ResolvedProvider,
@@ -782,10 +834,22 @@ async fn finalize_ready(
     handle: &launcher_core::process::ChildHandle,
     url: &str,
     usage_proxy_base_url: Option<&str>,
+    boot_start: Instant,
 ) -> Option<oneshot::Sender<()>> {
+    let mut clock = BootClock::since(boot_start);
     let port = url_port(url);
     if let Some(port) = port {
+        // The URL is announced before the socket accepts, so this wait is part
+        // of the boot and is worth naming when it is what took the time.
+        let settle_start = Instant::now();
         let _ = wait_for_port(port, Duration::from_secs(5)).await;
+        let settle_ms = clock.record("port settle", settle_start.elapsed().as_millis());
+        if settle_ms > 250 {
+            emit_debug(
+                app,
+                &format!("{} · web port accepted after {settle_ms}ms", instance.id),
+            );
+        }
     }
     handle.set_status(ProcessStatus::Running);
     emit_log(app, &format!("{} · DSH web ready at {url}", instance.id));
@@ -819,11 +883,19 @@ async fn finalize_ready(
             // Keep first paint quiet: usage proxy is required for token capture,
             // while cosmetic/catalog maintenance can wait until DSH has hydrated.
             if let Some(base_url) = usage_proxy_base_url.as_deref() {
+                let inject_start = Instant::now();
                 match dsh_adapter::llm::set_base_url(port, base_url).await {
-                    Ok(()) => emit_debug(
-                        &app,
-                        &format!("{} · usage proxy injected into DSH settings", instance.id),
-                    ),
+                    Ok(()) => {
+                        let inject_ms =
+                            clock.record("proxy inject", inject_start.elapsed().as_millis());
+                        emit_debug(
+                            &app,
+                            &format!(
+                                "{} · usage proxy injected into DSH settings in {inject_ms}ms",
+                                instance.id
+                            ),
+                        );
+                    }
                     Err(e) => emit_warn(
                         &app,
                         &format!("{} · usage proxy settings sync failed: {e}", instance.id),
@@ -862,18 +934,16 @@ async fn finalize_ready(
                     &format!("{} · DSH inventory cache refresh failed: {e}", instance.id),
                 );
             } else {
+                let sync_ms = clock.record("inventory sync", sync_start.elapsed().as_millis());
                 emit_debug(
                     &app,
-                    &format!(
-                        "{} · inventory sync took {}ms",
-                        instance.id,
-                        sync_start.elapsed().as_millis()
-                    ),
+                    &format!("{} · inventory sync took {sync_ms}ms", instance.id),
                 );
             }
 
             tokio::time::sleep(Duration::from_secs(3)).await;
 
+            let models_start = Instant::now();
             if !provider.profile.models.is_empty() {
                 if let Err(e) = dsh_adapter::llm::set_models(port, &provider.profile.models).await {
                     emit_warn(
@@ -882,7 +952,9 @@ async fn finalize_ready(
                     );
                 }
             }
+            clock.record("model catalog", models_start.elapsed().as_millis());
 
+            let theme_start = Instant::now();
             if let Some(launcher_theme) = settings.theme.as_deref() {
                 if launcher_theme != "system" {
                     match dsh_adapter::theme::get_preference(port).await {
@@ -893,6 +965,9 @@ async fn finalize_ready(
                     }
                 }
             }
+            clock.record("theme", theme_start.elapsed().as_millis());
+
+            let lang_start = Instant::now();
             if let Some(lang) = settings.language.as_deref() {
                 match dsh_adapter::language::get_preference(port).await {
                     Ok(Some(_)) => {}
@@ -901,6 +976,13 @@ async fn finalize_ready(
                     }
                 }
             }
+            clock.record("language", lang_start.elapsed().as_millis());
+
+            // The one line that answers "how long did startup really take, and
+            // which stage was it". The two sleeps above are deliberate pacing
+            // (let DSH hydrate before we touch its settings), so they are part of
+            // the total and the segments are what stays actionable.
+            emit_debug(&app, &format!("{} · {}", instance.id, clock.summary()));
         });
     }
     settings_watch
