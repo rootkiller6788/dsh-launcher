@@ -1,16 +1,18 @@
 //! Content installers for the Market's non-plugin kinds.
 //!
-//! Skills are plain files under `$DSH_HOME/skills/` — a `SKILL.md` (or a
+//! Skills are directories under `$DSH_HOME/skills/` — a `SKILL.md` (or a
 //! directory-bundle `<name>/SKILL.md`) discovered by DSH's `skill-filesystem`
-//! plugin. There is no npm install and no enable toggle; the launcher lands a
-//! `SKILL.md` atomically (write to a `.tmp` sibling, then rename) and records
-//! `{source, hash, installed}` provenance in `InstanceManifest.skills` — the
-//! SHA-256 of the content is the only update signal DSH exposes.
+//! plugin. There is no npm install and no enable toggle; the launcher lands
+//! every file of the skill, each atomically (write to a `.tmp` sibling, then
+//! rename), and records `{source, hash, installed}` provenance in
+//! `InstanceManifest.skills` — the SHA-256 of the `SKILL.md` is the update
+//! signal DSH exposes.
 //!
-//! Install tries a pre-resolved raw `fetch` URL first (fast path), then falls
-//! back to a shallow `git clone` of the source repo + a `SKILL.md` search —
-//! the awesome-* markdown gives no reliable path, so the clone is what makes
-//! install work across the many repo layouts.
+//! A skill ships more than its `SKILL.md`: `references/`, `tools/`, `scripts/`
+//! and `templates/` sit beside it and are opened by relative path, so install
+//! clones the source repo and lands the skill's whole directory. The catalog's
+//! pre-resolved raw `fetch` URL is the fallback for a source that cannot be
+//! cloned — it can only ever deliver the one file it points at.
 //!
 //! (MCP connection records live in `InstanceManifest.mcp` — the single source
 //! of truth — and are compiled into `cordis.patch.yml` as a whole by
@@ -68,23 +70,21 @@ pub fn skill_source(entry: &RegistryPlugin) -> Option<String> {
         })
 }
 
-/// Download a skill's `SKILL.md` and land it atomically at
-/// `$DSH_HOME/skills/<id>/SKILL.md`: the body is written to a same-directory
-/// `.tmp` sibling and then renamed over the target, so a crash can never leave
-/// a half-written file at the final path. Returns the provenance record (source
-/// + content SHA-256); the command layer stamps `installed`.
+/// Install a skill into `$DSH_HOME/skills/<id>/` as a whole directory: every
+/// file the source ships, each landed atomically. Returns the provenance record
+/// (source + `SKILL.md` SHA-256); the command layer stamps `installed`.
 pub async fn install_skill(
     instance: &InstanceManifest,
     entry: &RegistryPlugin,
 ) -> Result<SkillRecord> {
-    let (text, source) = fetch_skill_md(entry).await?;
+    let bundle = fetch_skill_bundle(entry).await?;
     let id = skill_id(entry);
     let dir = skills_dir(instance).join(skill_dir_name(&id));
-    write_atomic(&dir, "SKILL.md", text.as_bytes())?;
+    land_bundle(&dir, &bundle)?;
     Ok(SkillRecord {
         id,
-        source,
-        hash: sha256_hex(text.as_bytes()),
+        source: bundle.source().to_string(),
+        hash: bundle.hash(),
         installed: 0,
     })
 }
@@ -111,50 +111,141 @@ pub fn skill_disk_hash(instance: &InstanceManifest, id: &str) -> Result<Option<S
     }
 }
 
-/// Bring a skill up to the version its source currently serves. Returns
-/// `Ok(None)` when upstream content already matches `current_hash` (nothing to
-/// do — stays a no-op, so "update" is idempotent); `Ok(Some(record))` after
-/// writing the newer `SKILL.md` atomically and hashing it (the command layer
-/// stamps `installed` and persists the record).
+/// Bring a skill up to the version its source currently serves, re-landing the
+/// whole directory. Returns `Ok(None)` when there is genuinely nothing to do —
+/// the `SKILL.md` hash still matches `current_hash` *and* the files on disk
+/// already match upstream — so "update" stays idempotent; `Ok(Some(record))`
+/// after re-landing the bundle (the command layer stamps `installed` and
+/// persists the record).
 pub async fn update_skill(
     instance: &InstanceManifest,
     entry: &RegistryPlugin,
     current_hash: &str,
 ) -> Result<Option<SkillRecord>> {
-    let (text, source) = fetch_skill_md(entry).await?;
-    let hash = sha256_hex(text.as_bytes());
-    if !current_hash.is_empty() && hash == current_hash {
-        return Ok(None);
-    }
+    let bundle = fetch_skill_bundle(entry).await?;
+    let hash = bundle.hash();
     let id = skill_id(entry);
     let dir = skills_dir(instance).join(skill_dir_name(&id));
-    write_atomic(&dir, "SKILL.md", text.as_bytes())?;
+    if !current_hash.is_empty() && hash == current_hash && bundle_matches_disk(&dir, &bundle) {
+        return Ok(None);
+    }
+    land_bundle(&dir, &bundle)?;
     Ok(Some(SkillRecord {
         id,
-        source,
+        source: bundle.source().to_string(),
         hash,
         installed: 0,
     }))
 }
 
-/// Atomically land `bytes` as `dir/file_name` by writing a same-directory
-/// `.tmp` sibling first, then renaming over the target (same-volume rename is
-/// atomic). Mirrors the `.part`-then-rename discipline of
-/// `launcher_core::download_file` for the buffered-text skill path.
-fn write_atomic(dir: &Path, file_name: &str, bytes: &[u8]) -> Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(
+/// Land a whole skill directory: every file written atomically, then anything
+/// the new version no longer carries is pruned — a reference the author deleted
+/// upstream must not linger on disk for the skill to find and follow.
+fn land_bundle(dir: &Path, bundle: &SkillBundle) -> Result<()> {
+    // `SKILL.md` goes last. Its presence is what `skill_disk_state` reads as
+    // "installed", so landing it last means an install interrupted halfway
+    // reads as *not installed* rather than as a skill whose `references/` are
+    // still missing.
+    for (path, bytes) in bundle.files().filter(|(path, _)| *path != "SKILL.md") {
+        write_atomic(dir, path, bytes)?;
+    }
+    write_atomic(dir, "SKILL.md", bundle.skill_md())?;
+    prune_stale(dir, bundle)
+}
+
+/// Whether `dir` already holds exactly this bundle — same file set, same bytes.
+/// Compared on content rather than on the `SKILL.md` hash alone so an update
+/// triggered by any other reason still picks up a changed sibling file.
+fn bundle_matches_disk(dir: &Path, bundle: &SkillBundle) -> bool {
+    let mut expected: Vec<(&str, &[u8])> = bundle.files().collect();
+    expected.sort_by(|a, b| a.0.cmp(b.0));
+    let mut on_disk: Vec<(String, Vec<u8>)> = walk_files(dir)
+        .into_iter()
+        .filter_map(|path| Some((rel_path(dir, &path)?, std::fs::read(&path).ok()?)))
+        .collect();
+    on_disk.sort_by(|a, b| a.0.cmp(&b.0));
+    expected.len() == on_disk.len()
+        && expected
+            .iter()
+            .zip(&on_disk)
+            .all(|((path, bytes), (disk_path, disk))| *path == disk_path && *bytes == disk.as_slice())
+}
+
+/// Remove files under `dir` that `bundle` does not carry, then any directory
+/// the removals emptied.
+fn prune_stale(dir: &Path, bundle: &SkillBundle) -> Result<()> {
+    let keep: HashSet<&str> = bundle.files().map(|(path, _)| path).collect();
+    for path in walk_files(dir) {
+        let Some(rel) = rel_path(dir, &path) else {
+            continue;
+        };
+        if keep.contains(rel.as_str()) {
+            continue;
+        }
+        std::fs::remove_file(&path).with_context(|| format!("prune {}", path.display()))?;
+    }
+    prune_empty_dirs(dir);
+    Ok(())
+}
+
+/// Recursively drop directories that no longer hold anything (`remove_dir`
+/// fails on a non-empty one, which is exactly the check needed).
+fn prune_empty_dirs(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for path in entries.flatten().map(|entry| entry.path()) {
+        if path.is_dir() {
+            prune_empty_dirs(&path);
+            let _ = std::fs::remove_dir(&path);
+        }
+    }
+}
+
+/// Atomically land `bytes` at `dir/rel` by writing a same-directory `.tmp`
+/// sibling first, then renaming over the target (same-volume rename is atomic).
+/// Mirrors the `.part`-then-rename discipline of
+/// `launcher_core::download_file` for the buffered skill path. `rel` may be a
+/// nested `/`-separated path; its parent directories are created as needed.
+fn write_atomic(dir: &Path, rel: &str, bytes: &[u8]) -> Result<()> {
+    let dest = safe_join(dir, rel)?;
+    let parent = dest.parent().unwrap_or(dir);
+    std::fs::create_dir_all(parent)?;
+    let file_name = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("skill-file");
+    let tmp = parent.join(format!(
         "{file_name}.tmp-{}-{:x}",
         std::process::id(),
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     ));
     std::fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
-    let dest = dir.join(file_name);
     if dest.exists() {
         std::fs::remove_file(&dest).with_context(|| format!("replace {}", dest.display()))?;
     }
     std::fs::rename(&tmp, &dest).with_context(|| format!("finalize {}", dest.display()))?;
     Ok(())
+}
+
+/// Join a bundle's relative path onto `dir`, refusing anything that could land
+/// outside it. The walk that produces these paths only ever yields names it
+/// read from a directory, so this is a guard against a crafted repository
+/// rather than against a plausible one.
+fn safe_join(dir: &Path, rel: &str) -> Result<PathBuf> {
+    let mut out = dir.to_path_buf();
+    let mut parts = 0;
+    for part in rel.split('/') {
+        if part.is_empty() || part == "." || part == ".." || part.contains('\\') {
+            return Err(anyhow!("refusing unsafe skill file path {rel:?}"));
+        }
+        out.push(part);
+        parts += 1;
+    }
+    if parts == 0 {
+        return Err(anyhow!("refusing empty skill file path"));
+    }
+    Ok(out)
 }
 
 /// Remove an installed skill's directory (the whole `<id>` folder).
@@ -226,19 +317,250 @@ pub fn skill_loader_active(inventory: &[InstalledPlugin]) -> bool {
         .any(|plugin| plugin.name.to_lowercase().contains("skill"))
 }
 
-/// Fetch a skill's SKILL.md plus the URL that should stand in for it going
-/// forward (the provenance `source` stored on the record): the pre-resolved raw
-/// URL when present, else the source repo. The raw URL is tried first; a
-/// shallow clone of the repo with a `SKILL.md` search is the fallback.
-async fn fetch_skill_md(entry: &RegistryPlugin) -> Result<(String, String)> {
-    if let Some(fetch) = entry.fetch.as_deref() {
-        if let Ok(text) = fetch_text(fetch).await {
-            return Ok((text, fetch.to_string()));
+/// A skill as its source ships it: every file at and below the skill's own
+/// directory, keyed by path relative to that directory with `/` separators
+/// (`SKILL.md`, `references/stage_1.md`, …), plus the URL that stands in for the
+/// skill as provenance.
+///
+/// A skill is a directory, not a file. `references/`, `tools/`, `scripts/` and
+/// `templates/` sit beside the `SKILL.md` and are opened by relative path from
+/// it, so landing the `SKILL.md` alone produced a skill that loads and then
+/// fails the moment it reaches for one of them — which is what this type exists
+/// to prevent.
+#[derive(Debug, Clone)]
+pub struct SkillBundle {
+    files: Vec<(String, Vec<u8>)>,
+    source: String,
+}
+
+impl SkillBundle {
+    /// `files` must carry a `SKILL.md`: it is the file DSH's skill loader
+    /// discovers, and the one whose content hash is the skill's update signal.
+    fn new(files: Vec<(String, Vec<u8>)>, source: String) -> Result<Self> {
+        if !files.iter().any(|(path, _)| path == "SKILL.md") {
+            return Err(anyhow!("skill has no SKILL.md"));
+        }
+        Ok(Self { files, source })
+    }
+
+    /// Every file, in a deterministic (path-sorted) order.
+    fn files(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        self.files.iter().map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+    }
+
+    /// The `SKILL.md` body — guaranteed present by [`SkillBundle::new`].
+    fn skill_md(&self) -> &[u8] {
+        self.files
+            .iter()
+            .find(|(path, _)| path == "SKILL.md")
+            .map(|(_, bytes)| bytes.as_slice())
+            .expect("SkillBundle is always built with a SKILL.md")
+    }
+
+    /// SHA-256 (hex) of the `SKILL.md`. Deliberately the same content hash the
+    /// single-file installer recorded, so hashes stored by older versions stay
+    /// comparable and the update check keeps working across the change.
+    fn hash(&self) -> String {
+        sha256_hex(self.skill_md())
+    }
+
+    /// The provenance URL written to the record — the catalog's pre-resolved
+    /// `fetch` URL when it has one, else the source repo. Both are resolvable by
+    /// the update check, which is what this string is for.
+    fn source(&self) -> &str {
+        &self.source
+    }
+}
+
+/// Fetch a skill as a whole directory, plus the URL that should stand in for it
+/// going forward (the provenance `source` stored on the record).
+///
+/// The repo is the source of truth and is therefore tried first: only the repo
+/// can reveal whether the skill has files beside its `SKILL.md`, and the
+/// catalog's raw `fetch` URL — by construction a URL to one file — never can.
+/// The raw URL is the fallback for a source with no clonable repo (a bare
+/// gist, a plain file host) or a clone that cannot run at all: a single-file
+/// install is worse than a complete one but far better than none.
+async fn fetch_skill_bundle(entry: &RegistryPlugin) -> Result<SkillBundle> {
+    let source = skill_source(entry).unwrap_or_default();
+    match clone_bundle(entry).await {
+        Ok(files) => SkillBundle::new(files, source),
+        Err(clone_err) => {
+            let Some(fetch) = entry
+                .fetch
+                .as_deref()
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+            else {
+                return Err(clone_err);
+            };
+            let text = fetch_text(fetch).await.map_err(|fetch_err| {
+                anyhow!("{clone_err}; the raw SKILL.md fallback failed too: {fetch_err}")
+            })?;
+            SkillBundle::new(vec![("SKILL.md".to_string(), text.into_bytes())], source)
         }
     }
-    let source = entry.url.trim().to_string();
-    let text = fetch_from_repo(entry).await?;
-    Ok((text, source))
+}
+
+/// Clone the skill's repo and read the skill's directory out of it.
+async fn clone_bundle(entry: &RegistryPlugin) -> Result<Vec<(String, Vec<u8>)>> {
+    let repo = github_repo(&entry.url)
+        .ok_or_else(|| anyhow!("skill has no resolvable github repo"))?;
+    let tmp = std::env::temp_dir().join(format!(
+        "ahl-skill-{}-{:x}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    ));
+    std::fs::create_dir_all(&tmp)?;
+    let result = async {
+        clone_repo(&repo, &tmp).await?;
+        let root =
+            skill_root(&tmp, entry).ok_or_else(|| anyhow!("no SKILL.md found in {repo}"))?;
+        read_bundle(&root)
+    }
+    .await;
+    let _ = std::fs::remove_dir_all(&tmp);
+    result
+}
+
+/// The `owner/repo` slug of a github URL — what both the clone URL and the raw
+/// `SKILL.md` URL are built from.
+fn github_repo(url: &str) -> Option<String> {
+    let rest = url
+        .trim()
+        .trim_end_matches('/')
+        .strip_prefix("https://github.com/")?;
+    let slug = rest.trim_end_matches(".git").trim_end_matches('/');
+    (!slug.is_empty()).then(|| slug.to_string())
+}
+
+/// Shallow-clone `repo` into `dest` (which must be absent or empty).
+async fn clone_repo(repo: &str, dest: &Path) -> Result<()> {
+    let url = format!("https://github.com/{repo}");
+    let args = vec![
+        "clone".to_string(),
+        "--depth".to_string(),
+        "1".to_string(),
+        "--quiet".to_string(),
+        "--".to_string(),
+        url.clone(),
+        dest.display().to_string(),
+    ];
+    // Route through the shared timed runner so a stalled transfer is killed
+    // after GIT_TIMEOUT (process tree included) instead of hanging forever.
+    let code = crate::run_timed(
+        "git",
+        &args,
+        dest.parent().unwrap_or(dest),
+        &[],
+        crate::silent_log_sink(),
+        crate::GIT_TIMEOUT,
+    )
+    .await
+    .map_err(|e| anyhow!("git clone {url} failed: {e}"))?;
+    if code != 0 {
+        return Err(anyhow!(
+            "git clone {url} failed — check the repo exists and is public, and that your network can reach github.com"
+        ));
+    }
+    Ok(())
+}
+
+/// The directory inside a clone that holds the skill — the parent of its
+/// `SKILL.md`. The catalog's `fetch` URL pins the exact path when there is one
+/// (`…/HEAD/skills/docx/SKILL.md` → `skills/docx`); a bare repo URL gives only a
+/// name, so the `SKILL.md` is located by search instead.
+fn skill_root(repo_dir: &Path, entry: &RegistryPlugin) -> Option<PathBuf> {
+    if let Some(dir) = fetch_dir_in_repo(entry.fetch.as_deref()) {
+        let candidate = if dir.is_empty() {
+            repo_dir.to_path_buf()
+        } else {
+            repo_dir.join(&dir)
+        };
+        if candidate.join("SKILL.md").is_file() {
+            return Some(candidate);
+        }
+    }
+    find_skill_md(repo_dir, &entry.name).and_then(|md| md.parent().map(Path::to_path_buf))
+}
+
+/// The directory a raw `fetch` URL points at, as a `/`-separated path relative
+/// to the repo root (`""` for a skill that *is* the repo root, as in
+/// `…/<owner>/<repo>/HEAD/SKILL.md`). `None` when the URL is not a raw
+/// githubusercontent one or does not end at a `SKILL.md`.
+fn fetch_dir_in_repo(fetch: Option<&str>) -> Option<String> {
+    let rest = fetch?
+        .trim()
+        .strip_prefix("https://raw.githubusercontent.com/")?;
+    // <owner>/<repo>/<ref>/<path…>
+    let parts: Vec<&str> = rest.split('/').collect();
+    if parts.len() < 4 {
+        return None;
+    }
+    let path = &parts[3..];
+    if !path.last()?.eq_ignore_ascii_case("SKILL.md") {
+        return None;
+    }
+    Some(path[..path.len() - 1].join("/"))
+}
+
+/// Read every file at or below `root` as `(path relative to root, bytes)`.
+fn read_bundle(root: &Path) -> Result<Vec<(String, Vec<u8>)>> {
+    let mut files = Vec::new();
+    for path in walk_files(root) {
+        let Some(rel) = rel_path(root, &path) else {
+            continue;
+        };
+        let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        files.push((rel, bytes));
+    }
+    Ok(files)
+}
+
+/// `path` relative to `root`, `/`-separated so it is a bundle key rather than a
+/// platform path.
+fn rel_path(root: &Path, path: &Path) -> Option<String> {
+    let rel = path.strip_prefix(root).ok()?;
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    Some(parts.join("/"))
+}
+
+/// Every file at or below `root`, path-sorted so a bundle is built in a
+/// deterministic order.
+fn walk_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    collect_files(root, &mut out);
+    out.sort();
+    out
+}
+
+/// Directories that are never part of a skill's content: version control
+/// metadata, dependency trees, and Python bytecode caches.
+fn is_noise_dir(name: &str) -> bool {
+    matches!(name, ".git" | ".github" | "node_modules" | "__pycache__")
+}
+
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for path in entries.flatten().map(|entry| entry.path()) {
+        if path.is_dir() {
+            let skip = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(is_noise_dir)
+                .unwrap_or(false);
+            if !skip {
+                collect_files(&path, out);
+            }
+        } else if path.is_file() {
+            out.push(path);
+        }
+    }
 }
 
 async fn fetch_text(url: &str) -> Result<String> {
@@ -262,61 +584,18 @@ async fn fetch_text(url: &str) -> Result<String> {
     Err(last_err.unwrap_or_else(|| anyhow!("SKILL.md fetch failed")))
 }
 
-async fn fetch_from_repo(entry: &RegistryPlugin) -> Result<String> {
-    let repo = entry
-        .url
-        .trim()
-        .trim_end_matches('/')
-        .strip_prefix("https://github.com/")
-        .ok_or_else(|| anyhow!("skill has no resolvable github repo"))?;
-    let tmp = std::env::temp_dir().join(format!(
-        "ahl-skill-{}-{:x}",
-        std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
-    std::fs::create_dir_all(&tmp)?;
-    let result = clone_and_read(repo, &tmp, &entry.name).await;
-    let _ = std::fs::remove_dir_all(&tmp);
-    result
-}
-
-async fn clone_and_read(repo: &str, tmp: &Path, name: &str) -> Result<String> {
-    let url = format!("https://github.com/{repo}");
-    let args = vec![
-        "clone".to_string(),
-        "--depth".to_string(),
-        "1".to_string(),
-        "--quiet".to_string(),
-        "--".to_string(),
-        url.clone(),
-        tmp.display().to_string(),
-    ];
-    // Route through the shared timed runner so a stalled transfer is killed
-    // after GIT_TIMEOUT (process tree included) instead of hanging forever.
-    let code = crate::run_timed(
-        "git",
-        &args,
-        tmp.parent().unwrap_or(tmp),
-        &[],
-        crate::silent_log_sink(),
-        crate::GIT_TIMEOUT,
-    )
-    .await
-    .map_err(|e| anyhow!("git clone {url} failed: {e}"))?;
-    if code != 0 {
-        return Err(anyhow!(
-            "git clone {url} failed — check the repo exists and is public, and that your network can reach github.com"
-        ));
-    }
-    let skill_md = find_skill_md(tmp, name).ok_or_else(|| anyhow!("no SKILL.md found in {url}"))?;
-    std::fs::read_to_string(&skill_md).with_context(|| format!("read {}", skill_md.display()))
-}
-
 /// Locate a `SKILL.md` in a cloned repo, preferring a parent directory whose
 /// name matches the skill's short name, then a path containing it, then any.
 fn find_skill_md(root: &Path, name: &str) -> Option<PathBuf> {
-    let mut all: Vec<PathBuf> = Vec::new();
-    collect_skill_md(root, &mut all);
+    let all: Vec<PathBuf> = walk_files(root)
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.eq_ignore_ascii_case("SKILL.md"))
+                .unwrap_or(false)
+        })
+        .collect();
     let dir_matches = |p: &PathBuf| {
         p.parent()
             .and_then(|d| d.file_name())
@@ -330,32 +609,6 @@ fn find_skill_md(root: &Path, name: &str) -> Option<PathBuf> {
         return Some(p.clone());
     }
     all.into_iter().next()
-}
-
-fn collect_skill_md(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            let skip = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| matches!(n, ".git" | "node_modules"))
-                .unwrap_or(false);
-            if !skip {
-                collect_skill_md(&path, out);
-            }
-        } else if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.eq_ignore_ascii_case("SKILL.md"))
-            .unwrap_or(false)
-        {
-            out.push(path);
-        }
-    }
 }
 
 /// Canonical install id for an MCP entry (`owner/name`), matching what the
@@ -1278,6 +1531,224 @@ mod tests {
         std::fs::create_dir_all(&empty).unwrap();
         assert_eq!(skin_package_name(&empty), None);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A scratch directory unique to one test — the pid alone would collide
+    /// with a sibling test's tree when the suite runs in parallel.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ahl-skill-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn fetch_dir_in_repo_parses_root_and_nested_skills() {
+        // Nested: the skill lives in a subdirectory of the repo.
+        assert_eq!(
+            fetch_dir_in_repo(Some(
+                "https://raw.githubusercontent.com/anthropics/skills/HEAD/skills/docx/SKILL.md"
+            )),
+            Some("skills/docx".to_string())
+        );
+        // Root: the skill *is* the repo (`…/HEAD/SKILL.md`).
+        assert_eq!(
+            fetch_dir_in_repo(Some(
+                "https://raw.githubusercontent.com/rootkiller6788/mathmodel-skill/HEAD/SKILL.md"
+            )),
+            Some(String::new())
+        );
+        // Anything that isn't a raw SKILL.md URL pins no directory.
+        assert_eq!(fetch_dir_in_repo(Some("https://github.com/o/r")), None);
+        assert_eq!(fetch_dir_in_repo(None), None);
+    }
+
+    #[test]
+    fn github_repo_normalises_urls() {
+        assert_eq!(github_repo("https://github.com/o/r").as_deref(), Some("o/r"));
+        assert_eq!(github_repo("https://github.com/o/r/").as_deref(), Some("o/r"));
+        assert_eq!(github_repo("https://github.com/o/r.git").as_deref(), Some("o/r"));
+        assert_eq!(github_repo("https://gitlab.com/o/r"), None);
+        assert_eq!(github_repo("https://github.com/"), None);
+    }
+
+    #[test]
+    fn skill_root_prefers_the_catalog_fetch_path_over_a_name_search() {
+        let root = scratch("root");
+        // A repo whose root is itself a skill, which also happens to contain a
+        // `docx/SKILL.md` — so the name search and the catalog's pinned path
+        // disagree about which one is the skill.
+        std::fs::create_dir_all(root.join("docx")).unwrap();
+        std::fs::write(root.join("SKILL.md"), "root skill").unwrap();
+        std::fs::write(root.join("docx").join("SKILL.md"), "nested skill").unwrap();
+
+        let pinned = RegistryPlugin {
+            name: "docx".into(),
+            url: "https://github.com/o/r".into(),
+            fetch: Some("https://raw.githubusercontent.com/o/r/HEAD/SKILL.md".into()),
+            ..Default::default()
+        };
+        assert_eq!(skill_root(&root, &pinned).unwrap(), root);
+
+        // With no pinned path the search takes over and matches on the name.
+        let search_only = RegistryPlugin {
+            fetch: None,
+            ..pinned
+        };
+        assert_eq!(skill_root(&root, &search_only).unwrap(), root.join("docx"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_bundle_keeps_nested_files_and_skips_caches() {
+        let root = scratch("bundle");
+        for (rel, body) in [
+            ("SKILL.md", "root skill"),
+            ("references/stage_1.md", "stage one"),
+            ("tools/run.sh", "#!/bin/sh"),
+            ("node_modules/dep/index.js", "module.exports = {}"),
+            (".git/config", "[core]"),
+        ] {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body).unwrap();
+        }
+        let files = read_bundle(&root).unwrap();
+        let paths: Vec<&str> = files.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(paths, vec!["SKILL.md", "references/stage_1.md", "tools/run.sh"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn land_bundle_writes_the_tree_and_prunes_what_the_author_deleted() {
+        let dir = scratch("land");
+        let first = SkillBundle::new(
+            vec![
+                ("SKILL.md".to_string(), b"v1".to_vec()),
+                ("references/old.md".to_string(), b"gone next version".to_vec()),
+                ("scripts/check.py".to_string(), b"print(1)".to_vec()),
+            ],
+            "https://example.test/skill".to_string(),
+        )
+        .unwrap();
+        land_bundle(&dir, &first).unwrap();
+        assert!(dir.join("references/old.md").is_file());
+        assert!(dir.join("scripts/check.py").is_file());
+        assert!(bundle_matches_disk(&dir, &first));
+
+        // The next version drops `references/` and `scripts/` entirely.
+        let second = SkillBundle::new(
+            vec![
+                ("SKILL.md".to_string(), b"v2".to_vec()),
+                ("templates/report.tex".to_string(), b"\\documentclass".to_vec()),
+            ],
+            "https://example.test/skill".to_string(),
+        )
+        .unwrap();
+        land_bundle(&dir, &second).unwrap();
+        assert!(!dir.join("references/old.md").exists());
+        assert!(!dir.join("scripts/check.py").exists());
+        // …and the directories they lived in go with them, rather than lingering
+        // empty for the skill to enumerate.
+        assert!(!dir.join("references").exists());
+        assert!(!dir.join("scripts").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("templates/report.tex")).unwrap(),
+            "\\documentclass"
+        );
+        assert_eq!(std::fs::read_to_string(dir.join("SKILL.md")).unwrap(), "v2");
+        assert!(bundle_matches_disk(&dir, &second));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bundle_matches_disk_spots_a_changed_sibling_file() {
+        let dir = scratch("match");
+        let bundle = SkillBundle::new(
+            vec![
+                ("SKILL.md".to_string(), b"body".to_vec()),
+                ("references/a.md".to_string(), b"one".to_vec()),
+            ],
+            String::new(),
+        )
+        .unwrap();
+        land_bundle(&dir, &bundle).unwrap();
+        assert!(bundle_matches_disk(&dir, &bundle));
+
+        // Same `SKILL.md`, changed sibling — exactly the case a hash-only
+        // comparison declares "already up to date".
+        let updated = SkillBundle::new(
+            vec![
+                ("SKILL.md".to_string(), b"body".to_vec()),
+                ("references/a.md".to_string(), b"two".to_vec()),
+            ],
+            String::new(),
+        )
+        .unwrap();
+        assert_eq!(updated.hash(), bundle.hash());
+        assert!(!bundle_matches_disk(&dir, &updated));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bundle_without_a_skill_md_is_refused() {
+        let err = SkillBundle::new(vec![("README.md".to_string(), b"x".to_vec())], String::new())
+            .unwrap_err();
+        assert!(err.to_string().contains("SKILL.md"), "{err}");
+    }
+
+    /// The item's real-machine acceptance check: install a genuine multi-file
+    /// skill and confirm the whole directory lands, not just its `SKILL.md`.
+    /// Opt-in because it clones from github:
+    /// `cargo test -p dsh-adapter --lib -- --ignored installs_a_real`
+    #[tokio::test]
+    #[ignore = "clones rootkiller6788/mathmodel-skill from github — needs network + git"]
+    async fn installs_a_real_multi_file_skill_directory() {
+        let (instance, ws) = test_instance("real-skill");
+        let entry = RegistryPlugin {
+            kind: launcher_core::market::ContentKind::Skill,
+            name: "mathmodel-skill".into(),
+            owner: "rootkiller6788".into(),
+            url: "https://github.com/rootkiller6788/mathmodel-skill".into(),
+            fetch: Some(
+                "https://raw.githubusercontent.com/rootkiller6788/mathmodel-skill/HEAD/SKILL.md"
+                    .into(),
+            ),
+            ..Default::default()
+        };
+        let record = install_skill(&instance, &entry).await.unwrap();
+        assert_eq!(record.id, "rootkiller6788/mathmodel-skill");
+        assert_eq!(record.hash.len(), 64);
+
+        let dir = ws.join("skills").join("rootkiller6788-mathmodel-skill");
+        for rel in [
+            "SKILL.md",
+            "references",
+            "tools",
+            "scripts/latex_check",
+            "templates/latex",
+        ] {
+            assert!(dir.join(rel).exists(), "{rel} did not land in the skill");
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn safe_join_refuses_paths_that_escape_the_skill_directory() {
+        let dir = PathBuf::from("/skills/owner-name");
+        assert_eq!(
+            safe_join(&dir, "references/a.md").unwrap(),
+            PathBuf::from("/skills/owner-name/references/a.md")
+        );
+        for bad in [
+            "../outside.md",
+            "refs/../../outside.md",
+            "/absolute.md",
+            "..",
+            "",
+            "a\\b.md",
+        ] {
+            assert!(safe_join(&dir, bad).is_err(), "{bad:?} must be refused");
+        }
     }
 
     #[test]
