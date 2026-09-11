@@ -209,10 +209,11 @@ async fn do_launch(
         })
     };
 
-    // Startup zombie sweep: a PID we recorded on a previous launch but never
-    // reaped (launcher hard-killed / crashed) is still out there. Kill its
-    // whole tree now, before spawning again. Safe here — the one-at-a-time
-    // block above already returned early for a still-running same instance.
+    // Startup zombie sweep: a tree recorded by a launcher that never got to
+    // reap it (hard-killed / crashed) is still out there. Kill it now, before
+    // spawning again. The ledger is shared by every launcher on this data root,
+    // so the sweep only touches entries whose owner launcher is gone — a
+    // *second, still-running* launcher's healthy tree is left alone.
     let ledger = PidLedger::open(state.paths.pid_ledger());
     let swept = sweep_leftover(&ledger);
     if swept > 0 {

@@ -207,9 +207,31 @@ pub fn pid_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
-/// Persistent record of every PID the launcher has spawned. Written on launch,
-/// swept on the next launch, so a hard-killed launcher (or a crash) can never
-/// leave an orphaned harness tree behind — the "startup zombie sweep".
+/// One harness tree recorded in the ledger: the spawned process, plus the
+/// launcher process that spawned it.
+///
+/// `owner` is what makes the pre-launch sweep safe with more than one launcher
+/// running. The ledger is a single file shared by every launcher on the data
+/// root, so "PID is alive" alone cannot distinguish a tree orphaned by a
+/// crashed launcher from one a *different, still-running* launcher is actively
+/// managing. Entries whose owner is alive are left alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LedgerEntry {
+    pub pid: u32,
+    /// PID of the launcher that spawned `pid`, or `None` for a line written by
+    /// a launcher older than this schema (which stored a bare PID). A `None`
+    /// owner cannot be claimed by anyone, so such leftovers are always reaped —
+    /// the sweep keeps working across the upgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<u32>,
+}
+
+/// Persistent record of every harness tree the launcher has spawned. Written on
+/// launch, swept on the next launch, so a hard-killed launcher (or a crash) can
+/// never leave an orphaned harness tree behind — the "startup zombie sweep".
+///
+/// One JSON entry per line. Older builds wrote a bare PID per line; those still
+/// parse (with an unknown owner) so an upgraded launcher reaps them too.
 #[derive(Debug, Clone)]
 pub struct PidLedger {
     path: PathBuf,
@@ -220,57 +242,108 @@ impl PidLedger {
         Self { path }
     }
 
-    /// Append a PID if not already recorded. Best-effort; one PID per line.
+    /// Record a harness tree this launcher just spawned. The owner is this
+    /// process — by definition alive — so a sweep in another launcher will skip
+    /// it.
     pub fn record(&self, pid: u32) {
-        let mut pids = self.read();
-        if !pids.contains(&pid) {
-            pids.push(pid);
-        }
-        self.write(&pids);
+        self.record_entry(LedgerEntry {
+            pid,
+            owner: Some(std::process::id()),
+        });
     }
 
-    pub fn read(&self) -> Vec<u32> {
+    /// Append an entry if its `pid` is not already recorded.
+    pub fn record_entry(&self, entry: LedgerEntry) {
+        let mut entries = self.read();
+        if !entries.iter().any(|e| e.pid == entry.pid) {
+            entries.push(entry);
+        }
+        self.write(&entries);
+    }
+
+    pub fn read(&self) -> Vec<LedgerEntry> {
         let content = match std::fs::read_to_string(&self.path) {
             Ok(c) => c,
             Err(_) => return Vec::new(),
         };
-        content
-            .lines()
-            .filter_map(|l| l.trim().parse::<u32>().ok())
-            .collect()
+        content.lines().filter_map(parse_ledger_line).collect()
     }
 
     pub fn clear(&self) {
         let _ = std::fs::remove_file(&self.path);
     }
 
-    fn write(&self, pids: &[u32]) {
+    fn write(&self, entries: &[LedgerEntry]) {
+        if entries.is_empty() {
+            self.clear();
+            return;
+        }
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let content = pids
+        let content = entries
             .iter()
-            .map(|p| p.to_string())
+            .filter_map(|e| serde_json::to_string(e).ok())
             .collect::<Vec<_>>()
             .join("\n");
         let _ = std::fs::write(&self.path, content);
     }
 }
 
-/// Kill every previously-recorded PID that is still alive and reset the
-/// ledger. Returns how many trees were reaped. Runs before every launch.
+/// Parse one ledger line. Current format is a JSON `LedgerEntry`; a bare PID is
+/// accepted as pre-ownership format so a leftover tree recorded by an older
+/// launcher is still reaped rather than silently forgotten.
+fn parse_ledger_line(line: &str) -> Option<LedgerEntry> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    if let Ok(entry) = serde_json::from_str::<LedgerEntry>(line) {
+        return Some(entry);
+    }
+    line.parse::<u32>().ok().map(|pid| LedgerEntry { pid, owner: None })
+}
+
+/// Reap the harness trees this launcher's *predecessors* left behind. Returns
+/// how many trees were killed. Runs before every launch.
+///
+/// An entry is reaped only when both hold:
+/// 1. its owner launcher is gone — otherwise a second launcher would kill a
+///    healthy tree the first one is still managing (`LedgerEntry::owner`); and
+/// 2. the spawned PID is still alive.
+///
+/// Entries that survive the sweep (owner still running) are written back — the
+/// ledger is shared, so clearing it would drop another launcher's bookkeeping.
+///
 /// Cross-platform: the per-PID probe (`pid_alive`) and tree-kill (`kill_tree`)
 /// are cfg'd per OS, the sweep loop is not.
 pub fn sweep_leftover(ledger: &PidLedger) -> usize {
+    let entries = ledger.read();
+    let total = entries.len();
     let mut swept = 0;
-    for pid in ledger.read() {
-        if pid_alive(pid) {
-            tracing::warn!(pid, "reaping leftover harness tree from a previous session");
-            kill_tree(pid);
+    let mut keep = Vec::new();
+    for entry in entries {
+        // A live owner is still managing this tree, whoever we are — leave it
+        // alone. `None` (pre-ownership format) can never be claimed.
+        if entry.owner.is_some_and(pid_alive) {
+            keep.push(entry);
+            continue;
+        }
+        if pid_alive(entry.pid) {
+            tracing::warn!(
+                pid = entry.pid,
+                owner = ?entry.owner,
+                "reaping leftover harness tree from a previous session"
+            );
+            kill_tree(entry.pid);
             swept += 1;
         }
     }
-    ledger.clear();
+    // Rewrite only when something was dropped; otherwise the file is already
+    // what `keep` would write.
+    if keep.len() != total {
+        ledger.write(&keep);
+    }
     swept
 }
 
@@ -528,6 +601,28 @@ mod tests {
         false
     }
 
+    /// Spawn a process, let it exit, and return its now-dead PID — an owner
+    /// that is guaranteed not to be alive.
+    async fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("node")
+            .args(["-e", ""])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn short-lived process");
+        let pid = child.id();
+        child.wait().expect("wait");
+        // `wait` reaps the child but the `Child` still holds the process
+        // handle, which pins the process object and makes `OpenProcess` keep
+        // succeeding — `pid_alive` would report a dead process as alive.
+        drop(child);
+        assert!(
+            wait_dead(pid, Duration::from_secs(5)).await,
+            "{pid} should be dead once its handle is closed"
+        );
+        pid
+    }
+
     #[test]
     fn pid_ledger_roundtrip() {
         let tmp = std::env::temp_dir().join(format!("ahl-ledger-rt-{}", std::process::id()));
@@ -535,9 +630,34 @@ mod tests {
         ledger.record(1001);
         ledger.record(1002);
         ledger.record(1001); // dedup
-        assert_eq!(ledger.read(), vec![1001, 1002]);
+        let owner = std::process::id();
+        assert_eq!(
+            ledger.read(),
+            vec![
+                LedgerEntry { pid: 1001, owner: Some(owner) },
+                LedgerEntry { pid: 1002, owner: Some(owner) },
+            ]
+        );
         ledger.clear();
         assert!(ledger.read().is_empty());
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// A ledger written by a launcher predating ownership records still parses,
+    /// with an unknown owner — so its leftovers survive the upgrade long enough
+    /// to be reaped instead of being silently dropped.
+    #[test]
+    fn pid_ledger_reads_legacy_bare_pid_lines() {
+        let tmp = std::env::temp_dir().join(format!("ahl-ledger-legacy-{}", std::process::id()));
+        std::fs::write(&tmp, "1234\n5678\n").expect("seed legacy ledger");
+        let ledger = PidLedger::open(tmp.clone());
+        assert_eq!(
+            ledger.read(),
+            vec![
+                LedgerEntry { pid: 1234, owner: None },
+                LedgerEntry { pid: 5678, owner: None },
+            ]
+        );
         let _ = std::fs::remove_file(&tmp);
     }
 
@@ -624,8 +744,11 @@ setInterval(()=>{},1000);"#;
 
         let tmp = std::env::temp_dir().join(format!("ahl-ledger-sweep-{pid}"));
         let ledger = PidLedger::open(tmp.clone());
-        ledger.record(pid);
-        assert_eq!(ledger.read(), vec![pid]);
+        // The owner is gone too: that is what makes this a leftover rather than
+        // a tree someone is still managing.
+        let owner = dead_pid().await;
+        ledger.record_entry(LedgerEntry { pid, owner: Some(owner) });
+        assert_eq!(ledger.read().len(), 1);
 
         let swept = sweep_leftover(&ledger);
         assert_eq!(swept, 1, "sweep should reap exactly the stale pid");
@@ -637,6 +760,48 @@ setInterval(()=>{},1000);"#;
             ledger.read().is_empty(),
             "ledger should be cleared after the sweep"
         );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// The two-launcher contract: launcher A is running a healthy DSH tree;
+    /// launcher B starts, sweeps the shared ledger, and must leave A's tree
+    /// alone — `pid_alive` alone cannot tell the two apart, the owner can.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_spares_tree_of_live_owner() {
+        let child = std::process::Command::new("node")
+            .args(["-e", "setInterval(()=>{},1000)"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn healthy tree");
+        let pid = child.id();
+        // Deliberately left running: the whole point is that the sweep must
+        // spare it. Killed by hand at the end instead.
+        drop(child);
+
+        // This test process stands in for the launcher that owns it: alive for
+        // the whole sweep, which is the point.
+        let owner = std::process::id();
+
+        let tmp = std::env::temp_dir().join(format!("ahl-ledger-sweep-live-{pid}"));
+        let ledger = PidLedger::open(tmp.clone());
+        ledger.record_entry(LedgerEntry { pid, owner: Some(owner) });
+
+        let swept = sweep_leftover(&ledger);
+        assert_eq!(swept, 0, "sweep must not reap a live owner's tree");
+        assert!(
+            pid_alive(pid),
+            "sweep killed {pid}, which a live launcher still owns"
+        );
+        assert_eq!(
+            ledger.read(),
+            vec![LedgerEntry { pid, owner: Some(owner) }],
+            "the owning launcher's ledger entry must survive another launcher's sweep"
+        );
+
+        // Cleanup: this one IS ours to kill.
+        kill_tree(pid);
+        let _ = wait_dead(pid, Duration::from_secs(5)).await;
         let _ = std::fs::remove_file(&tmp);
     }
 }
