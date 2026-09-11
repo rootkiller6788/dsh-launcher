@@ -104,6 +104,29 @@ describe('market state machine', () => {
     expect(useAppStore.getState().registryError).toContain('offline')
   })
 
+  // The page-switch gate: Market and Library both re-read the catalog on every
+  // mount, and the payload is multi-megabyte. Opening the page a second time
+  // must use the copy already in the store; only an explicit force re-sends it.
+  it('loadRegistry reuses the loaded catalog across page opens', async () => {
+    const registry = { updated: '2026-09-04', count: 1, categories: {} } as unknown as Registry
+    vi.mocked(ipc.marketRegistry).mockResolvedValue(registry)
+
+    await useAppStore.getState().loadRegistry()
+    await useAppStore.getState().loadRegistry()
+    expect(vi.mocked(ipc.marketRegistry)).toHaveBeenCalledTimes(1)
+
+    await useAppStore.getState().loadRegistry({ force: true })
+    expect(vi.mocked(ipc.marketRegistry)).toHaveBeenCalledTimes(2)
+
+    // A first load that failed leaves nothing cached, so the next open retries
+    // rather than showing an empty Market for the rest of the session.
+    useAppStore.setState({ registry: null })
+    vi.mocked(ipc.marketRegistry).mockRejectedValueOnce(new Error('offline'))
+    await useAppStore.getState().loadRegistry()
+    await useAppStore.getState().loadRegistry()
+    expect(vi.mocked(ipc.marketRegistry)).toHaveBeenCalledTimes(4)
+  })
+
   it('recommend toggles searching and stores the result', async () => {
     const result = { plans: [], candidates: [], raw: 'ok' } as unknown as RecommendResult
     vi.mocked(ipc.marketRecommend).mockResolvedValueOnce(result)

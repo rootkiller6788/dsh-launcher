@@ -156,7 +156,7 @@ interface AppStore {
   launch: (id: string) => Promise<void>
   stop: () => Promise<void>
   restart: () => Promise<void>
-  loadRegistry: () => Promise<void>
+  loadRegistry: (opts?: { force?: boolean }) => Promise<void>
   refreshInstalledPlugins: () => Promise<void>
   refreshLibraryInventory: () => Promise<void>
   refreshLibraryDetail: () => Promise<void>
@@ -808,7 +808,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
-  loadRegistry: async () => {
+  loadRegistry: async (opts) => {
+    // The catalog is session-stable — it is merged from the bundled snapshots
+    // and, at most, one fetch the backend already caches — so re-reading it on
+    // every Market/Library mount only re-sends a multi-megabyte payload over
+    // IPC for data that cannot have changed. Opening the page reads the copy
+    // already here; `force` is the Refresh button, which is the one path that
+    // means "re-read it". A directory catalog (`AHL_CONTENT_URL`) is the case
+    // that does change, and it goes through that same Refresh button.
+    if (get().registry && !opts?.force) return
     set({ registryError: null })
     try {
       set({ registry: await ipc.marketRegistry() })

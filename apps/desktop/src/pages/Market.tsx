@@ -469,7 +469,7 @@ export function Market() {
               {t('market.loadFailed')}{' '}
               <button
                 className="font-semibold underline underline-offset-2"
-                onClick={() => void loadRegistry()}
+                onClick={() => void loadRegistry({ force: true })}
               >
                 {t('market.retry')}
               </button>
