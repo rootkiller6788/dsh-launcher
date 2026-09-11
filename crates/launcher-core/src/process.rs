@@ -207,6 +207,96 @@ pub fn pid_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
+/// Windows `FILETIME` → unix seconds. `FILETIME` counts 100 ns ticks from
+/// 1601-01-01; the constant below is that epoch difference.
+#[cfg(windows)]
+fn filetime_to_unix_secs(ft: windows_sys::Win32::Foundation::FILETIME) -> u64 {
+    const EPOCH_DIFF_100NS: u64 = 116_444_736_000_000_000;
+    let ticks = ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64;
+    ticks.saturating_sub(EPOCH_DIFF_100NS) / 10_000_000
+}
+
+/// OS-reported creation time of `pid`, in unix seconds — the process's identity,
+/// as opposed to `pid_alive`'s "some process holds this number". Two different
+/// processes never share a creation time to the second, so an entry whose
+/// recorded value no longer matches has had its PID recycled onto a stranger.
+///
+/// `None` when the process is gone or cannot be queried (permission, or a
+/// platform without the probe) — callers treat that as "unverifiable".
+#[cfg(windows)]
+pub fn pid_start_time(pid: u32) -> Option<u64> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return None;
+        }
+        let (mut creation, mut exit, mut kernel, mut user): (FILETIME, FILETIME, FILETIME, FILETIME) =
+            std::mem::zeroed();
+        let ok = GetProcessTimes(h, &mut creation, &mut exit, &mut kernel, &mut user);
+        let _ = CloseHandle(h);
+        (ok != 0).then(|| filetime_to_unix_secs(creation))
+    }
+}
+
+/// Linux reads the creation time out of `/proc`: field 22 of `stat` is the
+/// start time in clock ticks since boot, which `btime` in `/proc/stat` and
+/// `_SC_CLK_TCK` convert to unix seconds.
+#[cfg(target_os = "linux")]
+pub fn pid_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // `comm` (field 2) is the process's own name and may contain spaces or
+    // parens, so anchor on the last ')' and count from there — field 3 onward.
+    let rest = &stat[stat.rfind(')')? + 1..];
+    let ticks: u64 = rest.split_whitespace().nth(19)?.parse().ok()?;
+    let btime: u64 = std::fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix("btime ")?.trim().parse().ok())?;
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    (hz > 0).then(|| btime + ticks / hz as u64)
+}
+
+/// No portable creation-time probe on this platform (macOS and the BSDs have
+/// no `/proc`). Identity checks fall back to a bare liveness probe.
+#[cfg(all(unix, not(target_os = "linux")))]
+pub fn pid_start_time(_pid: u32) -> Option<u64> {
+    None
+}
+
+/// True when `pid` is alive *and* is the same process the ledger recorded.
+///
+/// `recorded` is the creation time captured at spawn. `None` means the entry
+/// predates the fingerprint (or it could not be read), and there is nothing to
+/// verify against — the caller's old liveness-only behaviour stands.
+///
+/// A `None` from the *probe* while `recorded` is `Some`, by contrast, is a
+/// mismatch: we cannot prove this is our process, and killing a stranger's tree
+/// is far worse than leaving one node process behind.
+pub fn pid_is_recorded_process(pid: u32, recorded: Option<u64>) -> bool {
+    if !pid_alive(pid) {
+        return false;
+    }
+    match recorded {
+        None => true,
+        Some(recorded) => match pid_start_time(pid) {
+            Some(actual) if actual == recorded => true,
+            other => {
+                tracing::warn!(
+                    pid,
+                    recorded,
+                    actual = ?other,
+                    "recorded PID now belongs to a different process — leaving it alone"
+                );
+                false
+            }
+        },
+    }
+}
+
 /// One harness tree recorded in the ledger: the spawned process, plus the
 /// launcher process that spawned it.
 ///
@@ -224,6 +314,13 @@ pub struct LedgerEntry {
     /// the sweep keeps working across the upgrade.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<u32>,
+    /// The spawned process's OS-reported creation time, captured at spawn. PIDs
+    /// are recycled by the system, so "PID 4321 is alive" is not the same
+    /// question as "our process 4321 is alive" — this is what tells them apart
+    /// ([`pid_is_recorded_process`]). `None` for entries written before the
+    /// fingerprint existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<u64>,
 }
 
 /// Persistent record of every harness tree the launcher has spawned. Written on
@@ -249,6 +346,9 @@ impl PidLedger {
         self.record_entry(LedgerEntry {
             pid,
             owner: Some(std::process::id()),
+            // Read now, while the process is unmistakably ours; this is the
+            // fingerprint the sweep later checks for.
+            created_at: pid_start_time(pid),
         });
     }
 
@@ -301,16 +401,22 @@ fn parse_ledger_line(line: &str) -> Option<LedgerEntry> {
     if let Ok(entry) = serde_json::from_str::<LedgerEntry>(line) {
         return Some(entry);
     }
-    line.parse::<u32>().ok().map(|pid| LedgerEntry { pid, owner: None })
+    line.parse::<u32>().ok().map(|pid| LedgerEntry {
+        pid,
+        owner: None,
+        created_at: None,
+    })
 }
 
 /// Reap the harness trees this launcher's *predecessors* left behind. Returns
 /// how many trees were killed. Runs before every launch.
 ///
-/// An entry is reaped only when both hold:
+/// An entry is reaped only when all three hold:
 /// 1. its owner launcher is gone — otherwise a second launcher would kill a
-///    healthy tree the first one is still managing (`LedgerEntry::owner`); and
-/// 2. the spawned PID is still alive.
+///    healthy tree the first one is still managing (`LedgerEntry::owner`);
+/// 2. the PID is still alive; and
+/// 3. it is still the *same* process (`LedgerEntry::created_at`) — a PID the
+///    system recycled onto an unrelated process must not be killed.
 ///
 /// Entries that survive the sweep (owner still running) are written back — the
 /// ledger is shared, so clearing it would drop another launcher's bookkeeping.
@@ -329,7 +435,7 @@ pub fn sweep_leftover(ledger: &PidLedger) -> usize {
             keep.push(entry);
             continue;
         }
-        if pid_alive(entry.pid) {
+        if pid_is_recorded_process(entry.pid, entry.created_at) {
             tracing::warn!(
                 pid = entry.pid,
                 owner = ?entry.owner,
@@ -631,15 +737,44 @@ mod tests {
         ledger.record(1002);
         ledger.record(1001); // dedup
         let owner = std::process::id();
+        let entries = ledger.read();
         assert_eq!(
-            ledger.read(),
-            vec![
-                LedgerEntry { pid: 1001, owner: Some(owner) },
-                LedgerEntry { pid: 1002, owner: Some(owner) },
-            ]
+            entries.iter().map(|e| (e.pid, e.owner)).collect::<Vec<_>>(),
+            vec![(1001, Some(owner)), (1002, Some(owner))]
         );
         ledger.clear();
         assert!(ledger.read().is_empty());
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// The fingerprint is captured at spawn, from the OS — not from our own
+    /// clock — so a later sweep compares like with like. Our own PID is the one
+    /// process we can always query.
+    #[test]
+    fn ledger_records_process_creation_fingerprint() {
+        let me = std::process::id();
+        let tmp = std::env::temp_dir().join(format!("ahl-ledger-fp-{}", me));
+        let ledger = PidLedger::open(tmp.clone());
+        ledger.record(me);
+
+        let entries = ledger.read();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].created_at, pid_start_time(me));
+        assert!(
+            entries[0].created_at.is_some(),
+            "own creation time must be queryable"
+        );
+
+        // A live process whose fingerprint still matches is ours to kill.
+        assert!(pid_is_recorded_process(me, entries[0].created_at));
+        // One whose fingerprint does not match belongs to someone else.
+        assert!(!pid_is_recorded_process(
+            me,
+            entries[0].created_at.map(|t| t - 3600)
+        ));
+        // An entry too old to carry a fingerprint falls back to liveness.
+        assert!(pid_is_recorded_process(me, None));
+
         let _ = std::fs::remove_file(&tmp);
     }
 
@@ -654,8 +789,8 @@ mod tests {
         assert_eq!(
             ledger.read(),
             vec![
-                LedgerEntry { pid: 1234, owner: None },
-                LedgerEntry { pid: 5678, owner: None },
+                LedgerEntry { pid: 1234, owner: None, created_at: None },
+                LedgerEntry { pid: 5678, owner: None, created_at: None },
             ]
         );
         let _ = std::fs::remove_file(&tmp);
@@ -744,10 +879,16 @@ setInterval(()=>{},1000);"#;
 
         let tmp = std::env::temp_dir().join(format!("ahl-ledger-sweep-{pid}"));
         let ledger = PidLedger::open(tmp.clone());
+        let fingerprint = pid_start_time(pid);
+        assert!(fingerprint.is_some(), "cannot fingerprint the survivor");
         // The owner is gone too: that is what makes this a leftover rather than
         // a tree someone is still managing.
         let owner = dead_pid().await;
-        ledger.record_entry(LedgerEntry { pid, owner: Some(owner) });
+        ledger.record_entry(LedgerEntry {
+            pid,
+            owner: Some(owner),
+            created_at: fingerprint,
+        });
         assert_eq!(ledger.read().len(), 1);
 
         let swept = sweep_leftover(&ledger);
@@ -785,7 +926,12 @@ setInterval(()=>{},1000);"#;
 
         let tmp = std::env::temp_dir().join(format!("ahl-ledger-sweep-live-{pid}"));
         let ledger = PidLedger::open(tmp.clone());
-        ledger.record_entry(LedgerEntry { pid, owner: Some(owner) });
+        let entry = LedgerEntry {
+            pid,
+            owner: Some(owner),
+            created_at: pid_start_time(pid),
+        };
+        ledger.record_entry(entry.clone());
 
         let swept = sweep_leftover(&ledger);
         assert_eq!(swept, 0, "sweep must not reap a live owner's tree");
@@ -795,11 +941,54 @@ setInterval(()=>{},1000);"#;
         );
         assert_eq!(
             ledger.read(),
-            vec![LedgerEntry { pid, owner: Some(owner) }],
+            vec![entry],
             "the owning launcher's ledger entry must survive another launcher's sweep"
         );
 
         // Cleanup: this one IS ours to kill.
+        kill_tree(pid);
+        let _ = wait_dead(pid, Duration::from_secs(5)).await;
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// The PID-recycling hazard: our tree died, the system handed its PID to
+    /// something unrelated (here, a stand-in node process), and the launcher
+    /// that owned it is gone too. A liveness check alone would kill a stranger —
+    /// the creation-time fingerprint is what stops it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_spares_recycled_pid() {
+        let child = std::process::Command::new("node")
+            .args(["-e", "setInterval(()=>{},1000)"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn stand-in process");
+        let pid = child.id();
+        let actual = pid_start_time(pid).expect("fingerprint the stand-in");
+        drop(child);
+        // Deliberately left running; killed by hand at the end.
+
+        let tmp = std::env::temp_dir().join(format!("ahl-ledger-recycled-{pid}"));
+        let ledger = PidLedger::open(tmp.clone());
+        ledger.record_entry(LedgerEntry {
+            pid,
+            owner: Some(dead_pid().await),
+            // A stale fingerprint: this PID is alive, but it is not the process
+            // we recorded — which is exactly what a recycled PID looks like.
+            created_at: Some(actual - 3600),
+        });
+
+        let swept = sweep_leftover(&ledger);
+        assert_eq!(swept, 0, "sweep must not kill a process it cannot identify");
+        assert!(
+            pid_alive(pid),
+            "sweep killed {pid}, which the ledger never recorded"
+        );
+        assert!(
+            ledger.read().is_empty(),
+            "the unidentifiable entry should be dropped, not retried forever"
+        );
+
         kill_tree(pid);
         let _ = wait_dead(pid, Duration::from_secs(5)).await;
         let _ = std::fs::remove_file(&tmp);
