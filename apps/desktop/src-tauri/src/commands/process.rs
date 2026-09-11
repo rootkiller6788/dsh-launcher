@@ -72,6 +72,7 @@ async fn do_launch(
                 );
                 if let Some(mut r) = guard.take() {
                     drop(guard);
+                    let prev_pid = r.handle.pid;
                     if let Some(shutdown) = r.usage_proxy_shutdown.take() {
                         let _ = shutdown.send(());
                     }
@@ -79,6 +80,10 @@ async fn do_launch(
                         let _ = shutdown.send(());
                     }
                     let _ = r.handle.stop().await;
+                    // Switching instances stops the old tree the same way
+                    // `do_stop` does, so its ledger row goes the same way —
+                    // otherwise every switch leaves one behind.
+                    PidLedger::open(state.paths.pid_ledger()).forget(prev_pid);
                     close_session(state, "stopped");
                     close_dsh_window(app);
                 }
@@ -216,10 +221,20 @@ async fn do_launch(
     // *second, still-running* launcher's healthy tree is left alone.
     let ledger = PidLedger::open(state.paths.pid_ledger());
     let swept = sweep_leftover(&ledger);
-    if swept > 0 {
+    if !swept.is_empty() {
+        // Name the instances: "a leftover tree was reaped" is only actionable
+        // if the user knows which instance it came from.
+        let whose = if swept.instances.is_empty() {
+            String::new()
+        } else {
+            format!(" (instance: {})", swept.instances.join(", "))
+        };
         emit_log(
             app,
-            &format!("Reaped {swept} leftover process tree(s) from a previous session"),
+            &format!(
+                "Reaped {} leftover process tree(s){whose} from a previous session",
+                swept.reaped
+            ),
         );
     }
 
@@ -254,7 +269,7 @@ async fn do_launch(
         }
     };
     let pid = handle.pid;
-    ledger.record(pid);
+    ledger.record(&id, pid);
     emit_log(app, &format!("{id} · DSH web starting (pid {pid})…"));
     emit_debug(
         app,

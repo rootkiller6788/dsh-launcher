@@ -308,6 +308,11 @@ pub fn pid_is_recorded_process(pid: u32, recorded: Option<u64>) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerEntry {
     pub pid: u32,
+    /// Which instance's harness this tree is, so a reaped leftover can be
+    /// reported against the instance it belonged to instead of as an anonymous
+    /// PID. `None` for entries written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
     /// PID of the launcher that spawned `pid`, or `None` for a line written by
     /// a launcher older than this schema (which stored a bare PID). A `None`
     /// owner cannot be claimed by anyone, so such leftovers are always reaped —
@@ -382,9 +387,10 @@ impl PidLedger {
     /// Record a harness tree this launcher just spawned. The owner is this
     /// process — by definition alive — so a sweep in another launcher will skip
     /// it.
-    pub fn record(&self, pid: u32) {
+    pub fn record(&self, instance_id: &str, pid: u32) {
         self.record_entry(LedgerEntry {
             pid,
+            instance_id: Some(instance_id.to_string()),
             owner: Some(std::process::id()),
             // Read now, while the process is unmistakably ours; this is the
             // fingerprint the sweep later checks for.
@@ -492,13 +498,31 @@ fn parse_ledger_line(line: &str) -> Option<LedgerEntry> {
     }
     line.parse::<u32>().ok().map(|pid| LedgerEntry {
         pid,
+        instance_id: None,
         owner: None,
         created_at: None,
     })
 }
 
-/// Reap the harness trees this launcher's *predecessors* left behind. Returns
-/// how many trees were killed. Runs before every launch.
+/// What a [`sweep_leftover`] pass did, for the launcher to report to the user.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SweepReport {
+    /// How many trees were killed.
+    pub reaped: usize,
+    /// The instances those trees belonged to, de-duplicated and in ledger
+    /// order. Empty when nothing was reaped, or when the rows predate
+    /// instance labels.
+    pub instances: Vec<String>,
+}
+
+impl SweepReport {
+    pub fn is_empty(&self) -> bool {
+        self.reaped == 0
+    }
+}
+
+/// Reap the harness trees this launcher's *predecessors* left behind. Runs
+/// before every launch.
 ///
 /// An entry is reaped only when all three hold:
 /// 1. its owner launcher is gone — otherwise a second launcher would kill a
@@ -510,9 +534,15 @@ fn parse_ledger_line(line: &str) -> Option<LedgerEntry> {
 /// Entries that survive the sweep (owner still running) are written back — the
 /// ledger is shared, so clearing it would drop another launcher's bookkeeping.
 ///
+/// The sweep is deliberately *not* narrowed to one instance. A launcher runs a
+/// single instance at a time (launching another stops the first), so any row
+/// whose owner is gone names an orphan — whichever instance it came from — and
+/// leaving it running helps nobody. The instance on each row is what lets the
+/// launcher say *whose* leftover it just cleaned up (`SweepReport::instances`).
+///
 /// Cross-platform: the per-PID probe (`pid_alive`) and tree-kill (`kill_tree`)
 /// are cfg'd per OS, the sweep loop is not.
-pub fn sweep_leftover(ledger: &PidLedger) -> usize {
+pub fn sweep_leftover(ledger: &PidLedger) -> SweepReport {
     // The sweep is a read-modify-write too, and it is the writer most likely to
     // race a *second* launcher's `record` — both run at launch. The kills happen
     // under the lock so nobody's row can slip in between the read and the
@@ -521,7 +551,7 @@ pub fn sweep_leftover(ledger: &PidLedger) -> usize {
 
     let entries = ledger.read();
     let total = entries.len();
-    let mut swept = 0;
+    let mut report = SweepReport::default();
     let mut keep = Vec::new();
     for entry in entries {
         // A live owner is still managing this tree, whoever we are — leave it
@@ -534,10 +564,16 @@ pub fn sweep_leftover(ledger: &PidLedger) -> usize {
             tracing::warn!(
                 pid = entry.pid,
                 owner = ?entry.owner,
+                instance = ?entry.instance_id,
                 "reaping leftover harness tree from a previous session"
             );
             kill_tree(entry.pid);
-            swept += 1;
+            report.reaped += 1;
+            if let Some(instance) = entry.instance_id {
+                if !report.instances.contains(&instance) {
+                    report.instances.push(instance);
+                }
+            }
         }
     }
     // Rewrite only when something was dropped; otherwise the file is already
@@ -545,7 +581,7 @@ pub fn sweep_leftover(ledger: &PidLedger) -> usize {
     if keep.len() != total {
         ledger.write(&keep);
     }
-    swept
+    report
 }
 
 /// A spawned harness process. Holding the handle keeps the process alive;
@@ -791,6 +827,18 @@ pub async fn wait_for_port(port: u16, timeout: Duration) -> bool {
 mod tests {
     use super::*;
 
+    /// A ledger row with only the fields a given test cares about set. Keeping
+    /// construction in one place means a new schema field is one edit, not one
+    /// per test.
+    fn entry(pid: u32, owner: Option<u32>, created_at: Option<u64>) -> LedgerEntry {
+        LedgerEntry {
+            pid,
+            instance_id: None,
+            owner,
+            created_at,
+        }
+    }
+
     async fn wait_dead(pid: u32, timeout: Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
@@ -828,14 +876,18 @@ mod tests {
     fn pid_ledger_roundtrip() {
         let tmp = std::env::temp_dir().join(format!("ahl-ledger-rt-{}", std::process::id()));
         let ledger = PidLedger::open(tmp.clone());
-        ledger.record(1001);
-        ledger.record(1002);
-        ledger.record(1001); // dedup
+        ledger.record("alpha", 1001);
+        ledger.record("beta", 1002);
+        ledger.record("alpha", 1001); // dedup
         let owner = std::process::id();
         let entries = ledger.read();
         assert_eq!(
-            entries.iter().map(|e| (e.pid, e.owner)).collect::<Vec<_>>(),
-            vec![(1001, Some(owner)), (1002, Some(owner))]
+            entries
+                .iter()
+                .map(|e| (e.pid, e.owner, e.instance_id.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![(1001, Some(owner), Some("alpha")), (1002, Some(owner), Some("beta"))],
+            "each row names the instance it belongs to"
         );
         ledger.clear();
         assert!(ledger.read().is_empty());
@@ -850,7 +902,7 @@ mod tests {
         let me = std::process::id();
         let tmp = std::env::temp_dir().join(format!("ahl-ledger-fp-{}", me));
         let ledger = PidLedger::open(tmp.clone());
-        ledger.record(me);
+        ledger.record("alpha", me);
 
         let entries = ledger.read();
         assert_eq!(entries.len(), 1);
@@ -881,12 +933,8 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("ahl-ledger-forget-{}", std::process::id()));
         let ledger = PidLedger::open(tmp.clone());
         let me = std::process::id();
-        let theirs = LedgerEntry {
-            pid: 4243,
-            owner: Some(me + 1), // a second launcher on the same data root
-            created_at: None,
-        };
-        ledger.record(4242); // ours
+        let theirs = entry(4243, Some(me + 1), None); // a second launcher, same data root
+        ledger.record("alpha", 4242); // ours
         ledger.record_entry(theirs.clone());
 
         // A pid we never recorded is a no-op, not a clobber.
@@ -898,7 +946,13 @@ mod tests {
         ledger.forget(theirs.pid);
         assert_eq!(
             ledger.read(),
-            vec![LedgerEntry { pid: 4242, owner: Some(me), created_at: None }, theirs.clone()],
+            vec![
+                LedgerEntry {
+                    instance_id: Some("alpha".to_string()),
+                    ..entry(4242, Some(me), None)
+                },
+                theirs.clone()
+            ],
             "another launcher's row must survive our forget"
         );
 
@@ -950,7 +1004,7 @@ mod tests {
     fn ledger_forget_removes_the_file_when_it_empties() {
         let tmp = std::env::temp_dir().join(format!("ahl-ledger-forget-all-{}", std::process::id()));
         let ledger = PidLedger::open(tmp.clone());
-        ledger.record(4242);
+        ledger.record("alpha", 4242);
         assert!(tmp.exists());
 
         ledger.forget(4242);
@@ -968,10 +1022,7 @@ mod tests {
         let ledger = PidLedger::open(tmp.clone());
         assert_eq!(
             ledger.read(),
-            vec![
-                LedgerEntry { pid: 1234, owner: None, created_at: None },
-                LedgerEntry { pid: 5678, owner: None, created_at: None },
-            ]
+            vec![entry(1234, None, None), entry(5678, None, None)]
         );
         let _ = std::fs::remove_file(&tmp);
     }
@@ -1065,14 +1116,18 @@ setInterval(()=>{},1000);"#;
         // a tree someone is still managing.
         let owner = dead_pid().await;
         ledger.record_entry(LedgerEntry {
-            pid,
-            owner: Some(owner),
-            created_at: fingerprint,
+            instance_id: Some("alpha".to_string()),
+            ..entry(pid, Some(owner), fingerprint)
         });
         assert_eq!(ledger.read().len(), 1);
 
-        let swept = sweep_leftover(&ledger);
-        assert_eq!(swept, 1, "sweep should reap exactly the stale pid");
+        let report = sweep_leftover(&ledger);
+        assert_eq!(report.reaped, 1, "sweep should reap exactly the stale pid");
+        assert_eq!(
+            report.instances,
+            vec!["alpha".to_string()],
+            "the report names the instance whose leftover was cleaned up"
+        );
         assert!(
             wait_dead(pid, Duration::from_secs(5)).await,
             "sweep did not kill {pid}"
@@ -1106,15 +1161,12 @@ setInterval(()=>{},1000);"#;
 
         let tmp = std::env::temp_dir().join(format!("ahl-ledger-sweep-live-{pid}"));
         let ledger = PidLedger::open(tmp.clone());
-        let entry = LedgerEntry {
-            pid,
-            owner: Some(owner),
-            created_at: pid_start_time(pid),
-        };
+        let entry = entry(pid, Some(owner), pid_start_time(pid));
         ledger.record_entry(entry.clone());
 
-        let swept = sweep_leftover(&ledger);
-        assert_eq!(swept, 0, "sweep must not reap a live owner's tree");
+        let report = sweep_leftover(&ledger);
+        assert_eq!(report.reaped, 0, "sweep must not reap a live owner's tree");
+        assert!(report.is_empty());
         assert!(
             pid_alive(pid),
             "sweep killed {pid}, which a live launcher still owns"
@@ -1150,16 +1202,16 @@ setInterval(()=>{},1000);"#;
 
         let tmp = std::env::temp_dir().join(format!("ahl-ledger-recycled-{pid}"));
         let ledger = PidLedger::open(tmp.clone());
-        ledger.record_entry(LedgerEntry {
+        ledger.record_entry(entry(
             pid,
-            owner: Some(dead_pid().await),
+            Some(dead_pid().await),
             // A stale fingerprint: this PID is alive, but it is not the process
             // we recorded — which is exactly what a recycled PID looks like.
-            created_at: Some(actual - 3600),
-        });
+            Some(actual - 3600),
+        ));
 
-        let swept = sweep_leftover(&ledger);
-        assert_eq!(swept, 0, "sweep must not kill a process it cannot identify");
+        let report = sweep_leftover(&ledger);
+        assert_eq!(report.reaped, 0, "sweep must not kill a process it cannot identify");
         assert!(
             pid_alive(pid),
             "sweep killed {pid}, which the ledger never recorded"
