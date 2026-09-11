@@ -18,25 +18,40 @@ async fn ensure_registry(state: &AppState) -> Result<Registry, AppError> {
 }
 
 /// Load (or return the cached) non-plugin content (themes/skills/MCP), fetching
-/// from the hosted endpoint on first use and falling back to the bundled
+/// from the configured source on first use and falling back to the bundled
 /// snapshots when a kind is unreachable. Cached in the state so the four files
 /// are fetched once per session, not once per command.
 ///
+/// The exception is a catalog on disk (`AHL_CONTENT_URL` naming a directory):
+/// that is a file someone is editing, so it is re-read every time and an edit
+/// shows up on the next Market open instead of needing a launcher restart.
+///
 /// The fallback is otherwise invisible — the catalog looks the same whether the
-/// hosted files answered or the bundled snapshots did — so the first load that
-/// had to fall back says so in Activity, where the user will actually see it.
+/// live files answered or the bundled snapshots did — so a load that had to fall
+/// back says so in Activity, where the user will actually see it.
 pub(crate) async fn ensure_content(state: &AppState, app: &AppHandle) -> Registry {
+    let source = market::ContentSource::from_env();
+    if source.is_local() {
+        let (content, failures) = market::fetch_content_source(&source).await;
+        report_content_fallbacks(app, &failures);
+        return content;
+    }
     if let Some(c) = state.content.lock().ok().and_then(|g| g.as_ref().cloned()) {
         return c;
     }
-    let (content, failures) = market::fetch_content_report().await;
-    if !failures.is_empty() {
-        crate::commands::process::emit_warn(app, &market::content_failure_summary(&failures));
-    }
+    let (content, failures) = market::fetch_content_source(&source).await;
+    report_content_fallbacks(app, &failures);
     if let Ok(mut g) = state.content.lock() {
         *g = Some(content.clone());
     }
     content
+}
+
+/// Say once, in Activity, that a snapshot answered instead of the live file.
+fn report_content_fallbacks(app: &AppHandle, failures: &[market::ContentFetchFailure]) {
+    if !failures.is_empty() {
+        crate::commands::process::emit_warn(app, &market::content_failure_summary(failures));
+    }
 }
 
 /// Fetched plugins + live-fetched content merged into the single catalog both

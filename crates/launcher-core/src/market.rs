@@ -510,30 +510,81 @@ const CONTENT_KINDS: [ContentKindSpec; 4] = [
     ("bundles", "content-bundles.json", bundled_bundles),
 ];
 
-/// One content file the hosted endpoint did not answer, so its bundled snapshot
-/// was used instead.
+/// Where the four `content-*.json` files come from.
+///
+/// The catalog ships `include_str!`-baked into the binary, so this is the only
+/// way to change what the Market offers without rebuilding: `AHL_CONTENT_URL`
+/// may name a base URL serving them, or a directory holding them on disk. The
+/// directory form is the point — it is a file you can edit and see reload,
+/// where a rebuild (or a web server) was previously required to try a catalog
+/// edit at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContentSource {
+    /// A directory holding `content-*.json`.
+    Dir(std::path::PathBuf),
+    /// A base URL serving `content-*.json`.
+    Remote(String),
+}
+
+impl ContentSource {
+    /// Parse an `AHL_CONTENT_URL` value. Anything without a scheme is a path:
+    /// that covers `D:\catalog`, `\\share\catalog` and `/tmp/catalog`, none of
+    /// which can be told apart from each other by a stricter rule.
+    pub fn parse(value: &str) -> Self {
+        let value = value.trim();
+        if let Some(path) = value.strip_prefix("file://") {
+            // `file:///C:/catalog` carries a leading slash the path does not.
+            return ContentSource::Dir(std::path::PathBuf::from(
+                path.strip_prefix('/').filter(|p| p.contains(':')).unwrap_or(path),
+            ));
+        }
+        if value.contains("://") {
+            return ContentSource::Remote(value.trim_end_matches('/').to_string());
+        }
+        ContentSource::Dir(std::path::PathBuf::from(value))
+    }
+
+    /// The override in the environment, or the published host.
+    pub fn from_env() -> Self {
+        match std::env::var("AHL_CONTENT_URL") {
+            Ok(v) if !v.trim().is_empty() => ContentSource::parse(&v),
+            _ => ContentSource::Remote(CONTENT_BASE_DEFAULT.to_string()),
+        }
+    }
+
+    /// A catalog being read from disk is a catalog someone is editing, so the
+    /// caller can (and should) re-read it rather than cache it for the session.
+    pub fn is_local(&self) -> bool {
+        matches!(self, ContentSource::Dir(_))
+    }
+}
+
+/// One content file the configured source did not answer, so its bundled
+/// snapshot was used instead.
 ///
 /// The fallback is invisible by design — the Market renders the same either way —
-/// which is exactly why the miss has to be carried back to the caller: a host
-/// that 404s all four files looks identical to one serving a catalog nobody
-/// updates, and the only trace used to be a `404` in a log file.
+/// which is exactly why the miss has to be carried back to the caller: a source
+/// that answers "not here" for all four files looks identical to one serving a
+/// catalog nobody updates, and the only trace used to be a `404` in a log file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentFetchFailure {
     /// `themes` / `skills` / `mcps` / `bundles`.
     pub kind: &'static str,
-    /// The URL that did not answer.
-    pub url: String,
+    /// The URL or path that did not answer.
+    pub source: String,
     /// Why, in one line (`HTTP 404 Not Found`, a transport error, bad JSON).
     pub reason: String,
-    /// The HTTP status when the host answered at all; `None` = never reached.
-    pub status: Option<u16>,
+    /// The source said "this file is not here" — an HTTP 404, or a path that is
+    /// not on disk — rather than being unreachable. Worth separating: the first
+    /// means the snapshot is the only source by design, the second means
+    /// something is down.
+    pub not_published: bool,
 }
 
 impl ContentFetchFailure {
-    /// The host answered "this file is not here": the snapshot is the only
-    /// source by design, not a transient failure worth retrying.
+    /// See [`ContentFetchFailure::not_published`].
     pub fn is_not_published(&self) -> bool {
-        self.status == Some(404)
+        self.not_published
     }
 }
 
@@ -547,23 +598,44 @@ pub fn content_failure_summary(failures: &[ContentFetchFailure]) -> String {
         .join("; ");
     if !failures.is_empty() && failures.iter().all(ContentFetchFailure::is_not_published) {
         format!(
-            "live content catalogs are not published on the host ({detail}) — \
+            "live content catalogs are not published ({detail}) — \
              using the snapshots bundled with this build. Point AHL_CONTENT_URL at a \
-             base URL serving content-*.json to use a live catalog."
+             base URL, or a directory, holding content-*.json to use a live catalog."
         )
     } else {
         format!("live content catalogs unreachable ({detail}) — using the bundled snapshots")
     }
 }
 
-/// The reason one content file could not be used, and the status if the host
-/// answered. Kept apart from `anyhow` so a caller can tell "the endpoint does
-/// not publish this file" from "we could not reach the endpoint" — they call for
-/// different diagnostics.
+/// The reason one content file could not be used. Kept apart from `anyhow` so a
+/// caller can tell "the source does not publish this file" from "we could not
+/// reach the source" — they call for different diagnostics.
 #[derive(Debug, Clone)]
 struct ContentMiss {
     reason: String,
-    status: Option<u16>,
+    not_published: bool,
+}
+
+impl ContentMiss {
+    fn failure(&self, kind: &'static str, source: String) -> ContentFetchFailure {
+        ContentFetchFailure {
+            kind,
+            source,
+            reason: self.reason.clone(),
+            not_published: self.not_published,
+        }
+    }
+
+    /// A file the source says is not there — an HTTP 404, or a path that does
+    /// not exist on disk.
+    fn missing(reason: String) -> Self {
+        ContentMiss { reason, not_published: true }
+    }
+
+    /// A source that could not be reached, or answered with something unusable.
+    fn unreachable(reason: String) -> Self {
+        ContentMiss { reason, not_published: false }
+    }
 }
 
 /// Fetch each content kind from the hosted endpoint, falling back to its
@@ -579,8 +651,56 @@ pub async fn fetch_content() -> Result<Registry> {
 /// that a snapshot answered instead of the live catalog — see
 /// [`ContentFetchFailure`]. Not an error: the registry is always usable.
 pub async fn fetch_content_report() -> (Registry, Vec<ContentFetchFailure>) {
-    let base = env_override("AHL_CONTENT_URL").unwrap_or_else(|| CONTENT_BASE_DEFAULT.to_string());
-    fetch_content_from(&base).await
+    fetch_content_source(&ContentSource::from_env()).await
+}
+
+/// [`fetch_content_report`] for a source named by the caller, so a test can
+/// point it at a temp directory or a local server rather than mutate the
+/// process environment.
+pub async fn fetch_content_source(source: &ContentSource) -> (Registry, Vec<ContentFetchFailure>) {
+    match source {
+        ContentSource::Dir(dir) => content_from_dir(dir),
+        ContentSource::Remote(base) => fetch_content_from(base).await,
+    }
+}
+
+/// Read the four content files from a directory instead of over HTTP. A source
+/// on disk cannot be "slow" or "down", so the only miss that can happen is a
+/// name that is not there — which is reported exactly as a 404 is, so the
+/// caller's diagnostic does not have to care which kind of source it was.
+pub fn content_from_dir(dir: &std::path::Path) -> (Registry, Vec<ContentFetchFailure>) {
+    let mut content = Registry::default();
+    let mut failures = Vec::new();
+    for (kind, file, bundled) in CONTENT_KINDS {
+        let path = dir.join(file);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str::<Registry>(&text).map(hydrate) {
+                Ok(reg) => {
+                    content.plugins.extend(reg.plugins);
+                    content.categories.extend(reg.categories);
+                }
+                Err(e) => {
+                    let miss = ContentMiss::unreachable(format!("unreadable JSON: {e:#}"));
+                    failures.push(miss.failure(kind, path.display().to_string()));
+                    extend_with_snapshot(&mut content, bundled);
+                }
+            },
+            Err(e) => {
+                let miss = ContentMiss::missing(format!("no such file: {e}"));
+                failures.push(miss.failure(kind, path.display().to_string()));
+                extend_with_snapshot(&mut content, bundled);
+            }
+        }
+    }
+    content.count = content.plugins.len();
+    (content, failures)
+}
+
+/// Append one kind's bundled snapshot to `content`.
+fn extend_with_snapshot(content: &mut Registry, bundled: fn() -> Registry) {
+    let snapshot = bundled();
+    content.plugins.extend(snapshot.plugins);
+    content.categories.extend(snapshot.categories);
 }
 
 /// [`fetch_content_report`] with the base URL passed in, so a test can point it
@@ -594,9 +714,9 @@ async fn fetch_content_from(base: &str) -> (Registry, Vec<ContentFetchFailure>) 
                 .iter()
                 .map(|(kind, file, _)| ContentFetchFailure {
                     kind,
-                    url: format!("{base}{file}"),
+                    source: format!("{base}{file}"),
                     reason: format!("HTTP client unavailable: {e}"),
-                    status: None,
+                    not_published: false,
                 })
                 .collect();
             return (bundled_content(), failures);
@@ -629,15 +749,8 @@ async fn fetch_content_from(base: &str) -> (Registry, Vec<ContentFetchFailure>) 
             Err(miss) => {
                 let url = urls[i].clone();
                 tracing::debug!(kind, url = %url, reason = %miss.reason, "content catalog unavailable — serving the bundled snapshot");
-                failures.push(ContentFetchFailure {
-                    kind,
-                    url,
-                    reason: miss.reason,
-                    status: miss.status,
-                });
-                let snapshot = bundled();
-                content.plugins.extend(snapshot.plugins);
-                content.categories.extend(snapshot.categories);
+                failures.push(miss.failure(kind, url));
+                extend_with_snapshot(&mut content, bundled);
             }
         }
     }
@@ -657,20 +770,27 @@ async fn fetch_content_catalog(
     client: &reqwest::Client,
     url: &str,
 ) -> std::result::Result<Registry, ContentMiss> {
-    let miss = |reason: String, status: Option<u16>| ContentMiss { reason, status };
     let resp = client
         .get(url)
         .send()
         .await
-        .map_err(|e| miss(format!("{e:#}"), None))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        return Err(miss(format!("HTTP {status}"), Some(status.as_u16())));
+        .map_err(|e| ContentMiss::unreachable(format!("{e:#}")))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(ContentMiss::missing("HTTP 404 Not Found".to_string()));
     }
-    let text = resp.text().await.map_err(|e| miss(format!("{e:#}"), None))?;
+    if !resp.status().is_success() {
+        // Any other status is the host answering badly, not a file that is
+        // deliberately absent — 500 and 403 must not read as "not published".
+        let status = resp.status();
+        return Err(ContentMiss::unreachable(format!("HTTP {status}")));
+    }
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| ContentMiss::unreachable(format!("{e:#}")))?;
     serde_json::from_str(&text)
         .map(hydrate)
-        .map_err(|e| miss(format!("unreadable JSON: {e:#}"), None))
+        .map_err(|e| ContentMiss::unreachable(format!("unreadable JSON: {e:#}")))
 }
 
 async fn fetch_url_catalog(client: &reqwest::Client, url: &str) -> Result<Registry> {
@@ -1482,9 +1602,8 @@ mod tests {
             "one failure per kind, in report order"
         );
         for f in &failures {
-            assert_eq!(f.status, Some(404), "{}", f.kind);
             assert!(f.is_not_published(), "{} reads as not published", f.kind);
-            assert!(f.url.ends_with(&format!("content-{}.json", f.kind)));
+            assert!(f.source.ends_with(&format!("content-{}.json", f.kind)));
         }
         let summary = content_failure_summary(&failures);
         assert!(summary.contains("HTTP 404 Not Found"), "{summary}");
@@ -1539,8 +1658,7 @@ mod tests {
 
         assert_eq!(failures.len(), 4);
         for f in &failures {
-            assert_eq!(f.status, None, "{}: no HTTP status was received", f.kind);
-            assert!(!f.is_not_published());
+            assert!(!f.is_not_published(), "{} was never answered at all", f.kind);
             assert!(!f.reason.is_empty());
         }
         let summary = content_failure_summary(&failures);
@@ -1556,13 +1674,13 @@ mod tests {
     fn content_failure_summary_separates_missing_from_unreachable() {
         let missing = ContentFetchFailure {
             kind: "skills",
-            url: "https://example.com/content-skills.json".into(),
+            source: "https://example.com/content-skills.json".into(),
             reason: "HTTP 404 Not Found".into(),
-            status: Some(404),
+            not_published: true,
         };
         let refused = ContentFetchFailure {
-            status: None,
             reason: "error sending request".into(),
+            not_published: false,
             ..missing.clone()
         };
         // All-404: the host does not publish the files — name the way out.
@@ -1573,5 +1691,110 @@ mod tests {
         let summary = content_failure_summary(&[missing, refused]);
         assert!(summary.contains("unreachable"), "{summary}");
         assert!(!summary.contains("AHL_CONTENT_URL"), "{summary}");
+    }
+
+    // ---- a catalog on disk: the no-rebuild override ----
+
+    #[test]
+    fn content_source_override_tells_a_path_from_a_url() {
+        // No scheme ⇒ a path, whichever way the platform writes one.
+        assert_eq!(
+            ContentSource::parse(r"D:\catalog"),
+            ContentSource::Dir(r"D:\catalog".into())
+        );
+        assert_eq!(
+            ContentSource::parse("  /tmp/catalog  "),
+            ContentSource::Dir("/tmp/catalog".into())
+        );
+        assert_eq!(
+            ContentSource::parse(r"\\share\catalog"),
+            ContentSource::Dir(r"\\share\catalog".into())
+        );
+        // `file:///C:/catalog` keeps the drive but drops the URL's extra slash.
+        assert_eq!(
+            ContentSource::parse("file:///C:/catalog"),
+            ContentSource::Dir("C:/catalog".into())
+        );
+        // A scheme that is not `file` is a URL, and a trailing slash never
+        // doubles up when the file name is appended.
+        assert_eq!(
+            ContentSource::parse("https://example.com/cat/"),
+            ContentSource::Remote("https://example.com/cat".into())
+        );
+        assert!(!ContentSource::parse("https://example.com/cat/").is_local());
+        assert!(ContentSource::parse(r"D:\catalog").is_local());
+    }
+
+    #[test]
+    fn content_dir_override_reads_the_files_from_disk() {
+        // The whole point of the directory source: the catalog is edit-able
+        // without a rebuild, verified by serving a theme that is bundled
+        // nowhere.
+        let dir = std::env::temp_dir().join(format!("ahl-content-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("content-themes.json"),
+            r#"{"count":1,"categories":{"local":{"en":"Local"}},
+                "plugins":[{"name":"local-theme","owner":"o","kind":"theme",
+                "url":"https://github.com/o/local-theme","source":"nested"}]}"#,
+        )
+        .unwrap();
+
+        let (content, failures) = content_from_dir(&dir);
+        assert!(
+            content.plugins.iter().any(|p| p.name == "local-theme"),
+            "the file on disk is used"
+        );
+        assert!(content.categories.contains_key("local"));
+        // The other three kinds are not in the directory: reported, and filled
+        // from their snapshots so the catalog is still complete.
+        assert_eq!(
+            failures.iter().map(|f| f.kind).collect::<Vec<_>>(),
+            ["skills", "mcps", "bundles"]
+        );
+        for f in &failures {
+            assert!(f.is_not_published(), "{}: a missing file reads as absent", f.kind);
+            assert!(f.reason.contains("no such file"), "{}", f.reason);
+            assert!(f.source.ends_with(&format!("content-{}.json", f.kind)));
+        }
+        assert!(content.plugins.len() > 1, "the snapshots filled the rest in");
+        assert_eq!(content.count, content.plugins.len());
+
+        // Unreadable JSON is not "not published" — the file is right there and
+        // wrong, which is a different thing to fix.
+        std::fs::write(dir.join("content-skills.json"), "{ not json").unwrap();
+        let (_, failures) = content_from_dir(&dir);
+        let skills = failures.iter().find(|f| f.kind == "skills").unwrap();
+        assert!(!skills.is_not_published(), "{}", skills.reason);
+        assert!(skills.reason.contains("unreadable JSON"), "{}", skills.reason);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn content_source_dispatches_to_the_directory_and_the_host() {
+        // One entry point, two transports: the desktop layer never has to know
+        // which one it is talking to.
+        let dir = std::env::temp_dir().join(format!("ahl-content-src-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("content-themes.json"), r#"{"count":0,"plugins":[]}"#).unwrap();
+        let (content, failures) = fetch_content_source(&ContentSource::Dir(dir.clone())).await;
+        assert_eq!(
+            failures.iter().map(|f| f.kind).collect::<Vec<_>>(),
+            ["skills", "mcps", "bundles"],
+            "the three files that are not in the directory"
+        );
+        // The empty file on disk won, so no bundled theme is in the catalog.
+        assert!(!content.plugins.iter().any(|p| p.kind == ContentKind::Theme));
+        assert_eq!(content.count, content.plugins.len());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (base, server) = content_server(vec![]).await;
+        let (_, failures) = fetch_content_source(&ContentSource::Remote(base)).await;
+        join(server).await;
+        assert_eq!(failures.len(), 4);
+        assert!(failures.iter().all(ContentFetchFailure::is_not_published));
     }
 }
