@@ -89,12 +89,71 @@ pub async fn install_skill(
     })
 }
 
-/// SHA-256 (hex) of the `SKILL.md` currently served at `url` — the update
-/// check's "has the author changed it upstream?" probe. Reuses the same
-/// mirror-aware fetch as install, so it agrees with what an install would land.
-pub async fn fetch_skill_hash(url: &str) -> Result<String> {
-    let text = fetch_text(url).await?;
-    Ok(sha256_hex(text.as_bytes()))
+/// SHA-256 (hex) of the `SKILL.md` a skill's source currently serves — the
+/// update check's "has the author changed it upstream?" probe, resolved so it
+/// agrees with what an install would land.
+///
+/// `source` is whatever the record captured: a raw `SKILL.md` URL from the
+/// catalog's `fetch`, or a repo URL. Both are resolved to *`SKILL.md` content*.
+/// A repo URL is deliberately not fetched as a page — that hashed the HTML of
+/// the repo's landing page, which is stable and meaningless, so the check
+/// silently reported "up to date" forever. And when nothing raw resolves, the
+/// repo is cloned and asked directly: a source whose raw URL 404s (the file
+/// moved, or the skill never sat at the repo root) is a probe the user cannot
+/// act on, not a verdict that there is nothing to update.
+pub async fn fetch_skill_hash(source: &str, name: &str) -> Result<String> {
+    for url in raw_skill_md_candidates(source) {
+        if let Ok(text) = fetch_text(&url).await {
+            return Ok(sha256_hex(text.as_bytes()));
+        }
+    }
+    let resolved = resolve_source(source).ok_or_else(|| {
+        anyhow!("skill source {source} is not a fetchable SKILL.md URL or a github repo")
+    })?;
+    let files = clone_bundle(&resolved.repo, resolved.dir.as_deref(), name).await?;
+    Ok(SkillBundle::new(files, source.to_string())?.hash())
+}
+
+/// The raw `SKILL.md` URLs to try for a recorded source, cheapest first.
+///
+/// Only a URL that already points at the file qualifies. A *repo* URL gets no
+/// candidate at all: guessing its root `SKILL.md` is wrong for any monorepo that
+/// keeps a `SKILL.md` at its root alongside nested skills — `anthropics/skills`
+/// does exactly that — and the wrong skill's hash is worse than paying for the
+/// clone that resolves it exactly.
+fn raw_skill_md_candidates(source: &str) -> Vec<String> {
+    let source = source.trim();
+    if source.starts_with("https://raw.githubusercontent.com/") || github_repo(source).is_none() {
+        return vec![source.to_string()];
+    }
+    Vec::new()
+}
+
+/// Where a skill source lives: the repo to clone, and the skill's directory
+/// inside it when the URL pinned one. `None` when the source is not a github
+/// URL at all (a gist, a plain file host) — the only case where fetching a
+/// single raw file is the sole option.
+struct SkillSource {
+    repo: String,
+    dir: Option<String>,
+}
+
+/// Resolve a catalog entry's recorded source — a raw `fetch` URL or a repo URL
+/// — to something clonable. Both shapes name the same repo; only the raw one
+/// knows where inside it the skill sits.
+fn resolve_source(url: &str) -> Option<SkillSource> {
+    let url = url.trim().trim_end_matches('/');
+    if let Some(dir) = fetch_dir_in_repo(Some(url)) {
+        let rest = url.strip_prefix("https://raw.githubusercontent.com/")?;
+        let mut parts = rest.split('/');
+        let owner = parts.next().filter(|part| !part.is_empty())?;
+        let repo = parts.next().filter(|part| !part.is_empty())?;
+        return Some(SkillSource {
+            repo: format!("{owner}/{repo}"),
+            dir: Some(dir),
+        });
+    }
+    github_repo(url).map(|repo| SkillSource { repo, dir: None })
 }
 
 /// SHA-256 of an installed skill's `SKILL.md` on disk (`None` when the file is
@@ -383,29 +442,50 @@ impl SkillBundle {
 /// install is worse than a complete one but far better than none.
 async fn fetch_skill_bundle(entry: &RegistryPlugin) -> Result<SkillBundle> {
     let source = skill_source(entry).unwrap_or_default();
-    match clone_bundle(entry).await {
+    let Some(resolved) = resolve_source(&source) else {
+        return fetch_single_file(
+            entry,
+            source,
+            "the skill has no resolvable github repo".to_string(),
+        )
+        .await;
+    };
+    match clone_bundle(&resolved.repo, resolved.dir.as_deref(), &entry.name).await {
         Ok(files) => SkillBundle::new(files, source),
-        Err(clone_err) => {
-            let Some(fetch) = entry
-                .fetch
-                .as_deref()
-                .map(str::trim)
-                .filter(|url| !url.is_empty())
-            else {
-                return Err(clone_err);
-            };
-            let text = fetch_text(fetch).await.map_err(|fetch_err| {
-                anyhow!("{clone_err}; the raw SKILL.md fallback failed too: {fetch_err}")
-            })?;
-            SkillBundle::new(vec![("SKILL.md".to_string(), text.into_bytes())], source)
-        }
+        Err(clone_err) => fetch_single_file(entry, source, clone_err.to_string()).await,
     }
 }
 
-/// Clone the skill's repo and read the skill's directory out of it.
-async fn clone_bundle(entry: &RegistryPlugin) -> Result<Vec<(String, Vec<u8>)>> {
-    let repo = github_repo(&entry.url)
-        .ok_or_else(|| anyhow!("skill has no resolvable github repo"))?;
+/// The one-file bundle a raw `fetch` URL can produce — the fallback when there
+/// is no clonable repo, or the clone failed. A skill with no repo at all is
+/// better served by the single file the catalog pinned than by no install.
+async fn fetch_single_file(
+    entry: &RegistryPlugin,
+    source: String,
+    why: String,
+) -> Result<SkillBundle> {
+    let Some(fetch) = entry
+        .fetch
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    else {
+        return Err(anyhow!(why));
+    };
+    let text = fetch_text(fetch).await.map_err(|fetch_err| {
+        anyhow!("{why}; the raw SKILL.md fallback failed too: {fetch_err}")
+    })?;
+    SkillBundle::new(vec![("SKILL.md".to_string(), text.into_bytes())], source)
+}
+
+/// Clone `repo` and read the skill's directory out of it, preferring
+/// `dir_hint` — the `/`-separated path the catalog's `fetch` URL pinned — and
+/// falling back to locating the `SKILL.md` by `name`.
+async fn clone_bundle(
+    repo: &str,
+    dir_hint: Option<&str>,
+    name: &str,
+) -> Result<Vec<(String, Vec<u8>)>> {
     let tmp = std::env::temp_dir().join(format!(
         "ahl-skill-{}-{:x}",
         std::process::id(),
@@ -413,9 +493,9 @@ async fn clone_bundle(entry: &RegistryPlugin) -> Result<Vec<(String, Vec<u8>)>> 
     ));
     std::fs::create_dir_all(&tmp)?;
     let result = async {
-        clone_repo(&repo, &tmp).await?;
-        let root =
-            skill_root(&tmp, entry).ok_or_else(|| anyhow!("no SKILL.md found in {repo}"))?;
+        clone_repo(repo, &tmp).await?;
+        let root = skill_root(&tmp, dir_hint, name)
+            .ok_or_else(|| anyhow!("no SKILL.md found in {repo}"))?;
         read_bundle(&root)
     }
     .await;
@@ -434,18 +514,32 @@ fn github_repo(url: &str) -> Option<String> {
     (!slug.is_empty()).then(|| slug.to_string())
 }
 
-/// Shallow-clone `repo` into `dest` (which must be absent or empty).
-async fn clone_repo(repo: &str, dest: &Path) -> Result<()> {
-    let url = format!("https://github.com/{repo}");
-    let args = vec![
+/// The `git clone` argv for a skill.
+///
+/// `-c core.autocrlf=false` is not incidental: with the Git-for-Windows default
+/// of `autocrlf=true` a checkout rewrites every LF to CRLF, so the `SKILL.md` on
+/// disk is no longer the file the repo holds — and its hash would never match
+/// the one the update check derives from the raw URL, leaving the skill
+/// permanently "update available". `-c` outranks every config file, so a user's
+/// global setting cannot reintroduce it.
+fn clone_args(url: &str, dest: &Path) -> Vec<String> {
+    vec![
+        "-c".to_string(),
+        "core.autocrlf=false".to_string(),
         "clone".to_string(),
         "--depth".to_string(),
         "1".to_string(),
         "--quiet".to_string(),
         "--".to_string(),
-        url.clone(),
+        url.to_string(),
         dest.display().to_string(),
-    ];
+    ]
+}
+
+/// Shallow-clone `repo` into `dest` (which must be absent or empty).
+async fn clone_repo(repo: &str, dest: &Path) -> Result<()> {
+    let url = format!("https://github.com/{repo}");
+    let args = clone_args(&url, dest);
     // Route through the shared timed runner so a stalled transfer is killed
     // after GIT_TIMEOUT (process tree included) instead of hanging forever.
     let code = crate::run_timed(
@@ -467,21 +561,21 @@ async fn clone_repo(repo: &str, dest: &Path) -> Result<()> {
 }
 
 /// The directory inside a clone that holds the skill — the parent of its
-/// `SKILL.md`. The catalog's `fetch` URL pins the exact path when there is one
-/// (`…/HEAD/skills/docx/SKILL.md` → `skills/docx`); a bare repo URL gives only a
-/// name, so the `SKILL.md` is located by search instead.
-fn skill_root(repo_dir: &Path, entry: &RegistryPlugin) -> Option<PathBuf> {
-    if let Some(dir) = fetch_dir_in_repo(entry.fetch.as_deref()) {
+/// `SKILL.md`. `dir_hint` (from the catalog's pinned `fetch` URL, `""` meaning
+/// the repo root) wins when it actually holds a `SKILL.md`; a bare repo URL
+/// gives only a name, so the `SKILL.md` is located by search instead.
+fn skill_root(repo_dir: &Path, dir_hint: Option<&str>, name: &str) -> Option<PathBuf> {
+    if let Some(dir) = dir_hint {
         let candidate = if dir.is_empty() {
             repo_dir.to_path_buf()
         } else {
-            repo_dir.join(&dir)
+            repo_dir.join(dir)
         };
         if candidate.join("SKILL.md").is_file() {
             return Some(candidate);
         }
     }
-    find_skill_md(repo_dir, &entry.name).and_then(|md| md.parent().map(Path::to_path_buf))
+    find_skill_md(repo_dir, name).and_then(|md| md.parent().map(Path::to_path_buf))
 }
 
 /// The directory a raw `fetch` URL points at, as a `/`-separated path relative
@@ -1563,6 +1657,37 @@ mod tests {
     }
 
     #[test]
+    fn clone_args_disable_line_ending_translation() {
+        // Without this a Windows checkout turns LF into CRLF, the installed
+        // `SKILL.md` stops matching the raw URL byte for byte, and every skill
+        // shows "update available" forever.
+        let args = clone_args("https://github.com/o/r", Path::new("dest"));
+        assert_eq!(args[0], "-c");
+        assert_eq!(args[1], "core.autocrlf=false");
+        assert_eq!(args[2], "clone");
+        assert!(args.iter().any(|arg| arg == "--depth"));
+    }
+
+    #[test]
+    fn raw_skill_md_candidates_resolves_both_record_shapes() {
+        // A record that captured the catalog's raw URL probes exactly there.
+        assert_eq!(
+            raw_skill_md_candidates(
+                "https://raw.githubusercontent.com/o/r/HEAD/skills/docx/SKILL.md"
+            ),
+            vec!["https://raw.githubusercontent.com/o/r/HEAD/skills/docx/SKILL.md"]
+        );
+        // A repo URL gets no raw candidate at all: its root `SKILL.md` is not
+        // necessarily *this* skill's, so the probe resolves it by cloning.
+        assert!(raw_skill_md_candidates("https://github.com/o/r").is_empty());
+        // A non-github source is used as-is.
+        assert_eq!(
+            raw_skill_md_candidates("https://example.test/skill/SKILL.md"),
+            vec!["https://example.test/skill/SKILL.md"]
+        );
+    }
+
+    #[test]
     fn github_repo_normalises_urls() {
         assert_eq!(github_repo("https://github.com/o/r").as_deref(), Some("o/r"));
         assert_eq!(github_repo("https://github.com/o/r/").as_deref(), Some("o/r"));
@@ -1581,20 +1706,13 @@ mod tests {
         std::fs::write(root.join("SKILL.md"), "root skill").unwrap();
         std::fs::write(root.join("docx").join("SKILL.md"), "nested skill").unwrap();
 
-        let pinned = RegistryPlugin {
-            name: "docx".into(),
-            url: "https://github.com/o/r".into(),
-            fetch: Some("https://raw.githubusercontent.com/o/r/HEAD/SKILL.md".into()),
-            ..Default::default()
-        };
-        assert_eq!(skill_root(&root, &pinned).unwrap(), root);
+        // The pinned URL goes through the same parse the installer uses.
+        let pinned = Some("https://raw.githubusercontent.com/o/r/HEAD/SKILL.md");
+        let hint = fetch_dir_in_repo(pinned);
+        assert_eq!(skill_root(&root, hint.as_deref(), "docx").unwrap(), root);
 
         // With no pinned path the search takes over and matches on the name.
-        let search_only = RegistryPlugin {
-            fetch: None,
-            ..pinned
-        };
-        assert_eq!(skill_root(&root, &search_only).unwrap(), root.join("docx"));
+        assert_eq!(skill_root(&root, None, "docx").unwrap(), root.join("docx"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1730,6 +1848,74 @@ mod tests {
             assert!(dir.join(rel).exists(), "{rel} did not land in the skill");
         }
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Item 10's real-machine check. The claim worth verifying is not any
+    /// particular hash but *agreement*: the probe must answer with the content an
+    /// install would land, or the update check offers updates that do not exist
+    /// (or misses ones that do). Opt-in, and slow — it clones several times:
+    /// `cargo test -p dsh-adapter --lib -- --ignored probes_agree`
+    #[tokio::test]
+    #[ignore = "clones from github a few times — needs network + git"]
+    async fn probes_agree_with_what_an_install_lands() {
+        let entry = |fetch: Option<&str>| RegistryPlugin {
+            kind: launcher_core::market::ContentKind::Skill,
+            name: "mathmodel-skill".into(),
+            owner: "rootkiller6788".into(),
+            url: "https://github.com/rootkiller6788/mathmodel-skill".into(),
+            fetch: fetch.map(str::to_string),
+            ..Default::default()
+        };
+
+        // The shape the catalog produces: `fetch` pins the exact `SKILL.md`.
+        let pinned = entry(Some(
+            "https://raw.githubusercontent.com/rootkiller6788/mathmodel-skill/HEAD/SKILL.md",
+        ));
+        let source = skill_source(&pinned).unwrap();
+        let hash = fetch_skill_hash(&source, &pinned.name).await.unwrap();
+        let (instance, ws) = test_instance("probe-pinned");
+        assert_eq!(hash, install_skill(&instance, &pinned).await.unwrap().hash);
+        let _ = std::fs::remove_dir_all(&ws);
+
+        // The shape a record captured before the catalog pinned `fetch`, i.e. a
+        // bare repo URL. Hashing its HTML landing page — what the probe used to
+        // do — could never agree with an install.
+        let repo_only = entry(None);
+        let source = skill_source(&repo_only).unwrap();
+        assert_eq!(source, repo_only.url);
+        let hash = fetch_skill_hash(&source, &repo_only.name).await.unwrap();
+        let (instance, ws) = test_instance("probe-repo");
+        assert_eq!(hash, install_skill(&instance, &repo_only).await.unwrap().hash);
+        let _ = std::fs::remove_dir_all(&ws);
+
+        // A skill nested inside its repo: resolved by the name search, which is
+        // the only thing a repo URL offers.
+        let nested = fetch_skill_hash("https://github.com/anthropics/skills", "docx")
+            .await
+            .unwrap();
+        let nested_raw = fetch_text(
+            "https://raw.githubusercontent.com/anthropics/skills/HEAD/skills/docx/SKILL.md",
+        )
+        .await
+        .unwrap();
+        assert_eq!(nested, sha256_hex(nested_raw.as_bytes()));
+
+        // A raw URL whose file moved: the probe answers from the clone instead
+        // of failing — the 404 fallback this item adds.
+        let moved =
+            "https://raw.githubusercontent.com/rootkiller6788/mathmodel-skill/HEAD/nope/SKILL.md";
+        assert!(fetch_text(moved).await.is_err(), "the path must 404 for this to prove anything");
+        assert_eq!(
+            fetch_skill_hash(moved, "mathmodel-skill").await.unwrap(),
+            nested_hash_of_repo("rootkiller6788/mathmodel-skill", "mathmodel-skill").await
+        );
+    }
+
+    /// The hash an install would record for a repo with no pinned path — the
+    /// probe's answer after a raw URL 404s.
+    async fn nested_hash_of_repo(repo: &str, name: &str) -> String {
+        let files = clone_bundle(repo, None, name).await.unwrap();
+        SkillBundle::new(files, String::new()).unwrap().hash()
     }
 
     #[test]

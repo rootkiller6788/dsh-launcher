@@ -162,6 +162,7 @@ pub async fn skill_updates(
         // probes run concurrently in phase 2.
         struct Probe {
             id: String,
+            name: String,
             current: String,
         }
         let mut probes: Vec<(Probe, String)> = Vec::new();
@@ -174,12 +175,12 @@ pub async fn skill_updates(
                 record.source.len(),
                 &record.hash[..record.hash.len().min(8)],
             );
+            let entry = find_by_key(&entries, ContentKind::Skill, &record.id);
             // Upstream probe URL: the record's captured source wins (it is
             // exactly where the file was fetched from); legacy records without a
             // source fall back to the registry entry for the same id.
             let source = if record.source.trim().is_empty() {
-                find_by_key(&entries, ContentKind::Skill, &record.id)
-                    .and_then(|entry| content_adapter::skill_source(&entry))
+                entry.as_ref().and_then(content_adapter::skill_source)
             } else {
                 Some(record.source.clone())
             };
@@ -187,6 +188,16 @@ pub async fn skill_updates(
                 tracing::info!(target: "update-check", "skill {}: NO SOURCE", record.id);
                 continue;
             };
+            // The short name, for the probe's fallback to a repo clone: the
+            // registry entry knows it, and a record id is `owner/name`.
+            let name = entry.map(|entry| entry.name).unwrap_or_else(|| {
+                record
+                    .id
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&record.id)
+                    .to_string()
+            });
             // Installed baseline: prefer the recorded hash; a legacy record
             // with an empty hash falls back to hashing the file on disk so it
             // isn't flagged on first launch.
@@ -198,6 +209,7 @@ pub async fn skill_updates(
             probes.push((
                 Probe {
                     id: record.id.clone(),
+                    name,
                     current,
                 },
                 source,
@@ -207,7 +219,7 @@ pub async fn skill_updates(
         let mut workers = tokio::task::JoinSet::new();
         for (probe, source) in probes {
             workers.spawn(async move {
-                let fetched = content_adapter::fetch_skill_hash(&source).await;
+                let fetched = content_adapter::fetch_skill_hash(&source, &probe.name).await;
                 (probe.id, probe.current, fetched)
             });
         }
