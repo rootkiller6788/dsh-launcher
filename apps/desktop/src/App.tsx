@@ -81,6 +81,10 @@ function Workspace() {
   // outlast the launch IPC (`busy`), so the button is gated on the status too —
   // otherwise it flips back to "Launch DSH" while the boot is still running.
   const starting = status === 'starting'
+  // From the instance manifest, so it is known before the child has loaded
+  // anything — which is the whole point: it is the one true figure available
+  // while the boot is still running.
+  const pluginCount = activeInstance?.plugins.length ?? 0
   const paintedRef = useRef(false)
 
   // Re-render every second while booting so the elapsed counter ticks.
@@ -179,9 +183,18 @@ function Workspace() {
         </div>
 
         {starting && (
-          <p className="mt-3 text-right text-xs text-zinc-500">
-            {formatDuration(processState?.startedAt, null)} · {t('workspace.booting')}
-          </p>
+          <div className="mt-3 flex flex-col items-end gap-0.5 text-right text-xs text-zinc-500">
+            <span>{formatDuration(processState?.startedAt, null)}</span>
+            {/* How much is being loaded, from the instance's own plugin list.
+                DSH's loader prints nothing on the success path — only a failure
+                names a loader entry — so a live count would have to be invented
+                from unrelated output. The declared total is the true figure
+                available while the boot is still running. */}
+            {pluginCount > 0 && (
+              <span>{t('workspace.bootingPlugins', { n: pluginCount })}</span>
+            )}
+            <span>{t('workspace.booting')}</span>
+          </div>
         )}
       </section>
     </div>
