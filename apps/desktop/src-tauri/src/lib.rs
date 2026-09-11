@@ -13,6 +13,10 @@ use state::AppState;
 use tauri::Manager;
 use tracing_subscriber::EnvFilter;
 
+/// Tauri's label for the window declared in `tauri.conf.json` — the launcher
+/// itself, as opposed to the separate DSH window (`process::DSH_WINDOW_LABEL`).
+const MAIN_WINDOW_LABEL: &str = "main";
+
 pub fn run() {
     // Resolve paths once so the crash hook, the consent seed, and the
     // setup-time telemetry flush all agree on the same logs directory.
@@ -36,6 +40,20 @@ pub fn run() {
     launcher_core::crash::install_panic_hook(logs_dir, telemetry_consent.clone());
 
     tauri::Builder::default()
+        // A second launch reaches the launcher the user already has instead of
+        // starting a rival over the same data root — two launchers means two
+        // writers on the same SQLite file, instance set, and PID ledger (and,
+        // to the user, two identical windows). Registered first because the
+        // plugin claims its named mutex during plugin setup, before `setup`.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // The user asked for this window; they just didn't realise it was
+            // already open. Bring it back from minimised/hidden and focus it.
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .setup(move |app| {
             let paths = AppPaths::from_env()?;
             paths.ensure_dirs()?;
