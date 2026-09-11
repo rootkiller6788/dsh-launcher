@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
+use launcher_core::github;
 use launcher_core::{
     sha256_hex, InstanceManifest, McpEnvRequirement, McpServerRecord, RegistryPlugin, SkillRecord,
     SkinPackage,
@@ -76,8 +77,9 @@ pub fn skill_source(entry: &RegistryPlugin) -> Option<String> {
 pub async fn install_skill(
     instance: &InstanceManifest,
     entry: &RegistryPlugin,
+    mirror: bool,
 ) -> Result<SkillRecord> {
-    let bundle = fetch_skill_bundle(entry).await?;
+    let bundle = fetch_skill_bundle(entry, mirror).await?;
     let id = skill_id(entry);
     let dir = skills_dir(instance).join(skill_dir_name(&id));
     land_bundle(&dir, &bundle)?;
@@ -101,16 +103,16 @@ pub async fn install_skill(
 /// repo is cloned and asked directly: a source whose raw URL 404s (the file
 /// moved, or the skill never sat at the repo root) is a probe the user cannot
 /// act on, not a verdict that there is nothing to update.
-pub async fn fetch_skill_hash(source: &str, name: &str) -> Result<String> {
+pub async fn fetch_skill_hash(source: &str, name: &str, mirror: bool) -> Result<String> {
     for url in raw_skill_md_candidates(source) {
-        if let Ok(text) = fetch_text(&url).await {
+        if let Ok(text) = fetch_text(&url, mirror).await {
             return Ok(sha256_hex(text.as_bytes()));
         }
     }
     let resolved = resolve_source(source).ok_or_else(|| {
         anyhow!("skill source {source} is not a fetchable SKILL.md URL or a github repo")
     })?;
-    let files = clone_bundle(&resolved.repo, resolved.dir.as_deref(), name).await?;
+    let files = clone_bundle(&resolved.repo, resolved.dir.as_deref(), name, mirror).await?;
     Ok(SkillBundle::new(files, source.to_string())?.hash())
 }
 
@@ -180,8 +182,9 @@ pub async fn update_skill(
     instance: &InstanceManifest,
     entry: &RegistryPlugin,
     current_hash: &str,
+    mirror: bool,
 ) -> Result<Option<SkillRecord>> {
-    let bundle = fetch_skill_bundle(entry).await?;
+    let bundle = fetch_skill_bundle(entry, mirror).await?;
     let hash = bundle.hash();
     let id = skill_id(entry);
     let dir = skills_dir(instance).join(skill_dir_name(&id));
@@ -440,19 +443,20 @@ impl SkillBundle {
 /// The raw URL is the fallback for a source with no clonable repo (a bare
 /// gist, a plain file host) or a clone that cannot run at all: a single-file
 /// install is worse than a complete one but far better than none.
-async fn fetch_skill_bundle(entry: &RegistryPlugin) -> Result<SkillBundle> {
+async fn fetch_skill_bundle(entry: &RegistryPlugin, mirror: bool) -> Result<SkillBundle> {
     let source = skill_source(entry).unwrap_or_default();
     let Some(resolved) = resolve_source(&source) else {
         return fetch_single_file(
             entry,
             source,
             "the skill has no resolvable github repo".to_string(),
+            mirror,
         )
         .await;
     };
-    match clone_bundle(&resolved.repo, resolved.dir.as_deref(), &entry.name).await {
+    match clone_bundle(&resolved.repo, resolved.dir.as_deref(), &entry.name, mirror).await {
         Ok(files) => SkillBundle::new(files, source),
-        Err(clone_err) => fetch_single_file(entry, source, clone_err.to_string()).await,
+        Err(clone_err) => fetch_single_file(entry, source, clone_err.to_string(), mirror).await,
     }
 }
 
@@ -463,6 +467,7 @@ async fn fetch_single_file(
     entry: &RegistryPlugin,
     source: String,
     why: String,
+    mirror: bool,
 ) -> Result<SkillBundle> {
     let Some(fetch) = entry
         .fetch
@@ -472,7 +477,7 @@ async fn fetch_single_file(
     else {
         return Err(anyhow!(why));
     };
-    let text = fetch_text(fetch).await.map_err(|fetch_err| {
+    let text = fetch_text(fetch, mirror).await.map_err(|fetch_err| {
         anyhow!("{why}; the raw SKILL.md fallback failed too: {fetch_err}")
     })?;
     SkillBundle::new(vec![("SKILL.md".to_string(), text.into_bytes())], source)
@@ -485,6 +490,7 @@ async fn clone_bundle(
     repo: &str,
     dir_hint: Option<&str>,
     name: &str,
+    mirror: bool,
 ) -> Result<Vec<(String, Vec<u8>)>> {
     let tmp = std::env::temp_dir().join(format!(
         "ahl-skill-{}-{:x}",
@@ -493,7 +499,7 @@ async fn clone_bundle(
     ));
     std::fs::create_dir_all(&tmp)?;
     let result = async {
-        clone_repo(repo, &tmp).await?;
+        clone_repo(repo, &tmp, mirror).await?;
         let root = skill_root(&tmp, dir_hint, name)
             .ok_or_else(|| anyhow!("no SKILL.md found in {repo}"))?;
         read_bundle(&root)
@@ -536,10 +542,48 @@ fn clone_args(url: &str, dest: &Path) -> Vec<String> {
     ]
 }
 
-/// Shallow-clone `repo` into `dest` (which must be absent or empty).
-async fn clone_repo(repo: &str, dest: &Path) -> Result<()> {
-    let url = format!("https://github.com/{repo}");
-    let args = clone_args(&url, dest);
+/// Shallow-clone `repo` into `dest` (which must be absent or empty), trying the
+/// transports [`github::fetch_candidates`] picks — the mirror first when the
+/// Install Center toggle is on, else github.com first — and only failing when
+/// both are exhausted.
+///
+/// A skill install that dies at the clone is the mainland-China failure this
+/// exists for: the raw `SKILL.md` path has always fallen back to the relay, but
+/// the clone did not, so multi-file skills failed where single-file ones worked.
+async fn clone_repo(repo: &str, dest: &Path, mirror: bool) -> Result<()> {
+    let candidates = github::fetch_candidates(&format!("https://github.com/{repo}"), mirror);
+    let mut errors = Vec::new();
+    for (attempt, url) in candidates.iter().enumerate() {
+        if attempt > 0 {
+            // A failed clone can leave a partial checkout behind, and `git
+            // clone` refuses a non-empty destination. The directory is ours
+            // (`clone_bundle` just created it), so clearing it is safe.
+            let _ = std::fs::remove_dir_all(dest);
+        }
+        match clone_into(url, dest).await {
+            Ok(()) => {
+                if attempt > 0 {
+                    tracing::debug!(repo, url = %url, "cloned through the gh-proxy relay");
+                }
+                return Ok(());
+            }
+            Err(e) => errors.push(e),
+        }
+    }
+    Err(match errors.len() {
+        1 => errors.pop().expect("one clone attempt reported one error"),
+        _ => anyhow!(
+            "{}; the retry failed too: {}",
+            errors[0],
+            errors[1]
+        ),
+    })
+}
+
+/// One clone attempt against a known URL. The caller owns the retry so the
+/// failure text can name both transports.
+async fn clone_into(url: &str, dest: &Path) -> Result<()> {
+    let args = clone_args(url, dest);
     // Route through the shared timed runner so a stalled transfer is killed
     // after GIT_TIMEOUT (process tree included) instead of hanging forever.
     let code = crate::run_timed(
@@ -554,7 +598,7 @@ async fn clone_repo(repo: &str, dest: &Path) -> Result<()> {
     .map_err(|e| anyhow!("git clone {url} failed: {e}"))?;
     if code != 0 {
         return Err(anyhow!(
-            "git clone {url} failed — check the repo exists and is public, and that your network can reach github.com"
+            "git clone {url} failed — check the repo exists and is public, and that your network can reach it"
         ));
     }
     Ok(())
@@ -657,14 +701,14 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-async fn fetch_text(url: &str) -> Result<String> {
+/// Fetch one small file (a `SKILL.md`), trying the transports
+/// [`github::fetch_candidates`] picks so a blocked github.com is not the end of
+/// the install.
+async fn fetch_text(url: &str, mirror: bool) -> Result<String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
-    let mut urls = vec![url.to_string()];
-    if url.starts_with("https://raw.githubusercontent.com/") {
-        urls.push(format!("https://gh-proxy.com/{url}"));
-    }
+    let urls = github::fetch_candidates(url, mirror);
     let mut last_err = None;
     for u in urls {
         match client.get(&u).send().await {
@@ -1833,7 +1877,7 @@ mod tests {
             ),
             ..Default::default()
         };
-        let record = install_skill(&instance, &entry).await.unwrap();
+        let record = install_skill(&instance, &entry, false).await.unwrap();
         assert_eq!(record.id, "rootkiller6788/mathmodel-skill");
         assert_eq!(record.hash.len(), 64);
 
@@ -1872,9 +1916,9 @@ mod tests {
             "https://raw.githubusercontent.com/rootkiller6788/mathmodel-skill/HEAD/SKILL.md",
         ));
         let source = skill_source(&pinned).unwrap();
-        let hash = fetch_skill_hash(&source, &pinned.name).await.unwrap();
+        let hash = fetch_skill_hash(&source, &pinned.name, false).await.unwrap();
         let (instance, ws) = test_instance("probe-pinned");
-        assert_eq!(hash, install_skill(&instance, &pinned).await.unwrap().hash);
+        assert_eq!(hash, install_skill(&instance, &pinned, false).await.unwrap().hash);
         let _ = std::fs::remove_dir_all(&ws);
 
         // The shape a record captured before the catalog pinned `fetch`, i.e. a
@@ -1883,18 +1927,19 @@ mod tests {
         let repo_only = entry(None);
         let source = skill_source(&repo_only).unwrap();
         assert_eq!(source, repo_only.url);
-        let hash = fetch_skill_hash(&source, &repo_only.name).await.unwrap();
+        let hash = fetch_skill_hash(&source, &repo_only.name, false).await.unwrap();
         let (instance, ws) = test_instance("probe-repo");
-        assert_eq!(hash, install_skill(&instance, &repo_only).await.unwrap().hash);
+        assert_eq!(hash, install_skill(&instance, &repo_only, false).await.unwrap().hash);
         let _ = std::fs::remove_dir_all(&ws);
 
         // A skill nested inside its repo: resolved by the name search, which is
         // the only thing a repo URL offers.
-        let nested = fetch_skill_hash("https://github.com/anthropics/skills", "docx")
+        let nested = fetch_skill_hash("https://github.com/anthropics/skills", "docx", false)
             .await
             .unwrap();
         let nested_raw = fetch_text(
             "https://raw.githubusercontent.com/anthropics/skills/HEAD/skills/docx/SKILL.md",
+            false,
         )
         .await
         .unwrap();
@@ -1904,9 +1949,12 @@ mod tests {
         // of failing — the 404 fallback this item adds.
         let moved =
             "https://raw.githubusercontent.com/rootkiller6788/mathmodel-skill/HEAD/nope/SKILL.md";
-        assert!(fetch_text(moved).await.is_err(), "the path must 404 for this to prove anything");
+        assert!(
+            fetch_text(moved, false).await.is_err(),
+            "the path must 404 for this to prove anything"
+        );
         assert_eq!(
-            fetch_skill_hash(moved, "mathmodel-skill").await.unwrap(),
+            fetch_skill_hash(moved, "mathmodel-skill", false).await.unwrap(),
             nested_hash_of_repo("rootkiller6788/mathmodel-skill", "mathmodel-skill").await
         );
     }
@@ -1914,7 +1962,7 @@ mod tests {
     /// The hash an install would record for a repo with no pinned path — the
     /// probe's answer after a raw URL 404s.
     async fn nested_hash_of_repo(repo: &str, name: &str) -> String {
-        let files = clone_bundle(repo, None, name).await.unwrap();
+        let files = clone_bundle(repo, None, name, false).await.unwrap();
         SkillBundle::new(files, String::new()).unwrap().hash()
     }
 

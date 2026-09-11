@@ -11,6 +11,7 @@ pub mod crash;
 pub mod diagnostics;
 pub mod download;
 pub mod environment;
+pub mod github;
 pub mod history;
 pub mod instance;
 pub mod jobs;

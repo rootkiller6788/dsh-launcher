@@ -42,6 +42,18 @@ pub fn skill_list(state: State<'_, AppState>, id: String) -> Result<Vec<SkillRec
     Ok(content_adapter::installed_skills(&instance))
 }
 
+/// The Install Center's gh-proxy relay toggle, read live so flipping it takes
+/// effect on the next skill op (a poisoned settings lock degrades to direct).
+/// Skills build their clone and raw-fetch URLs from it the same way the plugin
+/// path does, instead of always dialling github.com first.
+fn github_mirror(state: &AppState) -> bool {
+    state
+        .settings
+        .lock()
+        .map(|s| s.github_mirror)
+        .unwrap_or(false)
+}
+
 /// Install a skill by enqueueing a backend install job (Stage 8): the command
 /// shell writes a `waiting` row and returns immediately; the executor runs the
 /// real body and streams `job-updated` events.
@@ -78,7 +90,7 @@ pub(crate) async fn skill_install_job(
     let skill = content_adapter::skill_id(entry);
     emit_log(app, &format!("{id} · installing skill {skill}…"));
     ctx.progress("download", 30);
-    let record = content_adapter::install_skill(&instance, entry).await?;
+    let record = content_adapter::install_skill(&instance, entry, github_mirror(state)).await?;
     ctx.progress("recording", 65);
     let record = SkillRecord {
         installed: now_millis(),
@@ -215,11 +227,15 @@ pub async fn skill_updates(
                 source,
             ));
         }
-        // Phase 2 — concurrent upstream probes.
+        // Phase 2 — concurrent upstream probes. The relay choice is read once
+        // for the batch: it is a transport preference, and re-reading it per
+        // skill would let a mid-run toggle split one check across two transports.
+        let mirror = github_mirror(state.inner());
         let mut workers = tokio::task::JoinSet::new();
         for (probe, source) in probes {
             workers.spawn(async move {
-                let fetched = content_adapter::fetch_skill_hash(&source, &probe.name).await;
+                let fetched =
+                    content_adapter::fetch_skill_hash(&source, &probe.name, mirror).await;
                 (probe.id, probe.current, fetched)
             });
         }
@@ -318,7 +334,9 @@ pub(crate) async fn skill_update_job(
     } else {
         record.hash.clone()
     };
-    if let Some(updated) = content_adapter::update_skill(&instance, entry, &current_hash).await? {
+    if let Some(updated) =
+        content_adapter::update_skill(&instance, entry, &current_hash, github_mirror(state)).await?
+    {
         ctx.progress("recording", 70);
         let updated = SkillRecord {
             installed: now_millis(),
@@ -1361,7 +1379,8 @@ pub(crate) async fn install_bundle_item(
             if let Some(ctx) = ctx {
                 ctx.progress("download", 30);
             }
-            let record = content_adapter::install_skill(instance, item).await?;
+            let record =
+                content_adapter::install_skill(instance, item, github_mirror(state)).await?;
             if let Some(ctx) = ctx {
                 ctx.progress("recording", 65);
             }

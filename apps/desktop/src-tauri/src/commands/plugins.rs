@@ -883,15 +883,6 @@ fn github_root_package_name(entry: &RegistryPlugin) -> Option<String> {
 /// and MCP keep their own shorter timeouts.
 const GITHUB_CACHE_TIMEOUT: Duration = Duration::from_secs(900);
 
-/// Reverse-proxy prefix for GitHub fetches when the Install Center mirror
-/// toggle (`settings.github_mirror`) is on. gh-proxy relays git smart-HTTP, so
-/// switching is purely a URL rewrite — depth, checkout, and the broken-cache
-/// handling below are identical either way. Default off: the repo bytes only
-/// pass through this third party when the user explicitly flips the toggle,
-/// which is the fix for multi-MB skin repos that cannot complete a direct clone
-/// on a throttled China→github link even at `GITHUB_CACHE_TIMEOUT`.
-const GITHUB_MIRROR_BASE: &str = "https://gh-proxy.com/";
-
 async fn run_git(args: &[String], cwd: Option<&Path>) -> Result<(), AppError> {
     // Collect streamed lines so a non-zero exit can surface the real git error
     // detail, as before. The shared timed runner enforces GIT_TIMEOUT and kills
@@ -1006,13 +997,21 @@ fn clone_cache_broken(cache_dir: &Path) -> bool {
 }
 
 /// The git URL a `github:` plugin spec clones/fetches from. Mirror ON rewrites
-/// the upstream URL through the gh-proxy relay (see `GITHUB_MIRROR_BASE`); OFF
+/// the upstream URL through the gh-proxy relay (`launcher_core::github`); OFF
 /// is the plain upstream. Transport only — every downstream step (shallow
 /// clone, checkout, broken-cache wipe) is shared.
+/// The clone URL for a GitHub plugin/skin, relayed through gh-proxy when the
+/// Install Center toggle is on. Switching is purely a URL rewrite — depth,
+/// checkout, and the broken-cache handling below are identical either way, and
+/// the relay prefix itself lives in launcher-core so this path and the skill
+/// path rewrite through the same host. Default off: repo bytes only pass
+/// through the third party when the user flips the toggle, which is the fix for
+/// multi-MB skin repos that cannot finish a direct clone on a throttled
+/// China→github link even at `GITHUB_CACHE_TIMEOUT`.
 fn github_remote_url(owner: &str, repo: &str, mirror: bool) -> String {
     let direct = format!("https://github.com/{owner}/{repo}.git");
     if mirror {
-        format!("{GITHUB_MIRROR_BASE}{direct}")
+        launcher_core::github::mirror_url(&direct)
     } else {
         direct
     }
