@@ -27,6 +27,7 @@ import {
   skillId,
   skillIdDelta,
 } from './lib/skills.mjs'
+import { stdioFlagGap, withStdioFlag } from './lib/mcp-stdio.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '..')
@@ -331,6 +332,14 @@ function genMcps() {
     stampNote = ' (no mcp-resolved.json — un-stamped)'
   }
 
+  // One place decides the app-server flag, after stamping, so the base record
+  // and the resolver's launch args can never disagree about it.
+  for (const m of mcps) {
+    m.args = withStdioFlag(m.args)
+    if (m.mcpInstall?.launch) m.mcpInstall.launch.args = withStdioFlag(m.mcpInstall.launch.args)
+  }
+  const stdioGaps = mcps.map(stdioFlagGap).filter(Boolean)
+
   const out = {
     updated: stampNote ? new Date().toISOString().slice(0, 10) : '',
     count: mcps.length,
@@ -340,9 +349,13 @@ function genMcps() {
   mkdirSync(dataDir, { recursive: true })
   writeFileSync(resolve(dataDir, 'content-mcps.json'), JSON.stringify(out, null, 2))
   const cov = mcpCoverage(mcps)
+  const gapNote = stdioGaps.length
+    ? `\n  !! ${stdioGaps.length} app server(s) carry no --stdio and are not in STDIO_APP_SERVERS` +
+      ` — they will boot HTTP and never answer a stdio probe: ${stdioGaps.join(', ')}`
+    : ''
   console.log(
     `content-mcps.json: ${cov.total} MCP servers in ${Object.keys(categories).length} categories, ` +
-      `${cov.withPlan} with mcpInstall${stampNote}`,
+      `${cov.withPlan} with mcpInstall${stampNote}${gapNote}`,
   )
 }
 
