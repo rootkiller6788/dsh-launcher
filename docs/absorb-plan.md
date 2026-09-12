@@ -154,7 +154,7 @@
 
 | 机制 | 价值 | AHL 现状 → 移植方式 |
 |---|---|---|
-| **健康检查项集合**<br>约 13 项分 6 组：运行时环境（node/pnpm/dsh 版本、磁盘）/ Home（存在可写、凭据权限位、YAML 可解析）/ Profile（bundle 声明 vs 实装一致性）/ 运行态（端口）/ 数据文件（会话日志总量）/ 管理器（最近备份）。每项输出 `status + detail + fixHint + 可选 repair 动作` | ★★★★★ | `diagnostics.rs` **仅 `check_tool`** → 清单直接搬。全部只读、风险极低。`fixHint → repair 动作`的关联设计要一起搬——诊断必须能导向修复 |
+| **健康检查项集合**<br>约 13 项分 6 组：运行时环境（node/pnpm/dsh 版本、磁盘）/ Home（存在可写、凭据权限位、YAML 可解析）/ Profile（bundle 声明 vs 实装一致性）/ 运行态（端口）/ 数据文件（会话日志总量）/ 管理器（最近备份）。每项输出 `status + detail + fixHint + 可选 repair 动作` | ★★★★★ | `diagnostics.rs` **仅 `check_tool`** → **2026-09-12 已落地为 5 组 11 项**（`health.rs`）。⚠️ **清单不能直接搬**：磁盘 / 权限位 / clean-cache / repair-session-log 四项经逐项核对是桩或坏实现，已弃用，详见 Phase 2 实施记录。`fixHint → repair` 的关联设计搬了，但只导向 AHL 已有的命令 |
 | **修复动作库**<br>6 个：`fix-permissions`（只收紧不放开）/ `restore-yaml-from-bak` / `pnpm-install-profile` / `repair-session-log`（截断到最后一个完整 zstd 帧）/ `clean-cache` / `add-allowbuilds` | ★★★★★ | 无 → 每个动作统一"确认 → 快照 → 执行 → 报告"。**`add-allowbuilds` 对 AHL 尤其重要**——pnpm ≥10 拦构建会同时打击 AHL 现有的 MCP / skill 安装路径 |
 | **备份与恢复**<br>全量 cp + `manifest.json`；`restorePreview` dry-run 给 toAdd/toOverwrite/toDelete/unchanged；恢复前把现状移入 `restore-trash/<ts>`；保留策略 | ★★★★★ | 无 → 全量搬运。默认排除 `.credentials.yaml` / `.env` / `node_modules` / `cache` |
 | **系统服务化**<br>launchd LaunchAgent（`KeepAlive=true`）/ systemd user unit（`Restart=always`）/ Windows 启动文件夹，**独立于管理器进程** | ★★★★ | 无 → 让实例在管理器关闭后继续常驻 |
@@ -223,7 +223,7 @@
 | 2.1 | 崩溃诊断规则引擎（搬 13 类规则表，每条标注对应的真实 issue） | `3/zat` |
 | 2.2 | 救援点快照 / 还原（关键 profile 文件 + 时间戳目录） | `3/zat` |
 | 2.3 | 三级恢复阶梯（L1 对症 / L2 完整恢复 / L3 工厂重置）—— 与 1.6 的安全模式**合并为一条阶梯** | `3/zat` + `1/` |
-| 2.4 | 健康检查项集合（6 组约 13 项，只读，输出 `status + detail + fixHint + repair`） | `dsh-manager` |
+| 2.4 | 健康检查项集合（**已落地为 5 组 11 项**，只读，输出 `status + detail + fixes[]`） | `dsh-manager` |
 | 2.5 | 修复动作库（6 个，统一"确认 → 快照 → 执行 → 报告"） | `dsh-manager` |
 | 2.6 | 诊断包导出（脱敏 zip：env / errors / log） | `1/` |
 
@@ -276,6 +276,48 @@
   下一次启动就生效**，不必重启启动器。
 - 测试：`crash.rs` 新增 13 项（合取有序性、三种 capture、内建优先、兜底让位、去重、
   空 `contains` 拒收、两种文档形态、坏条目跳过、文件缺失）。
+
+**2.4 已落地**（`57aed39` 后端 + `03a3081` UI）：从"坏了能自救"往前推一步——**在坏掉之前
+就看得见**。检查项在 `crates/dsh-adapter/src/health.rs`，命令是 `instance_health`，
+UI 是 `apps/desktop/src/components/HealthPanel.tsx`（挂在 Overview 上）。
+
+**清单砍到 11 项 / 5 组**（`runtime` / `profile` / `plugins` / `mcp` / `rescue`），不是计划里
+写的"6 组约 13 项"。原因是逐项核对 dsh-manager 那份清单后发现**它自己就不成立**：
+
+| dsh-manager 的项 | 处置 | 理由 |
+|---|---|---|
+| `disk-space` | 弃 | 源码里是硬编码 `'info'` 的桩，**从不真的量磁盘**；AHL 的 `dsh-adapter` 也没有 sysinfo / fs2 依赖，同样量不了——照搬等于搬来一个永远说"健康"的检查 |
+| `fix-permissions`（凭据权限位） | 弃 | 实现在 win32 上直接失败返回；AHL 是 Windows-first，落地即是死代码 |
+| `clean-cache` | 弃 | 其目录备份调用抛 `EISDIR` 且被吞掉，导致后面的 `rmSync` **永远不执行**——看着成功，实际没清 |
+| `repair-session-log` | 弃 | 函数定义了但从未接线，是 §1 记录的"文档/实现落差"的又一例 |
+| 端口 / 会话日志总量 / 最近备份 | 未做 | 与 AHL 已有的 Rescue 面板、Activity 面板信息重叠；重复展示只会让两个面板就同一件事给出不同答案 |
+
+**新增的 `mcp` 组是 AHL 自己的**，dsh-manager 没有对应项：MCP 记录只检查启动形态
+（`command` / `args` 是否成形）与"声明了但没赋值的环境变量"——**只读键名，从不读值**，
+免得把密钥从健康报告这个出口带出去。
+
+**三条纪律**：
+
+1. **一项检查 = 一次真实测量。** 上表弃掉的四项全是这条的产物——没有测量能力的检查不写。
+2. **只读，每次重测。** `health_report` 每次都重新测量，`HealthReport` 不缓存，
+   `worst` / `has_at_least` 是对当次 `checks` 的现算，不存在"上次说是好的"。
+3. **fix 只导向已存在的命令。** 计划里 6 个修复动作中其余几个（`install-deps` /
+   `reinstall` / `rebuild-source`）在 AHL 没有对应命令——AHL 只有 `dsh plugin add/remove/update`，
+   没有"重装 profile 依赖"这种通用入口——所以**有检查无按钮**，而不是给一个按不动的按钮。
+   这与 `BootRecovery` 里 `ACTIONABLE` 的取舍同源（2.5 落地后才补得上）。
+
+**刻意不给 fix 的一项**：`bundles-resolved` 失败（声明的 bundle 在磁盘上不存在）时**不提供
+"停用它"**。bundle 都不在磁盘上，`cordis.patch.yml` 里未必有它的行可停——真去停可能改动
+一份本就没坏的配置；恢复救援点也带不回包文件。UI 因此只陈述，不动手。
+
+**复用而非另写读取器**：`profile` 与 `plugins` 两组复用 `diagnose_profile` 与
+`skin_has_bundle` / `package_mounts_client` / `entry_artifact_exists`，`rescue` 组复用
+`snapshot_status`。**同一份事实不能有两个读取器**，否则健康面板会和旁边的 Diagnostics 面板
+就同一件事给出不同答案。
+
+**顺带修掉一个反向条件**：`BootRecovery.tsx` 原先把 `restore` 从"运行中禁用"里豁免了，但
+`rescue_restore` 和 `plugin_toggle` 一样走 `ensure_not_running`——跑着恢复会被后端拒绝。
+后端行为没变，只是按钮现在提前说明，而不是点下去才报错。
 
 
 ### Phase 3 — 数据与常驻（用户资产保障）
