@@ -15,6 +15,7 @@ import type {
   LibraryInventoryDetail,
   LibraryInventorySummary,
   Lang,
+  LaunchDiagnosis,
   LaunchSession,
   LogLine,
   McpRuntimeState,
@@ -28,6 +29,7 @@ import type {
   RecommendResult,
   Registry,
   RegistryPlugin,
+  RescueStatus,
   ShellMode,
   SkillRecord,
   SkillUpdate,
@@ -110,6 +112,14 @@ interface AppStore {
   updates: PluginUpdate[]
   skillUpdates: SkillUpdate[]
   diagnostics: DiagnosticsReport | null
+  /**
+   * The last failed boot, diagnosed from its log (Phase 2.1). Null until a boot
+   * actually crashes or goes degraded; cleared when a new launch starts, so a
+   * stale cause is never shown against a fresh attempt.
+   */
+  launchDiagnosis: LaunchDiagnosis | null
+  /** This instance's rescue point (Phase 2.2) — the state "restore" goes back to. */
+  rescue: RescueStatus | null
   busy: boolean
   error: string | null
   /** Stable error code from the backend (e.g. `E2001`), when present. */
@@ -198,6 +208,14 @@ interface AppStore {
   refreshSkillUpdates: () => Promise<void>
   updateSkill: (id: string) => Promise<boolean>
   refreshDiagnostics: () => Promise<void>
+  /** Read this instance's rescue point (advisory; never fails loudly). */
+  refreshRescue: () => Promise<void>
+  /** Mark the current profile files as the state to restore to. */
+  createRescue: () => Promise<void>
+  /** Restore the profile files from the rescue point; the instance must be stopped. */
+  restoreRescue: () => Promise<void>
+  /** Dismiss the diagnosed failure without restoring. */
+  clearLaunchDiagnosis: () => void
 }
 
 export const useAppStore = create<AppStore>((set, get) => ({
@@ -236,6 +254,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   updates: [],
   skillUpdates: [],
   diagnostics: null,
+  launchDiagnosis: null,
+  rescue: null,
   busy: false,
   error: null,
   errorCode: null,
@@ -344,6 +364,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
         processState: event.payload,
         dshUrl: matchesStopped(event.payload.status) ? null : state.dshUrl,
       }))
+    }).catch(() => {})
+    // A boot that went wrong, diagnosed against its own log. Kept on state (not
+    // just toasted) so the Overview can pair it with the restore that fixes it.
+    listen<LaunchDiagnosis>('launch-diagnosis', (event) => {
+      if (event.payload.instanceId !== get().activeId) return
+      set({ launchDiagnosis: event.payload })
+      void get().refreshRescue()
     }).catch(() => {})
     listen('usage-recorded', () => {
       const state = get()
@@ -774,7 +801,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   launch: async (id) => {
-    set({ busy: true, error: null, launchStartedAt: Date.now() })
+    // A fresh attempt invalidates the previous failure's diagnosis and the
+    // rescue point it was paired with; both are rebuilt by this launch.
+    set({
+      busy: true,
+      error: null,
+      launchStartedAt: Date.now(),
+      launchDiagnosis: null,
+    })
     try {
       const processState = await ipc.launch(id)
       const dshUrl = await ipc.currentDshUrl().catch(() => get().dshUrl)
@@ -1290,4 +1324,45 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set({ diagnostics: null })
     }
   },
+
+  refreshRescue: async () => {
+    const id = get().activeId
+    if (!id) {
+      set({ rescue: null })
+      return
+    }
+    try {
+      set({ rescue: await ipc.rescueStatus(id) })
+    } catch {
+      // Read-only and advisory, like diagnostics: never a red banner.
+      set({ rescue: null })
+    }
+  },
+
+  createRescue: async () => {
+    const id = get().activeId
+    if (!id) return
+    try {
+      set({ rescue: await ipc.rescueCreate(id) })
+    } catch (e) {
+      get().fail(e)
+    }
+  },
+
+  restoreRescue: async () => {
+    const id = get().activeId
+    if (!id) return
+    try {
+      const rescue = await ipc.rescueRestore(id)
+      // The profile on disk changed under the diagnosis that prompted this, so
+      // drop it — otherwise the panel keeps recommending a fix already applied.
+      set({ rescue, launchDiagnosis: null })
+      await get().refreshDiagnostics()
+      await get().refreshInstalledPlugins()
+    } catch (e) {
+      get().fail(e)
+    }
+  },
+
+  clearLaunchDiagnosis: () => set({ launchDiagnosis: null }),
 }))

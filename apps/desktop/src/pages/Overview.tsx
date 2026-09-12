@@ -23,6 +23,7 @@ import { useAppStore } from '../stores/appStore'
 import { formatDuration, fmtTokens } from '../lib/format'
 import { useT } from '../lib/i18n'
 import { StatusDot } from '../components/StatusDot'
+import { BootRecovery } from '../components/BootRecovery'
 import type { LaunchSession, SystemStats, UsageSummary } from '../lib/types'
 
 function fmtGB(bytes: number): string {
@@ -341,6 +342,7 @@ export function Overview() {
   const refreshSystem = useAppStore((s) => s.refreshSystem)
   const refreshState = useAppStore((s) => s.refreshState)
   const refreshDiagnostics = useAppStore((s) => s.refreshDiagnostics)
+  const refreshRescue = useAppStore((s) => s.refreshRescue)
   const clearLogs = useAppStore((s) => s.clearLogs)
 
   const status = processState?.status ?? 'stopped'
@@ -431,6 +433,7 @@ export function Overview() {
       await refreshSystem()
       await refreshState()
       await refreshDiagnostics()
+      await refreshRescue()
     })()
   }
 
@@ -446,6 +449,8 @@ export function Overview() {
           <span className="capitalize">{t(`status.${status}`)}</span>
         </div>
       </div>
+
+      <BootRecovery running={running} />
 
       <div className="grid min-h-0 flex-1 auto-rows-min grid-cols-1 gap-5 md:grid-cols-2 dense:auto-rows-auto dense:grid-cols-12 dense:grid-rows-[minmax(0,1.08fr)_minmax(0,0.92fr)]">
         <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900/60 md:col-span-2 dense:col-span-8">

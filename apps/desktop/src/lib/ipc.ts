@@ -27,6 +27,7 @@ import type {
   RecommendResult,
   Registry,
   RegistryPlugin,
+  RescueStatus,
   RuntimeEntry,
   RuntimeManagerView,
   SystemInfo,
@@ -120,6 +121,13 @@ export const ipc = {
   pluginUpdates: (id: string) => call<PluginUpdate[]>('plugin_updates', { id }),
   pluginUpdate: (id: string, name: string) => call<Job>('plugin_update', { id, name }),
   profileDiagnostics: (id: string) => call<DiagnosticsReport>('profile_diagnostics', { id }),
+
+  /** Whether a rescue point exists for this instance, and what it holds. */
+  rescueStatus: (id: string) => call<RescueStatus>('rescue_status', { id }),
+  /** Mark the current profile files as the state to restore to. */
+  rescueCreate: (id: string) => call<RescueStatus>('rescue_create', { id }),
+  /** Restore the profile files from the rescue point (instance must be stopped). */
+  rescueRestore: (id: string) => call<RescueStatus>('rescue_restore', { id }),
 
   skillList: (id: string) => call<SkillRecord[]>('skill_list', { id }),
   skillInstall: (id: string, entry: RegistryPlugin) =>

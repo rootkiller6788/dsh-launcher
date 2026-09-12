@@ -579,3 +579,58 @@ export interface DiagnosticsReport {
   orderViolations: OrderViolation[]
   suggestedOrder: string[]
 }
+
+/** An instance's rescue point: the pre-change copy of its profile files. */
+export interface RescueStatus {
+  exists: boolean
+  /** Epoch millis the point was taken; 0 when it does not exist. */
+  at: number
+  /** Rescue file names captured (e.g. `package.json`). */
+  files: string[]
+}
+
+/**
+ * A crash class the boot log can be diagnosed as. Mirrors the Rust `CrashKind`
+ * kebab-case tokens; the UI maps each to localized copy.
+ */
+export type CrashKind =
+  | 'missing-bundle'
+  | 'plugin-failed'
+  | 'bad-profile'
+  | 'source-deps'
+  | 'missing-module'
+  | 'native-deps'
+  | 'client-module-missing'
+  | 'bundle-mismatch'
+  | 'source-mixed'
+  | 'duplicate-plugin'
+  | 'tool-missing'
+  | 'cli-arg'
+  | 'cli-error'
+
+/** The repair a diagnosis recommends. */
+export type FixAction =
+  | 'exclude-bundle'
+  | 'restore'
+  | 'install-deps'
+  | 'reinstall'
+  | 'rebuild-source'
+  | 'restart'
+
+/** One diagnosed cause of a failed boot. */
+export interface CrashIssue {
+  kind: CrashKind
+  /** The offending plugin / dependency / flag, when the failure names one. */
+  plugin: string
+  /** English message from the backend rule table. */
+  message: string
+  fix: FixAction
+}
+
+/** Emitted on the `launch-diagnosis` event when a boot fails. */
+export interface LaunchDiagnosis {
+  instanceId: string
+  /** `crashed` (child died) or `degraded` (silent but still alive). */
+  stage: 'crashed' | 'degraded'
+  issues: CrashIssue[]
+}
