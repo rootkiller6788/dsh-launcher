@@ -10,6 +10,9 @@ import type {
   CrashIssue,
   DiagnosticsReport,
   EnvironmentExportResult,
+  HealthCheck,
+  HealthFix,
+  HealthReport,
   InstanceManifest,
   InstalledPlugin,
   Job,
@@ -121,6 +124,11 @@ interface AppStore {
   launchDiagnosis: LaunchDiagnosis | null
   /** This instance's rescue point (Phase 2.2) — the state "restore" goes back to. */
   rescue: RescueStatus | null
+  /**
+   * The instance measured right now (Phase 2.4) — what is wrong *before* it
+   * becomes a crash. Read-only; re-measured after every fix and every boot.
+   */
+  health: HealthReport | null
   busy: boolean
   error: string | null
   /** Stable error code from the backend (e.g. `E2001`), when present. */
@@ -222,6 +230,10 @@ interface AppStore {
    * launcher-side action; the rest are copy-only until Phase 2.5 exists.
    */
   applyCrashFix: (issue: CrashIssue) => Promise<void>
+  /** Re-measure the instance's health (advisory; never fails loudly). */
+  refreshHealth: () => Promise<void>
+  /** Carry out a health check's recommended fix, then re-measure. */
+  applyHealthFix: (check: HealthCheck, fix: HealthFix) => Promise<void>
 }
 
 export const useAppStore = create<AppStore>((set, get) => ({
@@ -262,6 +274,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   diagnostics: null,
   launchDiagnosis: null,
   rescue: null,
+  health: null,
   busy: false,
   error: null,
   errorCode: null,
@@ -377,6 +390,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
       if (event.payload.instanceId !== get().activeId) return
       set({ launchDiagnosis: event.payload })
       void get().refreshRescue()
+      // A crash is also the moment the health report is most worth re-reading:
+      // the checks describe the state the boot just failed against.
+      void get().refreshHealth()
     }).catch(() => {})
     listen('usage-recorded', () => {
       const state = get()
@@ -1397,6 +1413,54 @@ export const useAppStore = create<AppStore>((set, get) => ({
           return
       }
       set({ launchDiagnosis: null })
+      await get().refreshDiagnostics()
+      await get().refreshInstalledPlugins()
+    } catch (e) {
+      get().fail(e)
+    }
+  },
+
+  refreshHealth: async () => {
+    const id = get().activeId
+    if (!id) {
+      set({ health: null })
+      return
+    }
+    try {
+      set({ health: await ipc.instanceHealth(id) })
+    } catch {
+      // Read-only and advisory, like diagnostics and rescue: a failed health
+      // read is not itself an error worth a banner.
+      set({ health: null })
+    }
+  },
+
+  applyHealthFix: async (check, fix) => {
+    const id = get().activeId
+    if (!id) return
+    try {
+      switch (fix) {
+        // The one fix that acts on names rather than the profile as a whole: a
+        // client bundle that cannot be imported gets disabled, which is what the
+        // pre-boot quarantine does — the instance then boots with that bundle
+        // off instead of dying on its missing entry.
+        case 'exclude-bundle': {
+          if (check.targets.length === 0) return
+          for (const target of check.targets) {
+            await ipc.pluginToggle(id, target, false)
+          }
+          break
+        }
+        case 'restore-rescue':
+          await get().restoreRescue()
+          break
+        case 'create-rescue':
+          await get().createRescue()
+          break
+      }
+      // Every fix changes what the checks measure, so re-measure rather than
+      // patching the finding away — the next report is the honest answer.
+      await get().refreshHealth()
       await get().refreshDiagnostics()
       await get().refreshInstalledPlugins()
     } catch (e) {

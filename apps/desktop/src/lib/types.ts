@@ -634,3 +634,34 @@ export interface LaunchDiagnosis {
   stage: 'crashed' | 'degraded'
   issues: CrashIssue[]
 }
+
+/** How bad a health check's finding is. */
+export type HealthStatus = 'ok' | 'warn' | 'fail'
+
+/** Which part of the instance a health check looks at. */
+export type HealthGroup = 'runtime' | 'profile' | 'plugins' | 'mcp' | 'rescue'
+
+/**
+ * A repair the launcher can carry out itself. Each maps to a command that
+ * already exists, so a fix button can never do more than that command could.
+ */
+export type HealthFix = 'restore-rescue' | 'create-rescue' | 'exclude-bundle'
+
+/** One measured finding about an instance. */
+export interface HealthCheck {
+  /** Stable token the UI localizes (`bundles-loadable`). */
+  id: string
+  group: HealthGroup
+  status: HealthStatus
+  /** What was measured, specifically — names, counts, paths. */
+  detail: string
+  /** Repairs that apply, in the order to try them. */
+  fixes: HealthFix[]
+  /** The names a fix acts on (plugin / bundle names). */
+  targets: string[]
+}
+
+export interface HealthReport {
+  checks: HealthCheck[]
+  worst: HealthStatus
+}

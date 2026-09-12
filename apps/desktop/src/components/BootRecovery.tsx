@@ -87,8 +87,11 @@ export function BootRecovery({ running }: { running: boolean }) {
                     {ACTIONABLE.includes(issue.fix) && (
                       <button
                         onClick={() => void onApply(issue)}
-                        disabled={applying || (issue.fix !== 'restore' && running)}
-                        title={running && issue.fix !== 'restore' ? t('rescue.stopFirst') : undefined}
+                        // Every fix here writes files a live harness owns (a
+                        // toggle, a restore) or re-launches it, and the backend
+                        // refuses the writes while it runs — so does this.
+                        disabled={applying || running}
+                        title={running ? t('rescue.stopFirst') : undefined}
                         className="shrink-0 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-200 transition-colors hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-transparent disabled:text-zinc-600"
                       >
                         {t(`crash.apply.${FIX_KEYS[issue.fix]}`)}

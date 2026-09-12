@@ -6,6 +6,7 @@ import type {
   DiagnosticsReport,
   EnvironmentExportResult,
   EnvironmentPreviewResult,
+  HealthReport,
   InstanceManifest,
   InstalledPlugin,
   Job,
@@ -121,6 +122,8 @@ export const ipc = {
   pluginUpdates: (id: string) => call<PluginUpdate[]>('plugin_updates', { id }),
   pluginUpdate: (id: string, name: string) => call<Job>('plugin_update', { id, name }),
   profileDiagnostics: (id: string) => call<DiagnosticsReport>('profile_diagnostics', { id }),
+  /** Read-only health measurement: what is wrong right now, before it crashes. */
+  instanceHealth: (id: string) => call<HealthReport>('instance_health', { id }),
 
   /** Whether a rescue point exists for this instance, and what it holds. */
   rescueStatus: (id: string) => call<RescueStatus>('rescue_status', { id }),
