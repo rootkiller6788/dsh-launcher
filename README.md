@@ -92,8 +92,7 @@ dsh-launcher/
 │   ├── launcher-core/          框架无关核心：paths/settings/instance/provider/process/runtime/market/mcp
 │   └── dsh-adapter/            DSH 专用适配器（RuntimeAdapter 实现）：runtimes/theme/mcp probe/import/resolver
 ├── tui/                        dsh-tauri 参考镜像（内嵌窗口机制）
-├── scripts/                    开发辅助（图标生成、目录生成、解析器）
-└── docs/                       文档
+└── scripts/                    开发辅助（图标生成、目录生成、解析器）
 ```
 
 **语言边界（有意为之）：** TypeScript 负责 UI；Rust 负责系统（进程、文件系统、网络、密钥、SQLite）。所有系统动作经类型化 Tauri IPC —— 见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
