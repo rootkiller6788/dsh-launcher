@@ -149,3 +149,18 @@
 | **删除安全规划**<br>`planTerminalDeletion`：保护 `~/.dsh`、主目录一级、盘根、其他实例的共享/嵌套路径 | ★★★ | 有 `sanitize_mcp_segment`，删除保护待核 → 删除前先算"删除根范围"，返回 blocked / roots 结构 |
 | ~~copy 模式物理隔离~~ | — | ⚠️ **不吸收**，见 §3 |
 | ~~隐藏控制台~~ | — | 已有 `CREATE_NO_WINDOW`（`process.rs:649-659`） |
+
+### 2.5 从 `dsh-manager`（SherlockGougou，Electron+React+TS）吸收 —— 痛点：**机器级运维缺位**
+
+| 机制 | 价值 | AHL 现状 → 移植方式 |
+|---|---|---|
+| **健康检查项集合**<br>约 13 项分 6 组：运行时环境（node/pnpm/dsh 版本、磁盘）/ Home（存在可写、凭据权限位、YAML 可解析）/ Profile（bundle 声明 vs 实装一致性）/ 运行态（端口）/ 数据文件（会话日志总量）/ 管理器（最近备份）。每项输出 `status + detail + fixHint + 可选 repair 动作` | ★★★★★ | `diagnostics.rs` **仅 `check_tool`** → 清单直接搬。全部只读、风险极低。`fixHint → repair 动作`的关联设计要一起搬——诊断必须能导向修复 |
+| **修复动作库**<br>6 个：`fix-permissions`（只收紧不放开）/ `restore-yaml-from-bak` / `pnpm-install-profile` / `repair-session-log`（截断到最后一个完整 zstd 帧）/ `clean-cache` / `add-allowbuilds` | ★★★★★ | 无 → 每个动作统一"确认 → 快照 → 执行 → 报告"。**`add-allowbuilds` 对 AHL 尤其重要**——pnpm ≥10 拦构建会同时打击 AHL 现有的 MCP / skill 安装路径 |
+| **备份与恢复**<br>全量 cp + `manifest.json`；`restorePreview` dry-run 给 toAdd/toOverwrite/toDelete/unchanged；恢复前把现状移入 `restore-trash/<ts>`；保留策略 | ★★★★★ | 无 → 全量搬运。默认排除 `.credentials.yaml` / `.env` / `node_modules` / `cache` |
+| **系统服务化**<br>launchd LaunchAgent（`KeepAlive=true`）/ systemd user unit（`Restart=always`）/ Windows 启动文件夹，**独立于管理器进程** | ★★★★ | 无 → 让实例在管理器关闭后继续常驻 |
+| **配置编辑器安全栈**<br>凭据掩码 + 写前 `.bak-<ts>` + 同目录 tmp→rename 原子写（防 DSH 热重载读到半截）+ `dsh --profile X --patch tmp --dump-config` 全链路校验 + LCS diff | ★★★★ | 有编辑、无全链路校验 → 这条最关键：AHL 的目录清单是 `include_str!` 内嵌的，更需要"写进去之前先让 dsh 自己验一遍" |
+| **核心层冒烟关卡**<br>`core:smoke`：核心层不 import electron，用 tsx 直接驱动，CI 里以空 DSH_HOME 跑 | ★★★★ | 有 e2e、无此关卡 → AHL 的 `launcher-core` 天生框架无关（无 tauri 依赖），加这个关卡成本极低 |
+| **日志轮转**<br>实例日志采集 + 轮转 | ★★★ | **无**（`rotate` 命中全是 CSS/JS 噪声）→ AHL 的 Activity 日志与 `logs/launcher.log` 无上限增长。小改动，防磁盘被吃 |
+| **CI 三平台矩阵**<br>macos/windows/ubuntu + 签名公证按 secret 有无分支回退 + 空 home 场景 | ★★★★ | P2 未开工 → 借结构：`typecheck → core:smoke → build → 打包 → publish` |
+| **更新检查双渠道**<br>npm + PyPI 直连 registry | ★★★ | 有 MCP 侧的 uv pip，无工具自身更新检查 → 与 Phase 5 的自动更新合并做 |
+| ~~转发官方 `dsh plugin`~~ | — | 已在做（`dsh-adapter/src/lib.rs:605`），与它的"保留官方 reconcile 语义"一致 |
