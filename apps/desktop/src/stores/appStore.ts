@@ -8,6 +8,7 @@ import type {
   AppSettings,
   BundleManifest,
   CrashIssue,
+  DiagnosticsExportResult,
   DiagnosticsReport,
   EnvironmentExportResult,
   HealthCheck,
@@ -210,6 +211,8 @@ interface AppStore {
     serverNames?: string[]
   }) => Promise<Job | null>
   exportEnvironment: () => Promise<EnvironmentExportResult | null>
+  /** Write a redacted diagnostic package, carrying the Activity buffer with it. */
+  exportDiagnostics: () => Promise<DiagnosticsExportResult | null>
   importEnvironment: (path: string, name?: string | null) => Promise<Job | null>
   importEnvironmentPackage: (bytes: number[], name?: string | null) => Promise<Job | null>
   refreshUpdates: () => Promise<void>
@@ -1219,6 +1222,26 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set({ busy: true, error: null })
     try {
       return await ipc.environmentExport(id)
+    } catch (e) {
+      get().fail(e)
+      return null
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  exportDiagnostics: async () => {
+    const id = get().activeId
+    if (!id) return null
+    set({ busy: true, error: null })
+    try {
+      // Only warnings and errors travel: the package is about what went wrong,
+      // and the buffer holds 2000 lines of mostly-progress that would bloat the
+      // request for nothing.
+      const activity = get()
+        .logs.filter((l) => l.level === 'warn' || l.level === 'error')
+        .map((l) => ({ level: l.level ?? 'info', line: l.line }))
+      return await ipc.exportDiagnostics(id, activity)
     } catch (e) {
       get().fail(e)
       return null

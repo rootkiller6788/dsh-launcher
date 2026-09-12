@@ -3,6 +3,7 @@ import type {
   AppPathsInfo,
   AppSettings,
   BundleManifest,
+  DiagnosticsExportResult,
   DiagnosticsReport,
   EnvironmentExportResult,
   EnvironmentPreviewResult,
@@ -180,6 +181,12 @@ export const ipc = {
     call<Job>('environment_import', { path, name }),
   environmentImportPackage: (bytes: number[], name?: string | null) =>
     call<Job>('environment_import_package', { bytes, name }),
+  /**
+   * The Activity buffer travels with the request: the coded failures only ever
+   * existed in this view, so the backend cannot read them off disk.
+   */
+  exportDiagnostics: (id: string, activity: { level: string; line: string }[]) =>
+    call<DiagnosticsExportResult>('export_diagnostics', { id, activity }),
 
   getSettings: () => call<AppSettings>('get_settings'),
   setSettings: (settings: AppSettings) => call<AppSettings>('set_settings', { settings }),

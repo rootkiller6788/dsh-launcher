@@ -9,6 +9,7 @@ import {
   Send,
   ServerCog,
   ShieldCheck,
+  Stethoscope,
   Terminal,
 } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
@@ -94,12 +95,20 @@ export function Settings() {
   const refreshSystem = useAppStore((s) => s.refreshSystem)
   const refreshAppPaths = useAppStore((s) => s.refreshAppPaths)
   const exportEnvironment = useAppStore((s) => s.exportEnvironment)
+  const exportDiagnostics = useAppStore((s) => s.exportDiagnostics)
 
   const [dshPath, setDshPath] = useState('')
   const [telemetryEnabled, setTelemetryEnabled] = useState(false)
   const [telemetryEndpoint, setTelemetryEndpoint] = useState('')
   const [flash, setFlash] = useState<Flash>(null)
   const [exportedPath, setExportedPath] = useState<string | null>(null)
+  // Kept as its parts rather than a formatted string: the copy is localized, and
+  // formatting it here would freeze the language at export time.
+  const [diagnosticsPath, setDiagnosticsPath] = useState<{
+    path: string
+    entries: number
+    errors: number
+  } | null>(null)
 
   // The data root + edition flag is a one-shot read (cheap); it never changes
   // while the app runs, so load it once on mount.
@@ -138,6 +147,17 @@ export function Settings() {
     setExportedPath(null)
     const result = await exportEnvironment()
     if (result) setExportedPath(result.path)
+  }
+  const exportDiagnosticPackage = async () => {
+    setDiagnosticsPath(null)
+    const result = await exportDiagnostics()
+    if (result) {
+      setDiagnosticsPath({
+        path: result.path,
+        entries: result.entries,
+        errors: result.codedFailures,
+      })
+    }
   }
 
   return (
@@ -226,6 +246,45 @@ export function Settings() {
                   className="shrink-0 rounded-lg bg-blue-500 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-400 disabled:opacity-40"
                 >
                   {busy ? t('settings.rtBusy') : t('settings.exportEnvironment')}
+                </button>
+              </div>
+            </PreferenceCard>
+
+            <PreferenceCard
+              icon={Stethoscope}
+              title={t('settings.diagnosticsPackage')}
+              subtitle={t('settings.diagnosticsPackageHint')}
+            >
+              <div className="flex items-center justify-between gap-4 rounded-lg border border-zinc-800/70 bg-zinc-950/35 p-4">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 text-sm font-medium text-zinc-200">
+                    <ShieldCheck className="h-4 w-4 text-emerald-300" strokeWidth={1.75} />
+                    {t('settings.diagnosticsPackageTitle')}
+                  </div>
+                  <p className="mt-1 text-xs leading-5 text-zinc-500">
+                    {t('settings.diagnosticsPackageCopy')}
+                  </p>
+                  {diagnosticsPath && (
+                    <p className="mt-3 truncate font-mono text-[11px] text-emerald-400">
+                      {diagnosticsPath.errors > 0
+                        ? t('settings.exportedDiagnosticsErrors', {
+                            path: diagnosticsPath.path,
+                            n: diagnosticsPath.entries,
+                            c: diagnosticsPath.errors,
+                          })
+                        : t('settings.exportedDiagnostics', {
+                            path: diagnosticsPath.path,
+                            n: diagnosticsPath.entries,
+                          })}
+                    </p>
+                  )}
+                </div>
+                <button
+                  onClick={() => void exportDiagnosticPackage()}
+                  disabled={busy}
+                  className="shrink-0 rounded-lg bg-zinc-800 px-4 py-2 text-sm font-semibold text-zinc-100 hover:bg-zinc-700 disabled:opacity-40"
+                >
+                  {busy ? t('settings.rtBusy') : t('settings.exportDiagnostics')}
                 </button>
               </div>
             </PreferenceCard>

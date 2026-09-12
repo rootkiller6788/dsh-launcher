@@ -459,6 +459,14 @@ export interface EnvironmentExportResult {
   itemCount: number
 }
 
+export interface DiagnosticsExportResult {
+  path: string
+  bytes: number
+  entries: number
+  /** Distinct coded failures the summary found; 0 means the Activity lines had none. */
+  codedFailures: number
+}
+
 export interface EnvironmentPreviewItem {
   kind: ContentKind
   name: string
