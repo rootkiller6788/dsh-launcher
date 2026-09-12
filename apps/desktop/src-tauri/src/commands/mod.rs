@@ -1,6 +1,7 @@
 pub mod content;
 pub mod diagnostics;
 pub mod environment;
+pub mod health;
 pub mod history;
 pub mod instance;
 pub mod jobs;

@@ -37,6 +37,7 @@ pub mod content;
 pub mod crash;
 pub mod diagnostics;
 pub mod events;
+pub mod health;
 pub mod language;
 pub mod llm;
 pub mod mcp_import;

@@ -159,6 +159,7 @@ pub fn run() {
             commands::environment::environment_import,
             commands::environment::environment_import_package,
             commands::diagnostics::profile_diagnostics,
+            commands::health::instance_health,
             commands::rescue::rescue_status,
             commands::rescue::rescue_create,
             commands::rescue::rescue_restore,
