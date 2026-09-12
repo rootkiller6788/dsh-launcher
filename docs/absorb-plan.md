@@ -141,7 +141,7 @@
 |---|---|---|
 | **崩溃诊断规则引擎**<br>`rescue.js` 的 `diagnoseCrash`：13+ 类正则（missing-bundle / plugin-failed / bad-profile / missing-module / source-deps / native-deps / client-module-missing / bundle-mismatch / source-mixed / duplicate-plugin / tool-missing / cli-arg / cli-error），**每条映射真实的 GitHub issue 编号**（#880 / #1677 / #2130 / #2990 / #3263 / #2889） | ★★★★★ | 无 → **规则表直接搬**。本计划最值钱的一条。注意它"每条对应真实 issue"的做法——这是规则可信度的来源，不要写成拍脑袋的匹配 |
 | **救援点快照 / 还原**<br>`createRescueSnapshot`：快照 profile 的 `cordis.yml` / `cordis.patch.yml` / `package.json` / `pnpm-workspace.yaml` | ★★★★★ | 无 → 成本极低（4 个文件 + 时间戳目录），收益极高。应成为所有破坏性动作的**强制前置步骤** |
-| **三级恢复阶梯**<br>L1 对症 → L2 完整恢复 → L3 工厂重置（保留引擎注册） | ★★★★ | 无 → 与 `1/` 的安全模式**合并设计为一条阶梯**，不要做两套 |
+| **三级恢复阶梯**<br>L1 对症 → L2 完整恢复 → L3 工厂重置（保留引擎注册） | ★★★★ | **L1 / L2 已存在**（`BootRecovery.tsx` + `rescue_restore`）→ 与 `1/` 的安全模式合并为一条阶梯的设计不变，但 **L3 不做**：它替 DSH 重写 profile 且自动触发无确认，违反 §0 原则二，见 §3 与 Phase 2 实施记录 |
 | **会话日志实时逆解析**<br>`session-activity.js`：zstd 逐帧 + `fromByte` 回退 64KB 找帧魔数 `28 B5 2F FD`，流式碎片聚合（text-chunks / tool-call-chunks） | ★★★★ | 无 → Rust 侧有 zstd crate，比 JS 更好做。另可调 DSH 的 `/api/session.list` 拿权威标题 |
 | **CLI 参数兼容性探测**<br>`cli-probe.js`：启动前先探明这版 dsh 认不认某个 flag | ★★★★ | **零命中** → 与 §2.3 的 `--no-open` 字面量扫描合并成一套"启动前探明能力"的机制。AHL 会向 dsh 传 flag，传错就是启动失败 |
 | **token-401 页识别**<br>`terminal-supervisor.js` 的 `check()`：TCP → HTTP → cmdline → 归属四级递进，能识别"token 失效的 401 页"而不是当成健康页 | ★★★★ | 只等 URL 行 → 直接进 §2.1 的页面层自检签名表。这是"假就绪"最典型的形态 |
@@ -181,6 +181,7 @@
 | **PTY 内嵌终端**<br>`2/` 的 portable-pty + xterm | 旁路能力，与 DSH-first 边界冲突；AHL 已有 Activity 面板 |
 | **悬浮球 / 开屏动画 / 托盘三态灯** | 与 AHL「生态管理平台」的定位不符，那是消费级产品的语言 |
 | **直接改 `package.json` bundles 数组启停插件** | 违反 DSH-first 边界。`DSH-Launcher` 走过这条路，其 `repairProfile` 就是为修此而生 |
+| **L3 工厂重置**<br>`3/zat` 的 `factoryResetProfile` | **同上一条，是它的加强版**。它不只启停插件，而是**替 DSH 重写整个 profile 该长什么样**：`package.json` 的 `dsh.profile.bundles` 被改写成 `['@deepseek-ai/dsh-base','@deepseek-ai/dsh-web-app', …引擎]`，`cordis.yml` / `cordis.patch.yml` 被直接写成 `[]`——patch 里那些 `mcp-<name>` 行是 DSH 的实装事实，清空它 = 启动器单方面宣布"这些不存在"。**而且它是自动的、无确认的**：`main.js:1789` 在崩溃处理里直接 `tryLevel(currentLevel + 1)`，L1、L2 失败后的第三次崩溃就走到 L3，用户只看到一行日志；UI 里既没有入口也没有确认弹窗。公平地说，它**确实先备份** `RESCUE_FILES` 到 `factory-backups/<terminalId>/<ts>`；但 AHL 的 L2（`rescue_restore`）在要紧的那一维上更强——它还原的是**一次真的启动成功过的状态**，而不是当场发明一个。**决策（2026-09-12）：不做，只记录**，详见 Phase 2 实施记录 |
 | **未知来源的 MCP 安装命令** | AHL 已有的铁律不能松：LLM 只返回严格 JSON `{kind,entry,args,env}`，且 entry 走组件级路径校验（`resolve_inside`），超出即丢 |
 
 ---
@@ -276,6 +277,25 @@
   下一次启动就生效**，不必重启启动器。
 - 测试：`crash.rs` 新增 13 项（合取有序性、三种 capture、内建优先、兜底让位、去重、
   空 `contains` 拒收、两种文档形态、坏条目跳过、文件缺失）。
+
+**2.3 的处置：L1 / L2 已在，L3 不做**（2026-09-12）。先纠一处口径：计划里 2.3 写的是"无"，
+但 AHL 已有 `BootRecovery.tsx`（按诊断结论给出的对症动作，含"停用某 bundle"与"还原救援点"）
+与 `rescue_restore`——**L1 和 L2 缺的只是"自动升级"这层编排，不是能力**。
+
+L3（工厂重置）**决定不做**，理由是它撞 §0 原则二，且比 §3 里已有的那条更严重：
+
+- 它替 DSH 重写 profile 应该是什么样：`package.json` 的 `bundles` 改成两个官方 bundle， 
+  `cordis.yml` / `cordis.patch.yml` 写成 `[]`。patch 是 DSH 的实装事实（`mcp-<name>` 行就在
+  里面），清空它等于启动器单方面宣布这些不存在——正是 AHL 契约里不许做的事。
+- 它是**自动且无确认**的：崩溃处理里 L1、L2 失败后第三次崩溃直接进 L3，UI 无入口无确认。
+- 它确实先备份 `RESCUE_FILES`，所以"不可逆"不成立；但 AHL 的 L2 还原的是**一次真的启动
+  成功过的状态**，比当场发明一个更诚实。**这一维上 L2 已经强于 L3，所以 L3 不是"更强的
+  恢复手段"**——这是它不值得移植的根本原因，而不是"懒"。
+
+**2.3 仍未落地的是编排**：把 L1 → L2 的升级做成自动的，并按 2.4 的健康报告决定何时进入
+安全模式（1.6）。这条**卡在 1.6 上，而 1.6 卡在 1.4**（页面层自检）——1.4 又需要一次
+真机确认（token-401 页的状态码形态）。也就是说 2.3 的剩余部分不是本阶段能收的尾，
+现在收掉的是那个不该做的部分。
 
 **2.4 已落地**（`57aed39` 后端 + `03a3081` UI）：从"坏了能自救"往前推一步——**在坏掉之前
 就看得见**。检查项在 `crates/dsh-adapter/src/health.rs`，命令是 `instance_health`，
