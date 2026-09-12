@@ -10,6 +10,7 @@ pub mod paths;
 pub mod plugins;
 pub mod process;
 pub mod provider;
+pub mod rescue;
 pub mod runtimes;
 pub mod settings;
 pub mod system;

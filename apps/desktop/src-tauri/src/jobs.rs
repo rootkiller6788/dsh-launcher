@@ -402,6 +402,12 @@ async fn dispatch_plan(
     plan: JobPlan,
     ctx: &JobCtx,
 ) -> Result<(), AppError> {
+    // Every variant below mutates the instance's profile files, so this is the
+    // one place to secure a rescue point — dispatching here rather than in each
+    // `*_job` body means a new variant cannot be added without it. A failure to
+    // snapshot is logged, not fatal: an unrescuable install is still better than
+    // a blocked one, and the point is refreshed after the next good boot anyway.
+    crate::commands::rescue::reserve_rescue_point(state, app, instance_id);
     match plan {
         JobPlan::Market { entry } => {
             crate::commands::content::market_install_job(state, app, instance_id, &entry, ctx)

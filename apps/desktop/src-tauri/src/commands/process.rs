@@ -27,6 +27,10 @@ const SETTINGS_CHANGED_EVENT: &str = "dsh-settings-changed";
 /// Emitted whenever a proxied response yields a usage record. Shared with
 /// `usage_proxy`, and matched by the frontend listener in `appStore.ts`.
 pub(crate) const USAGE_EVENT: &str = "usage-recorded";
+/// A failed boot, diagnosed: payload is a [`LaunchDiagnosis`]. Emitted from the
+/// crash sink and the degraded-boot branch, the two places a boot is known to
+/// have gone wrong.
+pub(crate) const LAUNCH_DIAGNOSIS_EVENT: &str = "launch-diagnosis";
 
 /// Seconds between "still booting after Ns" progress hints while a launch sits
 /// on the slow path. The hint is visible in Activity so a long cold boot reads
@@ -177,6 +181,8 @@ async fn do_launch(
     // mutex) because the writer is a plain `Fn` sink and the reader holds the
     // guard for a single `Instant::elapsed()` with no `.await` in between.
     let last_output = Arc::new(std::sync::Mutex::new(Instant::now()));
+    // Kept for crash diagnosis if this boot fails (see `diagnose_and_emit`).
+    let tail = LogTail::default();
     let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let base_sink = make_usage_sink(
         app.clone(),
@@ -187,10 +193,12 @@ async fn do_launch(
     let on_log: LogSink = {
         let tx = url_tx.clone();
         let last_output = last_output.clone();
+        let tail = tail.clone();
         Arc::new(move |line: LogLine| {
             if let Ok(mut clock) = last_output.lock() {
                 *clock = Instant::now();
             }
+            tail.push(&line.line);
             base_sink(line.clone());
             if let Some(url) = parse_dsh_url(&line.line) {
                 let _ = tx.send(url);
@@ -200,8 +208,15 @@ async fn do_launch(
     let on_exit: ExitSink = {
         let app = app.clone();
         let id = id.clone();
+        let tail = tail.clone();
         Arc::new(move |process_state: ProcessState| {
             let _ = app.emit(PROCESS_STATE_EVENT, &process_state);
+            // A clean stop is a user action, not a failure — nothing to diagnose.
+            // Only a crash wants a reason, and this sink is the one place a crash
+            // is recognised, so the rule table runs here and nowhere else.
+            if process_state.status == ProcessStatus::Crashed {
+                diagnose_and_emit(&app, &id, "crashed", &tail);
+            }
             if !matches!(
                 process_state.status,
                 ProcessStatus::Crashed | ProcessStatus::Stopped
@@ -378,6 +393,7 @@ async fn do_launch(
             let pid = handle.pid;
             let usage_proxy_base_url = usage_proxy_base_url.clone();
             let last_output = last_output.clone();
+            let tail = tail.clone();
             // The slow path settles minutes later, so its total has to count from
             // the launch the user clicked, not from the URL landing.
             let boot_start = launch_start;
@@ -456,6 +472,12 @@ async fn do_launch(
                                         BOOT_SILENCE_SECS
                                     ),
                                 );
+                                // Silence this long is usually a boot that already
+                                // printed why it gave up. Run the rule table now
+                                // rather than waiting for the watcher to exit: the
+                                // child is still alive, so the crash sink may never
+                                // fire, and the user is staring at "degraded".
+                                diagnose_and_emit(&app, &id_task, "degraded", &tail);
                             } else {
                                 emit_log(
                                     &app,
@@ -903,6 +925,85 @@ impl BootClock {
     }
 }
 
+/// How many trailing child-output lines are kept for crash diagnosis.
+///
+/// The signature that explains a failed boot (`cannot resolve profile bundle …`)
+/// is printed as the boot aborts, so it lands near the end; keeping the tail is
+/// enough and bounds the buffer at a few tens of KB per launch. A cold boot's
+/// pnpm progress can easily exceed this, which is fine — those lines are noise
+/// to the rule table.
+const LOG_TAIL_CAP: usize = 400;
+
+/// The trailing child output of a launch, for [`diagnose_crash`].
+///
+/// Lines are **redacted as they are captured**, not when they are reported, so
+/// everything derived from the tail — plugin names, message excerpts — is
+/// already safe to put on an event payload. `emit_log_at` redacts for the same
+/// reason; an event carrying a diagnosis would otherwise be the one path out
+/// that skips it. `std::sync::Mutex` like `last_output`: held for a push or a
+/// clone, never across an `.await`.
+#[derive(Clone, Default)]
+struct LogTail(Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
+
+impl LogTail {
+    fn push(&self, line: &str) {
+        let Ok(mut tail) = self.0.lock() else {
+            return; // poisoned by another task's panic; diagnosis is best-effort
+        };
+        if tail.len() == LOG_TAIL_CAP {
+            tail.pop_front();
+        }
+        tail.push_back(launcher_core::redact_secrets(line).into_owned());
+    }
+
+    /// The tail in original order, for the rule table.
+    fn lines(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .map(|tail| tail.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+/// Diagnose a boot that went wrong and emit it for the UI. Best-effort: a boot
+/// whose log matches no rule emits nothing rather than a hollow "failed" state.
+///
+/// `stage` names where the failure was noticed, because the two callers mean
+/// different things by it — `crashed` is a dead child, `degraded` is one still
+/// running but silent. The rules themselves are the same either way.
+fn diagnose_and_emit(app: &AppHandle, id: &str, stage: &'static str, tail: &LogTail) {
+    let issues = dsh_adapter::crash::diagnose_crash(&tail.lines());
+    if issues.is_empty() {
+        emit_debug(
+            app,
+            &format!("{id} · boot {stage}: log matched no known failure pattern"),
+        );
+        return;
+    }
+    for issue in &issues {
+        emit_warn(app, &format!("{id} · {stage}: {}", issue.message));
+    }
+    let _ = app.emit(
+        LAUNCH_DIAGNOSIS_EVENT,
+        LaunchDiagnosis {
+            instance_id: id.to_string(),
+            stage: stage.to_string(),
+            issues,
+        },
+    );
+}
+
+/// Payload of [`LAUNCH_DIAGNOSIS_EVENT`], paired with `RescueStatus` in the UI so
+/// a diagnosed crash and the restore that fixes it arrive together.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LaunchDiagnosis {
+    pub instance_id: String,
+    /// `crashed` (child died) or `degraded` (silent but alive).
+    pub stage: String,
+    pub issues: Vec<dsh_adapter::crash::CrashIssue>,
+}
+
 /// The server is up: settle on the port, stamp the launcher theme + model
 /// catalog into the harness, mark it running, and show it in a DSH window.
 /// Shared by the fast path and the slow-boot background continuation.
@@ -935,6 +1036,15 @@ async fn finalize_ready(
     handle.set_status(ProcessStatus::Running);
     emit_log(app, &format!("{} · DSH web ready at {url}", instance.id));
     let _ = app.emit(DSH_URL_EVENT, url.to_string());
+    // The profile files that got here boot, so they are the ones worth restoring
+    // to — refresh the instance's rescue point. A failed boot never reaches this
+    // point, which is what makes the pairing with `reserve_rescue_point` work.
+    //
+    // Known limitation: this fires on "server up + port accepting", which is the
+    // strongest signal available today. It does not prove the page *rendered* —
+    // a broken client bundle can still serve. When the page self-check lands
+    // (absorb-plan 1.4) this refresh should move behind that check.
+    crate::commands::rescue::refresh_rescue_point(&app.state::<AppState>(), app, &instance.id);
     // Subscribe to DSH's host SSE stream so an appearance/language change made
     // inside the DSH window reaches the launcher immediately (no poll lag). The
     // sender is handed to the caller to cancel on stop.
