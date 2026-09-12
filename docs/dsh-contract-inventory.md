@@ -78,6 +78,8 @@ AHL 不调用就绪 API，而是 grep dsh 打印的 ready-line。桌面与 TUI �
 | 24 | 信封 `{type:"client-request", rpcId, method, payload}` | 强 | `theme.rs:55-77` | 请求体固定该结构；rpcId 用 `launcher-{method}-{pid}` 生成 |
 | 25 | 响应取 `.result` 字段 | 强 | `theme.rs:55-77` | 业务结果在 `result` 字段，不在顶层 |
 | 26 | 业务层 `{ok:true, value}` / `{ok:false, error}` | 强 | `theme.rs:81-89`（`ensure_ok`） | 错误也走 HTTP 200，靠 `ok` 布尔区分成败，不看状态码 |
+| 56 | **根路径的浏览器鉴权**：`GET /?token=<launchToken>`（路径恰为 `/`、恰好一个 token、Host 可解析）→ **303** + `location: /` + `set-cookie: dsh-auth-<b64url(sha256(authority))>=v1.…`；`GET /` 带有效 cookie → **200** index.html | 强 | `crates/dsh-adapter/src/web_check.rs`（`check_root` / `classify`） | token 被接受时**一定有 303**，且重定向到干净的 `/`。AHL **不跟随**这个 303（跟随会去取不带 cookie 的 `/`，那里同样被拒）——303 本身就是"这个 URL 能用"的证据。cookie 是**无状态签名**的，服务端不存会话，所以探测没有副作用；token 也**不一次性**（进程内 WeakMap 缓存，`processLaunchToken`），重复探测不会打断 iframe |
+| 57 | 根路径鉴权**失败**的形状：**401** + `content-type: text/plain; charset=utf-8` + `cache-control: no-store`，正文 `dsh web authentication required; reopen the URL printed by dsh web.\n` | 弱 | `crates/dsh-adapter/src/web_check.rs`（`REFUSAL_MARKER`） | **只有这个状态码 + 这句话**才判为"URL 被拒"，其余 401 / 403 / 500 / 超时 / 连接被拒一律 `Unreadable` 并 **fail-open**（不算故障）。判定**不检查 `content-type`**：多一个头就断言的代价是"上游改头就变哑巴"，而正文这句话本身已经是 dsh 的自述。dsh 0.1.5-rc.2 的 `dsh-client-connection/lib/index.js` 里 `authorizeIndex`（:386）与 `writeUnauthorized`（:442）是这两个形状的出处 |
 
 ---
 
@@ -183,6 +185,12 @@ AHL 不调用就绪 API，而是 grep dsh 打印的 ready-line。桌面与 TUI �
 上面九条不同——不是"上游改措辞"，而是"上游换了字段形状"，症状是 AHL 写进 profile 的
 白名单**静默失效**（pnpm 不认这个键，构建脚本照样被拦），而不是报错。
 
+**#57 的脆弱方向是反的，也单独记一句**：它坏掉时不是"启动器多做了一件事"，而是**少说了一句话**
+——dsh 换了拒绝的措辞，AHL 认不出，于是退回 `Unreadable`（fail-open），行为**回到 1.4 之前**：
+URL 被拒也照报 ready。这条依赖的失效是**安全的**（不会误报故障），代价是**静默退回旧行为**，
+所以它每跟一次 dsh 版本都值得重核一次（核实方法：`GET http://127.0.0.1:<port>/?token=wrong`
+看正文），而不是靠"反正 fail-open"。
+
 **这条依赖没有"验证写入被上游认了"的办法**，落地时也没有假装有（`pnpm.rs`）：能验的只有
 文件本身——改完的文本 parse 得动、`allowBuilds.<pkg>` 确实是 `true`，验不过就不落盘。
 **"pnpm 认不认这个键"验不了**：唯一能问的只有 pnpm 自己，为一行写入跑一次
@@ -194,7 +202,7 @@ pnpm 换了形状，症状会是"批准了但没用"，届时先查本行的键�
 ## 附三：关键源文件
 
 - `crates/dsh-adapter/src/lib.rs`（launch / plugin_inventory / cordis.patch 编译 / resolve_bin / build_env）
-- `crates/dsh-adapter/src/{theme,llm,language,events,content,diagnostics,runtimes,pnpm,rescue,health}.rs`
+- `crates/dsh-adapter/src/{theme,llm,language,events,content,diagnostics,runtimes,pnpm,rescue,health,web_check}.rs`
 - `apps/desktop/src-tauri/src/commands/{process,plugins,content}.rs`
 - `crates/launcher-core/src/redact.rs`
 - `tui/host/index.js`、`tui/src-tauri/src/sidecar.rs`
@@ -214,3 +222,4 @@ pnpm 换了形状，症状会是"批准了但没用"，届时先查本行的键�
 | 2026-09-12 | 首版。由 `docs/absorb-plan.md` Phase 0.5 产出，覆盖 52 条依赖 + 8 条已核实不存在 + 脆弱度排序。 |
 | 2026-09-12 | 补 #53 / #54：profile 的 `pnpm-workspace.yaml` + `allowBuilds` 键（2.5 的前置核实，直接读 dsh 0.1.5-rc.1 源码取得，非转述）；附二加一条"形状随大版本变"的依赖。 |
 | 2026-09-12 | 2.5 落地后回填：补 #55（pnpm 自己的 `Ignored build scripts:` 行，只用于预填输入框）；附二那一条补上"验不了键名、只能如实回报"的兜底说明（原文写的是"必须能验证自己的写入被上游认了"，落地后证明做不到）；附三补 `pnpm` / `rescue` / `health` 三个文件。 |
+| 2026-09-12 | 1.4 落地前回填：补 #56 / #57（根路径浏览器鉴权的成功形状 303+cookie，与失败形状 401+`dsh web authentication required`）。两个形状直接读本机 `@deepseek-ai/dsh-client-connection@0.1.5-rc.2` 的 `authorizeIndex` / `writeUnauthorized` 取得，**不是实测得到**——原计划里"token-401 页的状态码形态需要一次真机确认"因此作废。附二补一句：#57 的失效方向是"静默退回旧行为"，与其余各条不同；附三补 `web_check`。 |
