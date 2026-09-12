@@ -22,9 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use launcher_core::process::{
-    kill_tree, spawn_child_with_exit, ChildHandle, ExitSink, LogSink,
-};
+use launcher_core::process::{kill_tree, spawn_child_with_exit, ChildHandle, ExitSink, LogSink};
 use launcher_core::runtime::RuntimeInfo;
 use launcher_core::{
     AppSettings, InstanceManifest, LogLevel, LogLine, LogStream, ResolvedProvider, RuntimeAdapter,
@@ -50,6 +48,7 @@ pub mod pnpm;
 pub mod rescue;
 pub mod runtimes;
 pub mod theme;
+pub mod web_check;
 
 pub use diagnostics::{BundleInfo, DiagnosticsReport, OrderViolation};
 use runtimes::Runtimes;
@@ -394,7 +393,11 @@ impl DshAdapter {
         let bundles: Vec<String> = value
             .pointer("/dsh/profile/bundles")
             .and_then(|b| b.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         let mut names: Vec<String> = deps.iter().cloned().collect();
         for bundle in &bundles {
@@ -447,10 +450,7 @@ impl DshAdapter {
                 // is registered in `skin_packages` — a stray package merely
                 // *named* like a skin (e.g. a leftover dep whose repo root has
                 // no package.json) must not offer a switch it cannot honor.
-                let registered_skin = instance
-                    .skin_packages
-                    .iter()
-                    .any(|sp| sp.package == name);
+                let registered_skin = instance.skin_packages.iter().any(|sp| sp.package == name);
                 InstalledPlugin {
                     name,
                     enabled,
@@ -474,28 +474,22 @@ impl DshAdapter {
         let payload = serde_json::json!({ "args": {} });
         let value = crate::theme::host_rpc(port, "pluginInventory/list", payload).await?;
         crate::theme::ensure_ok(&value, "pluginInventory/list")?;
-        let mut body = value
-            .get("value")
-            .cloned()
-            .ok_or_else(|| {
-                anyhow!(
-                    "DSH returned no plugin inventory — the harness did not answer \
+        let mut body = value.get("value").cloned().ok_or_else(|| {
+            anyhow!(
+                "DSH returned no plugin inventory — the harness did not answer \
                      pluginInventory/list. Restart the instance; if it persists, check the DSH \
                      version in Settings → Runtime."
-                )
-            })?;
+            )
+        })?;
         if body.get("ok").and_then(|v| v.as_bool()).is_some() {
             crate::theme::ensure_ok(&body, "pluginInventory/list remote")?;
-            body = body
-                .get("value")
-                .cloned()
-                .ok_or_else(|| {
-                    anyhow!(
-                        "DSH returned no plugin inventory over HTTP — the harness did not answer \
+            body = body.get("value").cloned().ok_or_else(|| {
+                anyhow!(
+                    "DSH returned no plugin inventory over HTTP — the harness did not answer \
                          pluginInventory/list. Restart the instance; if it persists, check the DSH \
                          version in Settings → Runtime."
-                    )
-                })?;
+                )
+            })?;
         }
         let snapshot: InventorySnapshot = serde_json::from_value(body)?;
         Ok(snapshot
@@ -678,9 +672,7 @@ pub async fn run_timed(
     }
     cmd.kill_on_drop(true);
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("spawn {program}: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| format!("spawn {program}: {e}"))?;
 
     let mut readers = Vec::new();
     if let Some(out) = child.stdout.take() {
@@ -792,7 +784,13 @@ fn inserted_row_ids(profile_dir: &Path, name: &str) -> Vec<String> {
 }
 
 fn package_json(profile_dir: &Path, name: &str) -> Option<serde_json::Value> {
-    let text = std::fs::read_to_string(profile_dir.join("node_modules").join(name).join("package.json")).ok()?;
+    let text = std::fs::read_to_string(
+        profile_dir
+            .join("node_modules")
+            .join(name)
+            .join("package.json"),
+    )
+    .ok()?;
     serde_json::from_str::<serde_json::Value>(&text).ok()
 }
 
@@ -820,7 +818,9 @@ fn installed_plugin_kind(profile_dir: &Path, name: &str, toggleable: bool) -> In
         .unwrap_or_default();
     let skinish = lower.contains("skin")
         || lower.contains("theme")
-        || keywords.iter().any(|k| matches!(k.as_str(), "skin" | "theme"));
+        || keywords
+            .iter()
+            .any(|k| matches!(k.as_str(), "skin" | "theme"));
     if has_client && skinish {
         InstalledPluginKind::Theme
     } else if has_client && !has_bundle {
@@ -1292,7 +1292,9 @@ pub(crate) fn remove_skin_insert_blocks(text: &str) -> String {
                 let Some(rest) = t.strip_prefix("id:") else {
                     return false;
                 };
-                rest.trim().trim_start_matches(['"', '\'']).starts_with("skin-")
+                rest.trim()
+                    .trim_start_matches(['"', '\''])
+                    .starts_with("skin-")
             });
             if owns_skin {
                 i = end;
@@ -1520,8 +1522,11 @@ mod tests {
 
         // Enable the client skin the way plugin_toggle now does — write its
         // insert row into the user patch.
-        std::fs::write(&patch, "- insert:\n    - id: skin-sakura\n      name: dsh-skin-sakura\n")
-            .unwrap();
+        std::fs::write(
+            &patch,
+            "- insert:\n    - id: skin-sakura\n      name: dsh-skin-sakura\n",
+        )
+        .unwrap();
         assert!(
             installed_by_name(&instance, "dsh-skin-sakura").enabled,
             "client skin enables via insert row presence"
@@ -1570,7 +1575,11 @@ mod tests {
         };
 
         let ghost = installed_by_name(&instance, "leo-aba__dsh-skins");
-        assert_eq!(ghost.kind, InstalledPluginKind::Theme, "name-heuristic theme");
+        assert_eq!(
+            ghost.kind,
+            InstalledPluginKind::Theme,
+            "name-heuristic theme"
+        );
         assert!(
             !ghost.toggleable,
             "unregistered ghost skin must not offer a toggle it cannot honor"
@@ -1584,7 +1593,10 @@ mod tests {
         let next = append_block_to_text("# template\n[]\n", "- insert:\n    - id: x\n");
         assert!(next.contains("# []"), "{next}");
         assert!(next.contains("- insert:\n    - id: x\n"), "{next}");
-        assert!(!next.contains("\n[]\n"), "placeholder must not remain active:\n{next}");
+        assert!(
+            !next.contains("\n[]\n"),
+            "placeholder must not remain active:\n{next}"
+        );
     }
 
     #[test]
@@ -1644,7 +1656,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dsh-adapter-test-r{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("cordis.patch.yml");
-        std::fs::write(&path, "- id: a\n  disabled: true\n- id: b\n  disabled: false\n").unwrap();
+        std::fs::write(
+            &path,
+            "- id: a\n  disabled: true\n- id: b\n  disabled: false\n",
+        )
+        .unwrap();
 
         remove_row_blocks(&path, &["a".to_string(), "b".to_string()]).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -1686,13 +1702,18 @@ mod tests {
     #[test]
     #[ignore = "requires the sibling deepseek-harness-master checkout"]
     fn import_real_master_and_detect_managed() {
-        let _guard = REAL_E2E_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = REAL_E2E_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(root) = std::env::var_os("LOCALAPPDATA") else {
             eprintln!("no LOCALAPPDATA — skipping");
             return;
         };
-        let runtimes_dir = PathBuf::from(root).join("AIHarnessLauncher").join("runtimes");
-        let master = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../deepseek-harness-master");
+        let runtimes_dir = PathBuf::from(root)
+            .join("AIHarnessLauncher")
+            .join("runtimes");
+        let master =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../deepseek-harness-master");
         if !master.join("apps/cli/lib/bin.js").is_file() {
             eprintln!("sibling checkout missing — skipping real import");
             return;
@@ -1703,23 +1724,38 @@ mod tests {
         // remove_dir_all removes junctions as links — the source checkout is
         // never touched through a reparse point.
         let _ = std::fs::remove_dir_all(runtimes_dir.join("dsh-0.1.0-rc.7"));
-        let entry = mgr.install_from_source(&master, None).expect("import master");
+        let entry = mgr
+            .install_from_source(&master, None)
+            .expect("import master");
         eprintln!("imported {} -> {}", entry.version, entry.dir);
         mgr.set_active(&entry.version).expect("set active");
 
         let adapter = DshAdapter::configured(runtimes_dir, None);
         let settings = AppSettings::default();
-        let (bin, source) = adapter.resolve_bin(&settings).expect("managed bin resolves");
-        assert_eq!(source, "managed", "detect must prefer the managed runtime over the dev tree");
+        let (bin, source) = adapter
+            .resolve_bin(&settings)
+            .expect("managed bin resolves");
+        assert_eq!(
+            source, "managed",
+            "detect must prefer the managed runtime over the dev tree"
+        );
         assert_eq!(bin, mgr.bin_path(&entry.version));
 
-        let info = adapter.detect(&settings).expect("detect with managed runtime");
+        let info = adapter
+            .detect(&settings)
+            .expect("detect with managed runtime");
         assert_eq!(info.source, "managed");
         assert_eq!(info.version, entry.version);
-        assert!(info.node_version.starts_with('v'), "node version = {}", info.node_version);
+        assert!(
+            info.node_version.starts_with('v'),
+            "node version = {}",
+            info.node_version
+        );
         // Path-separator agnostic: Windows paths use backslashes.
         assert!(
-            info.bin_path.replace('\\', "/").ends_with("apps/cli/lib/bin.js"),
+            info.bin_path
+                .replace('\\', "/")
+                .ends_with("apps/cli/lib/bin.js"),
             "bin_path = {}",
             info.bin_path
         );
@@ -1751,16 +1787,24 @@ mod tests {
 
         let adapter = DshAdapter::configured(runtimes_dir, None);
         let settings = AppSettings::default();
-        let (bin2, source) = adapter.resolve_bin(&settings).expect("managed bin resolves");
+        let (bin2, source) = adapter
+            .resolve_bin(&settings)
+            .expect("managed bin resolves");
         assert_eq!(source, "managed");
         assert_eq!(bin2, mgr.bin_path("0.2.0-test"));
 
-        let info = adapter.detect(&settings).expect("detect with managed runtime");
+        let info = adapter
+            .detect(&settings)
+            .expect("detect with managed runtime");
         assert_eq!(info.source, "managed");
         assert_eq!(info.version, "0.2.0-test");
         // Node resolves from the dev vendored copy (or PATH fallback), and the
         // version string is the node `--version` output.
-        assert!(!info.node_version.is_empty(), "node_version = {}", info.node_version);
+        assert!(
+            !info.node_version.is_empty(),
+            "node_version = {}",
+            info.node_version
+        );
         assert!(info.node_path.is_some(), "node_path must be reported");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1783,7 +1827,10 @@ mod tests {
         let (resolved, source) = adapter
             .resolve_bin(&settings)
             .expect("settings override resolves");
-        assert_eq!(source, "override", "settings.dsh_path must be the top layer");
+        assert_eq!(
+            source, "override",
+            "settings.dsh_path must be the top layer"
+        );
         assert_eq!(resolved, bin);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1805,7 +1852,10 @@ mod tests {
         let (resolved, source) = adapter
             .resolve_bin(&settings)
             .expect("bundled bin resolves");
-        assert_eq!(source, "bundled", "resource_dir/dsh must resolve before managed");
+        assert_eq!(
+            source, "bundled",
+            "resource_dir/dsh must resolve before managed"
+        );
         assert_eq!(resolved, bin);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1838,7 +1888,9 @@ mod tests {
     async fn real_dsh_stop_start_10_rounds_no_scars() {
         // Serialize with import_real_master_and_detect_managed (see the lock's
         // comment): never spawn a runtime while the other test is replacing it.
-        let _guard = REAL_E2E_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = REAL_E2E_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         use std::sync::Arc;
         use std::time::Duration;
 
@@ -1857,7 +1909,9 @@ mod tests {
             eprintln!("no LOCALAPPDATA — skipping");
             return;
         };
-        let runtimes_dir = PathBuf::from(root).join("AIHarnessLauncher").join("runtimes");
+        let runtimes_dir = PathBuf::from(root)
+            .join("AIHarnessLauncher")
+            .join("runtimes");
         let mgr = Runtimes::new(runtimes_dir.clone());
         if mgr.resolve_version().is_none() {
             eprintln!("no managed runtime installed — skipping real E2E");
@@ -1866,7 +1920,10 @@ mod tests {
         let adapter = DshAdapter::configured(runtimes_dir, None);
         let settings = AppSettings::default();
         let (_bin, source) = adapter.resolve_bin(&settings).expect("bin resolves");
-        assert_eq!(source, "managed", "E2E must run the managed runtime, not the dev tree");
+        assert_eq!(
+            source, "managed",
+            "E2E must run the managed runtime, not the dev tree"
+        );
 
         let ws = std::env::temp_dir().join(format!("ahl-p1-e2e-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&ws);
@@ -1914,7 +1971,10 @@ mod tests {
                     let _ = line_tx.send(text);
                 })
             };
-            let mut handle = match adapter.launch(&settings, &instance, &env, on_log, None).await {
+            let mut handle = match adapter
+                .launch(&settings, &instance, &env, on_log, None)
+                .await
+            {
                 Ok(h) => h,
                 Err(e) => panic!("round {round}: launch failed: {e}"),
             };
@@ -1930,7 +1990,11 @@ mod tests {
                 }
                 panic!(
                     "round {round}: dsh did not boot within 60s (pid {pid}). last logs:\n{}",
-                    tail.into_iter().rev().take(20).collect::<Vec<_>>().join("\n")
+                    tail.into_iter()
+                        .rev()
+                        .take(20)
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 );
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
