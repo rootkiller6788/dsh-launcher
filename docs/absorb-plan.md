@@ -164,3 +164,21 @@
 | **CI 三平台矩阵**<br>macos/windows/ubuntu + 签名公证按 secret 有无分支回退 + 空 home 场景 | ★★★★ | P2 未开工 → 借结构：`typecheck → core:smoke → build → 打包 → publish` |
 | **更新检查双渠道**<br>npm + PyPI 直连 registry | ★★★ | 有 MCP 侧的 uv pip，无工具自身更新检查 → 与 Phase 5 的自动更新合并做 |
 | ~~转发官方 `dsh plugin`~~ | — | 已在做（`dsh-adapter/src/lib.rs:605`），与它的"保留官方 reconcile 语义"一致 |
+
+---
+
+## 3. 明确不吸收的清单
+
+不吸收同样需要理由，否则下次review还会重新讨论一遍。
+
+| 不吸收 | 原因 |
+|---|---|
+| **copy 模式物理隔离**<br>`3/zat` 的 `--config.package-import-method=copy` | **与 AHL 的设计直接冲突，是取舍不是缺口**。AHL 的模型是「runtimes 按版本共享 + 实例只在 DSH_HOME 层隔离」，且 `runtimes.rs` 用 `robocopy /E /SL` **故意保留** pnpm 的 junction 森林以保证运行时自包含。照抄 zat 会破坏这个自包含性。**但要写进用户文档**——"删一个实例会不会影响另一个"是用户一定会问的问题 |
+| **WSL2 桥接**<br>`2/` 的实现 | AHL 是 Windows-first；`2/` 的实现涉及 UNC 路径映射、tarball 经 stdin 流入 distro、`DSH_PID` 标记防孤儿，成本高、收益窄 |
+| **隐藏控制台** | 已有 `CREATE_NO_WINDOW`（`process.rs:649-659`） |
+| **单实例锁** | 已有 `tauri-plugin-single-instance`（`lib.rs:48`） |
+| **插件×实例矩阵** | AHL 的 Library 混合视图五源标注已覆盖同等信息 |
+| **PTY 内嵌终端**<br>`2/` 的 portable-pty + xterm | 旁路能力，与 DSH-first 边界冲突；AHL 已有 Activity 面板 |
+| **悬浮球 / 开屏动画 / 托盘三态灯** | 与 AHL「生态管理平台」的定位不符，那是消费级产品的语言 |
+| **直接改 `package.json` bundles 数组启停插件** | 违反 DSH-first 边界。`DSH-Launcher` 走过这条路，其 `repairProfile` 就是为修此而生 |
+| **未知来源的 MCP 安装命令** | AHL 已有的铁律不能松：LLM 只返回严格 JSON `{kind,entry,args,env}`，且 entry 走组件级路径校验（`resolve_inside`），超出即丢 |
