@@ -154,8 +154,8 @@
 
 | 机制 | 价值 | AHL 现状 → 移植方式 |
 |---|---|---|
-| **健康检查项集合**<br>约 13 项分 6 组：运行时环境（node/pnpm/dsh 版本、磁盘）/ Home（存在可写、凭据权限位、YAML 可解析）/ Profile（bundle 声明 vs 实装一致性）/ 运行态（端口）/ 数据文件（会话日志总量）/ 管理器（最近备份）。每项输出 `status + detail + fixHint + 可选 repair 动作` | ★★★★★ | `diagnostics.rs` **仅 `check_tool`** → **2026-09-12 已落地为 5 组 11 项**（`health.rs`）。⚠️ **清单不能直接搬**：磁盘 / 权限位 / clean-cache / repair-session-log 四项经逐项核对是桩或坏实现，已弃用，详见 Phase 2 实施记录。`fixHint → repair` 的关联设计搬了，但只导向 AHL 已有的命令 |
-| **修复动作库**<br>6 个：`fix-permissions`（只收紧不放开）/ `restore-yaml-from-bak` / `pnpm-install-profile` / `repair-session-log`（截断到最后一个完整 zstd 帧）/ `clean-cache` / `add-allowbuilds` | ★★★ | 无 → **2026-09-12 核后只留 1 个**：`add-allowbuilds`（键名与目标文件已核实，见 Phase 2 实施记录）。其余 5 个各有明确理由不搬。**"确认 → 快照 → 执行 → 报告"这个形状照搬**，但落地时它要求 `pnpm-workspace.yaml` 进救援点集合——目前不在（`rescue.rs` 的注释里写明不读此文件），这是 2.5 要一并处理的前提 |
+| **健康检查项集合**<br>约 13 项分 6 组：运行时环境（node/pnpm/dsh 版本、磁盘）/ Home（存在可写、凭据权限位、YAML 可解析）/ Profile（bundle 声明 vs 实装一致性）/ 运行态（端口）/ 数据文件（会话日志总量）/ 管理器（最近备份）。每项输出 `status + detail + fixHint + 可选 repair 动作` | ★★★★★ | `diagnostics.rs` **仅 `check_tool`** → **2026-09-12 已落地为 5 组 12 项**（`health.rs`）。⚠️ **清单不能直接搬**：磁盘 / 权限位 / clean-cache / repair-session-log 四项经逐项核对是桩或坏实现，已弃用，详见 Phase 2 实施记录。`fixHint → repair` 的关联设计搬了，但只导向 AHL 已有的命令 |
+| **修复动作库**<br>6 个：`fix-permissions`（只收紧不放开）/ `restore-yaml-from-bak` / `pnpm-install-profile` / `repair-session-log`（截断到最后一个完整 zstd 帧）/ `clean-cache` / `add-allowbuilds` | ★★★ | 无 → **2026-09-12 核后只留 1 个并已落地**：`add-allowbuilds`（键名与目标文件已核实，见 Phase 2 实施记录）。其余 5 个各有明确理由不搬。**"确认 → 快照 → 执行 → 报告"这个形状照搬**；它要求 `pnpm-workspace.yaml` 进救援点集合，这一前提已一并处理（`rescue.rs`） |
 | **备份与恢复**<br>全量 cp + `manifest.json`；`restorePreview` dry-run 给 toAdd/toOverwrite/toDelete/unchanged；恢复前把现状移入 `restore-trash/<ts>`；保留策略 | ★★★★★ | 无 → 全量搬运。默认排除 `.credentials.yaml` / `.env` / `node_modules` / `cache` |
 | **系统服务化**<br>launchd LaunchAgent（`KeepAlive=true`）/ systemd user unit（`Restart=always`）/ Windows 启动文件夹，**独立于管理器进程** | ★★★★ | 无 → 让实例在管理器关闭后继续常驻 |
 | **配置编辑器安全栈**<br>凭据掩码 + 写前 `.bak-<ts>` + 同目录 tmp→rename 原子写（防 DSH 热重载读到半截）+ `dsh --profile X --patch tmp --dump-config` 全链路校验 + LCS diff | ★★★★ | 有编辑、无全链路校验 → 这条最关键：AHL 的目录清单是 `include_str!` 内嵌的，更需要"写进去之前先让 dsh 自己验一遍" |
@@ -224,8 +224,8 @@
 | 2.1 | 崩溃诊断规则引擎（搬 13 类规则表，每条标注对应的真实 issue） | `3/zat` |
 | 2.2 | 救援点快照 / 还原（关键 profile 文件 + 时间戳目录） | `3/zat` |
 | 2.3 | 三级恢复阶梯（L1 对症 / L2 完整恢复 / L3 工厂重置）—— 与 1.6 的安全模式**合并为一条阶梯** | `3/zat` + `1/` |
-| 2.4 | 健康检查项集合（**已落地为 5 组 11 项**，只读，输出 `status + detail + fixes[]`） | `dsh-manager` |
-| 2.5 | 修复动作库（**已缩为 1 个：`add-allowbuilds`**，统一"确认 → 快照 → 执行 → 报告"） | `dsh-manager` |
+| 2.4 | 健康检查项集合（**已落地为 5 组 12 项**，只读，输出 `status + detail + fixes[]`） | `dsh-manager` |
+| 2.5 | 修复动作库（**已落地，1 个：`add-allowbuilds`**，统一"确认 → 快照 → 执行 → 报告"） | `dsh-manager` |
 | 2.6 | 诊断包导出（脱敏 zip：env / errors / log）—— **已落地**为六段包，含失败启动自动落盘 | `1/` |
 
 **交叉收益**：2.5 的 `add-allowbuilds` 修复的是 **git 源安装**这一条路径（核实后缩窄，
@@ -280,8 +280,9 @@
 - 测试：`crash.rs` 新增 13 项（合取有序性、三种 capture、内建优先、兜底让位、去重、
   空 `contains` 拒收、两种文档形态、坏条目跳过、文件缺失）。
 
-**2.5 的前置核实已完成，2.5 本身从 6 个动作缩到 1 个**（2026-09-12）。核实结论进了
-`docs/dsh-contract-inventory.md` 的 #53 / #54，这里记它对本计划的影响：
+**2.5 的前置核实已完成，2.5 本身从 6 个动作缩到 1 个并落地**（2026-09-12）。核实结论进了
+`docs/dsh-contract-inventory.md` 的 #53 / #54，落地记录见本节末尾；这里记核实对本计划的
+影响：
 
 | 原计划的说法 | 核实后 |
 |---|---|
@@ -291,8 +292,8 @@
 
 **顺带发现的一条**：`pnpm` 不在 PATH 是**另一个**独立故障（dsh 打印
 `pnpm not found on PATH` 并 `exit 127`）——AHL 不管理 pnpm，`dsh plugin` 是从 PATH 找的。
-这属于 2.4 的健康检查能真实测量的东西（`pnpm --version` 是一条真测量），比再做一个
-修复按钮更对症。
+这属于 2.4 的健康检查能真实测量的东西，比再做一个修复按钮更对症。**落地时量法与这里
+预想的不一样**：不是跑 `pnpm --version`，而是 `which::which("pnpm")`——见 2.5 落地记录。
 
 **2.3 的处置：L1 / L2 已在，L3 不做**（2026-09-12）。先纠一处口径：计划里 2.3 写的是"无"，
 但 AHL 已有 `BootRecovery.tsx`（按诊断结论给出的对症动作，含"停用某 bundle"与"还原救援点"）
@@ -317,8 +318,9 @@ L3（工厂重置）**决定不做**，理由是它撞 §0 原则二，且比 §
 就看得见**。检查项在 `crates/dsh-adapter/src/health.rs`，命令是 `instance_health`，
 UI 是 `apps/desktop/src/components/HealthPanel.tsx`（挂在 Overview 上）。
 
-**清单砍到 11 项 / 5 组**（`runtime` / `profile` / `plugins` / `mcp` / `rescue`），不是计划里
-写的"6 组约 13 项"。原因是逐项核对 dsh-manager 那份清单后发现**它自己就不成立**：
+**清单定为 5 组**（`runtime` / `profile` / `plugins` / `mcp` / `rescue`）**11 项，随 2.5 再加
+`pnpm` 一项，现 12 项**，不是计划里写的"6 组约 13 项"。砍的理由是逐项核对 dsh-manager
+那份清单后发现**它自己就不成立**：
 
 | dsh-manager 的项 | 处置 | 理由 |
 |---|---|---|
@@ -404,6 +406,51 @@ UI 是 `apps/desktop/src/components/HealthPanel.tsx`（挂在 Overview 上）。
   现在合成一个、fallback 变参数。这不是纯粹的整洁问题：**实例的 id 就是它的目录名**，
   而导出包的文件名用的是同一个归约——两份实现意味着"实例叫什么"可能在两处给出不同答案。
   `instance.rs` 里补了一条钉住这个契约的测试（改归约 = 把已有实例的目录改到别的名字下）。
+
+
+**2.5 已落地**（`41cf6d1` 写入器 + `837fc11` 救援点 + `3d25659` 健康检查 + `9f960c8` 命令 +
+`f663d0c` UI）：这一条的价值不在"多了一个修复按钮"，而在于它是**启动器转述 dsh 自己打印的
+指路**——`dsh plugin` 在 git 源装不动时告诉用户"把 pnpm 印出的键加到 `allowBuilds` 下再重跑"，
+AHL 只是替用户写那一行。§3 拒绝同项目的工厂重置，拒绝的正是"替 DSH 决定 profile 该是什么样"；
+这里没有跨过那条线，因为**内容不是启动器决定的，是 dsh 打印出来、用户确认的**。
+
+**写入器 `crates/dsh-adapter/src/pnpm.rs`**：文本级改写，不解析后重排。这份文件是**手写在编辑
+的**（dsh 的提示就是让用户去编辑它），YAML 库往返一次会为了改一行而丢掉用户的注释、重排他们
+的键。规则：锚定列 0 的 `allowBuilds:`，按已有条目的缩进插在其**后面**；键不存在就追加一整块；
+键存在但带值（`allowBuilds: {}`）**直接拒绝**——追加会造出重复键，就地改要流式映射转块式，
+猜错就是把一个故障变成两个。已是 `true` 是空操作且如实回报；是 `false` 则改写（这里静默跳过
+会和它要修的故障长得一模一样）。包名要落进 YAML 当键，所以按 npm 允许的字符集校验，且**该
+加引号的地方加引号**（`@` 与反引号是 YAML 保留指示符，`@scope/pkg` 不加引号就不是映射键了）。
+
+两处不靠信任的地方：
+
+- **先验后写**：改完的文本在内存里 parse 一遍、确认 `allowBuilds.<pkg> == true` 才落盘。
+  写坏了是"半个文件"，没写是"原样"——两害相权，宁可后者。验不了的只有一件事：**键名对不对**
+  （`allowBuilds` 是 pnpm 11 的形状，pnpm 10 用的是 `onlyBuiltDependencies` 列表，**形状错了
+  不报错、只是静默不生效**，见 `docs/dsh-contract-inventory.md` #53）。
+- **写前留 `.bak`**：救援点是另一条退路，但对**已经有救援点的实例它救不了这个文件**——救
+  援点只在启动成功后刷新，今天才进救援集的文件不在昨天那份里（`rescue.rs` 里记了这条不对称）。
+
+**救援点集合加了 `pnpm-workspace.yaml`**（`rescue.rs`）：旧的排除理由（"什么都没写过它"）在
+`add_allow_build` 落地那一刻失效了——pnpm 每次 `dsh plugin` 都读这个文件，那它就属于"还原
+要能撤销的东西"。测试改成从 `rescue_files` 取列表而不是手抄一份，下一次加减文件会被所有
+往返测试走到，而不是只被那条断言集合内容的测试走到。
+
+**健康检查加了 `runtime-pnpm`**（第 12 项，`runtime` 组）。**量法与预案不同**：预案写的是跑
+`pnpm --version`，落地用的是 `which::which("pnpm")`。理由是这份报告**每次打开都重测**，而
+`which` 是一次文件系统查询、`check_tool` 是一个子进程——dsh 自己就是按 PATH 找 pnpm 的，
+"dsh 能不能找到它"这个问题文件系统已经答完了。代价要说清楚：**这条只说"dsh 能找到 pnpm"，
+不说"找到的那个能用"**（corepack 垫片存在但报错的情况它答不了）。状态是 `warn` 不是 `fail`：
+启动不需要 pnpm，改插件集才需要。
+
+**UI 挂在失败 job 行上**（`InstallCenter.tsx`）：失败插件 job 上多一个"允许构建脚本"，
+展开一个输入框，**预填 pnpm 那句 `Ignored build scripts:` 里的第一个名字**，但必须用户确认
+才写。预填是省打字，不是判断——pnpm 的输出格式是 pnpm 的，猜错会替一个没人问过的包写批准。
+`suggestBuildPackage` 只认"像包名的名字"，认不出就给空框。写完这一行只报"写了什么"
+（`allowBuilds: <pkg>: true`）并指向 Retry，**不自己重跑安装**：批准够不够只有 `dsh plugin`
+说了算。这条动作也不重取前端状态——变的是一个 profile 文件，不是已装插件集。
+
+**至此 2.4 / 2.5 全部落地。** 剩下卡住的是 2.3 的编排（需要 1.6，1.6 需要 1.4 的真机确认）。
 
 
 ### Phase 3 — 数据与常驻（用户资产保障）
