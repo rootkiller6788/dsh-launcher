@@ -39,6 +39,9 @@ AHL 不调用就绪 API，而是 grep dsh 打印的 ready-line。桌面与 TUI �
 | 9 | `$DSH_HOME/cordis.patch.yml`（home 级） | 强 | `content.rs:889-905`（`sync_mcp_patch`） | 存在 home 级 patch 文件 |
 | 53 | `$DSH_HOME/profiles/<profile>/pnpm-workspace.yaml`，键 `allowBuilds: {<pkg>: true}` | 弱 | 尚无（2.5 待落地）；只读方：pnpm | **dsh 自己的指路目标**：`dsh plugin` 失败时打印"把 pnpm 上面印出的确切键加到 `<profileDir>/pnpm-workspace.yaml` 的 `allowBuilds` 下，然后重跑"（dsh 0.1.5-rc.1 `lib/plugin-Ddi42qoW.js:125`）。⚠️ **键名随 pnpm 大版本变**：pnpm 10 是列表 `onlyBuiltDependencies`，pnpm 11 是映射 `allowBuilds`。AHL 根目录自己的 `pnpm-workspace.yaml`（`packageManager: pnpm@11.18.0`）用的正是后者的形状。`ln(name, home) = join(home, "profiles", name)`（`dsh-app-boot/lib/index.js:325`）与 AHL 的 `profile_dir` 一致 |
 
+| 58 | `$DSH_HOME/profiles/.ahl-safe/package.json`（**AHL 写**，安全模式生成的临时 profile） | 强 | `crates/dsh-adapter/src/safe_boot.rs`（`write_safe_profile` / `safe_profile_dir`） | 安全模式写**恰好一个文件**：清单 `{"name":".ahl-safe","private":true,"dsh":{"profile":{"bundles":[…]}}}`，**无 `dependencies`**（没有依赖就没有东西给 pnpm 装）。目录名以 `.` 开头、与用户 profile 平级，绝不与之父子。dsh 的 profile 名校验允许点开头（只拒 `''` / `/` / `\` / `.` / `..` / `node_modules`） |
+| 59 | `$DSH_HOME/profiles/<profile>/node_modules`（**dsh 物化的 symlink 农场**，AHL 只读不写） | 中 | `safe_boot.rs` 模块注释 | dsh 启动 profile 前把 `profiles/<name>/node_modules` 物化为指向安装锚点的 symlink 农场，所以手写清单里的 bundle 无需 pnpm install 也能从安装锚点解析——这是安全模式"只写清单即可成立"的前提。AHL 不创建、不维护它，是 dsh 自己的动作 |
+
 ---
 
 ## 三、cordis.patch.yml 配置格式（无文档，脆弱）
@@ -55,6 +58,7 @@ AHL 不调用就绪 API，而是 grep dsh 打印的 ready-line。桌面与 TUI �
 | 15 | 行 id 字符集 `[A-Za-z0-9._-]` | 强 | `lib.rs:765-1301`（`is_valid_row_id`） | 校验/生成 id 只允许这些字符 |
 | 16 | serverName `[A-Za-z0-9_-]{1,32}` | 强 | `content.rs:861-873` | MCP server 名限制 |
 | 17 | 双位置读取：`<profile>/cordis.patch.yml` 与 `<workspace>/cordis.patch.yml` | 强 | `diagnostics.rs:261-264` | 两个层级都可能存在 patch，诊断要都读 |
+| 60 | **缺失的** profile `cordis.patch.yml` = "无 overlay"（非致命） | 强 | `crates/dsh-adapter/src/safe_boot.rs` 模块注释 | `loadProfile` 把 profile patch 层读作 `existsSync(patchPath) ? load : []`——**文件不存在 = 空 patch 层**，不报错；**存在但解析不动则抛** `failed to parse patches <file>`。安全模式因此只写清单、不写 `cordis.patch.yml`：缺文件那一支是"没有可错的东西"的分支 |
 
 ---
 
@@ -134,6 +138,9 @@ AHL 不调用就绪 API，而是 grep dsh 打印的 ready-line。桌面与 TUI �
 | 48 | flag `--no-open` | 弱 | `tui/host/index.js:109` | 阻止 dsh 自动打开浏览器（**仅 TUI 侧传此 flag**；桌面侧源码 checkout 不需要，见 `lib.rs:337-342` 注释） |
 | 54 | `dsh plugin` 内部再 spawn `pnpm`，**从 PATH 解析**（win32 走 `shell: true`） | 弱 | `lib.rs:589-624`（AHL 间接依赖） | AHL **不管理 pnpm**：找不到时 dsh 打印 `pnpm not found on PATH — install pnpm to manage profile plugins` 并以 **127** 退出（`lib/plugin-Ddi42qoW.js:109-120`）。构建脚本被拦时，其提示**只对 git 源生效**（`/^git\+|^github:|\.git(?:#|$)/`，同文件 `:125`）——不是"所有安装都受影响" |
 
+| 61 | flag `--profile <name>` 用于**启动**（不只是 `dsh plugin`）；`web` 是 dsh 对 `--profile web` 的硬编码别名 | 弱 | `lib.rs`（`launch_profile`）：`cmd.arg("--profile").arg(name)`，`None` 时 `cmd.arg("web")` | `dsh web` ≡ `dsh --profile web`。安全模式用点开头名 `.ahl-safe` 启动，dsh 接受。就绪行与普通 `web` 启动**逐字相同**（`dsh web: http://127.0.0.1:<port>…`），所以现有 ready-line 解析器（#1）无需改动 |
+| 62 | flag `--dump-config`（**父解析器上的 flag，不是子命令**） | 弱 | `lib.rs`（`dump_profile_config`）：`dsh --profile <name> --dump-config` | 成功：把合成后的配置树 dump 到 **stdout** 并 **exit 0**；不可解析 bundle：**exit 1 + 空 stdout** + `Error: dsh: cannot resolve profile bundle "…" from the dsh installation or <dir>…`；坏 patch：exit 1 + `Error: dsh: failed to parse patches <file>…`。安全模式在**真正 boot 之前**用它让 dsh 先裁决 profile 能否合成，dsh 的原话即诊断。**实测对象是本机随运行时发布的 dsh 0.1.0-rc.7** |
+
 ---
 
 ## 十、前端 TS 侧（IPC / 契约假设）
@@ -151,16 +158,15 @@ AHL 不调用就绪 API，而是 grep dsh 打印的 ready-line。桌面与 TUI �
 
 以下 dsh 接口 AHL **目前不依赖**（仅在 `docs/` 路线图里被提及，或属于计划中的待补项）。dsh 升级时这些无需检查：
 
-- `--dump-config`（配置树导出）
 - `--patch`（配置补丁校验）
 - `settings.yaml`（设置文件）
 - `cordis.yml`（主配置）
 - `.credentials.yaml`（凭据文件）
-- `pnpm-workspace.yaml`
+- `pnpm-workspace.yaml`（⚠️ 此条在 2.5 落地 `add-allowbuilds` 后已作废：该文件现由 AHL 写 `allowBuilds` 键并进救援点集合，见 #53）
 - `session.jsonl.zstd`（会话日志）
 - `/api/session.list`（会话列表 API）
 
-> 这几项恰是 `docs/absorb-plan.md` Phase 3 计划**新增**的能力（配置全链路校验、会话日志解码）。落地时**必须回到本表补登记**，不要出现"代码用了、表里没有"的孤儿依赖。
+> 这几项恰是 `docs/absorb-plan.md` Phase 3 计划**新增**的能力（配置全链路校验、会话日志解码）。落地时**必须回到本表补登记**，不要出现"代码用了、表里没有"的孤儿依赖。`--dump-config` 原在此列，安全模式（1.6/2.3）落地后已移入 #62。
 
 **排除项**（非 dsh 依赖，不登记）：
 - `mcp_import.rs` 解析的是 Claude/Cursor/VSCode 的 MCP 配置格式，不是 dsh 格式。
@@ -202,7 +208,7 @@ pnpm 换了形状，症状会是"批准了但没用"，届时先查本行的键�
 ## 附三：关键源文件
 
 - `crates/dsh-adapter/src/lib.rs`（launch / plugin_inventory / cordis.patch 编译 / resolve_bin / build_env）
-- `crates/dsh-adapter/src/{theme,llm,language,events,content,diagnostics,runtimes,pnpm,rescue,health,web_check}.rs`
+- `crates/dsh-adapter/src/{theme,llm,language,events,content,diagnostics,runtimes,pnpm,rescue,health,web_check,safe_boot}.rs`
 - `apps/desktop/src-tauri/src/commands/{process,plugins,content}.rs`
 - `crates/launcher-core/src/redact.rs`
 - `tui/host/index.js`、`tui/src-tauri/src/sidecar.rs`
@@ -223,3 +229,4 @@ pnpm 换了形状，症状会是"批准了但没用"，届时先查本行的键�
 | 2026-09-12 | 补 #53 / #54：profile 的 `pnpm-workspace.yaml` + `allowBuilds` 键（2.5 的前置核实，直接读 dsh 0.1.5-rc.1 源码取得，非转述）；附二加一条"形状随大版本变"的依赖。 |
 | 2026-09-12 | 2.5 落地后回填：补 #55（pnpm 自己的 `Ignored build scripts:` 行，只用于预填输入框）；附二那一条补上"验不了键名、只能如实回报"的兜底说明（原文写的是"必须能验证自己的写入被上游认了"，落地后证明做不到）；附三补 `pnpm` / `rescue` / `health` 三个文件。 |
 | 2026-09-12 | 1.4 落地前回填：补 #56 / #57（根路径浏览器鉴权的成功形状 303+cookie，与失败形状 401+`dsh web authentication required`）。两个形状直接读本机 `@deepseek-ai/dsh-client-connection@0.1.5-rc.2` 的 `authorizeIndex` / `writeUnauthorized` 取得，**不是实测得到**——原计划里"token-401 页的状态码形态需要一次真机确认"因此作废。附二补一句：#57 的失效方向是"静默退回旧行为"，与其余各条不同；附三补 `web_check`。 |
+| 2026-09-12 | 1.6/2.3（两级安全模式）落地后回填：补 #58（安全 profile 只写一个清单 `.ahl-safe/package.json`）、#59（`prepareProfile` 物化 `profiles/<name>/node_modules` symlink 农场，手写清单无需 pnpm install）、#60（缺失的 `cordis.patch.yml` = 无 overlay，非致命）、#61（`--profile <name>` 用于启动 + `web` 别名 + 点开头名被接受 + 就绪行逐字相同）、#62（`--dump-config` 父解析器 flag 及其成功/拒绝形状）。附一移出 `--dump-config`（原在 Phase 3 计划列，现已入 #62）、更正 `pnpm-workspace.yaml`（2.5 已落地为真依赖）。#62 的实测基准是**随运行时发布的 dsh 0.1.0-rc.7**，与 #53/#54/#56/#57 所读的全局 dsh 0.1.5-rc.1/rc.2 **版本不同**，跟进时两者各自重核。 |
