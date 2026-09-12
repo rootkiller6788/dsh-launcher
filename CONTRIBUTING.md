@@ -2,7 +2,7 @@
 
 > 欢迎！**AI Harness Launcher** 是一个用 Tauri 2 + Rust 构建的「PCL for AI Harnesses」Windows 桌面启动器：管理 DSH 运行时、多实例、Provider、插件，然后一键 Launch。
 >
-> 动手前请先读 [`README.md`](./README.md)（怎么跑）和 [`plan.md`](./plan.md)（路线与每阶段的验收 Gate）。这份文档约 5 分钟，能帮你少走 90% 的弯路。
+> 动手前请先读 [`README.md`](./README.md)（怎么跑）和本文件（分支、提交、测试与评审约定）。这份文档约 5 分钟，能帮你少走 90% 的弯路。
 
 ## 目录
 
@@ -35,7 +35,7 @@ scripts/                      开发辅助脚本（如 gen-icon.mjs）
 
 ### 语言边界（红线）
 
-项目刻意把「边界」定死（见 plan.md 第「三」节）：
+项目刻意把「边界」定死：
 
 - **TypeScript 只管 UI**：页面、表单、状态、展示。
 - **Rust 只管系统**：进程、文件系统、网络、密钥、SQLite、运行时管理。
@@ -126,7 +126,7 @@ ci: 新增 release 流水线四道 gate
    - **为什么**：关联 issue、要解决的问题
    - **改了什么**：涉及的文件/模块、设计取舍
    - **怎么测**：跑过的命令与结果；真机行为（如 Launch→窗口→Stop）附输出/截图
-5. 打 `draft` 直到能通过全部 CI gate（P2 落地后会自动跑）。
+5. 打 `draft` 直到能通过全部 CI gate（`.github/workflows/ci.yml` 会在 PR 上自动跑）。
 6. 至少 1 人 review 通过 + CI 全绿才可合并。
 
 ## 代码规范
@@ -167,4 +167,4 @@ ci: 新增 release 流水线四道 gate
 
 - 用模板：**现象 / 期望 / 环境**；bug 附日志（`%LOCALAPPDATA%/AIHarnessLauncher/logs/launcher.log`）与复现步骤。
 - 一个 issue 一件事；用标签 `bug` `enhancement` `ci` `docs` `p2`–`p6`。
-- 完成后在 [`TODO.md`](./TODO.md) 勾掉对应项，并 `Closes #NNN`。
+- 完成后在对应 PR 里写清 `Closes #NNN`，合并时自动关 issue。
