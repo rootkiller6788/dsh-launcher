@@ -23,6 +23,7 @@ use directories::BaseDirs;
 /// <root>/
 /// ├── settings.json       # app settings (dshPath override, lastInstance)
 /// ├── providers.json      # provider metadata — NEVER the API key
+/// ├── crash-signatures.json  # optional user crash rules (see dsh-adapter::crash)
 /// ├── runtimes/           # managed runtimes
 /// ├── instances/default/  # the (single) instance: instance.json + workspace/
 /// ├── cache/
@@ -36,6 +37,9 @@ pub struct AppPaths {
     pub portable: bool,
     pub settings: PathBuf,
     pub providers: PathBuf,
+    /// User-editable crash signatures, merged under the built-in rule table.
+    /// Absent by default; a missing file is the normal case, not an error.
+    pub crash_signatures: PathBuf,
     pub runtimes: PathBuf,
     pub instances: PathBuf,
     pub cache: PathBuf,
@@ -51,6 +55,7 @@ impl AppPaths {
         Self {
             settings: root.join("settings.json"),
             providers: root.join("providers.json"),
+            crash_signatures: root.join("crash-signatures.json"),
             runtimes: root.join("runtimes"),
             instances: root.join("instances"),
             cache: root.join("cache"),
@@ -311,6 +316,7 @@ mod tests {
             portable: false,
             settings: "s".into(),
             providers: "p".into(),
+            crash_signatures: "cs".into(),
             runtimes: "r".into(),
             instances: "i".into(),
             cache: "c".into(),

@@ -12,6 +12,9 @@
 //! as dsh changes wording — that is accepted here (see `docs/absorb-plan.md`
 //! §5) because each rule is backed by a real issue number and the classifier is
 //! fail-open: a log it does not recognise yields no issues, never a false boot.
+//! [`diagnose_crash_with`] narrows the exposure: a reworded failure can be
+//! caught by a signature from `crash-signatures.json` ([`load_signatures`])
+//! without shipping a new launcher build.
 //!
 //! Matching is hand-rolled substring search, no `regex` dependency, matching
 //! the crate's parsing style (`launcher-core/src/redact.rs`).
@@ -70,6 +73,21 @@ pub struct CrashIssue {
 /// Diagnose a crash from boot log lines. Fail-open: an unrecognised log yields
 /// an empty list, never a false failure.
 pub fn diagnose_crash<S: AsRef<str>>(lines: &[S]) -> Vec<CrashIssue> {
+    diagnose_crash_with(lines, &[])
+}
+
+/// Diagnose a crash, with user-supplied signatures checked after the built-ins.
+///
+/// The built-in table is bound to specific dsh releases and will rot as dsh
+/// rewords its failures (see the module note). `extras` is the escape hatch: a
+/// signature added here catches a boot whose wording the built-ins no longer
+/// match, without shipping a new build of the launcher.
+///
+/// Built-ins win. A line the built-in table already classified is not passed to
+/// the extras, so the shipped behaviour cannot be shadowed from a data file —
+/// the extras can only ever *add* diagnoses to a log that would otherwise come
+/// back empty.
+pub fn diagnose_crash_with<S: AsRef<str>>(lines: &[S], extras: &[ExtraSignature]) -> Vec<CrashIssue> {
     let mut issues = Vec::new();
     let mut seen: HashSet<(CrashKind, String)> = HashSet::new();
     for raw in lines {
@@ -77,16 +95,153 @@ pub fn diagnose_crash<S: AsRef<str>>(lines: &[S]) -> Vec<CrashIssue> {
         if text.is_empty() {
             continue;
         }
-        classify_line(text, &mut seen, &mut issues);
+        if classify_specific(text, &mut seen, &mut issues) == Verdict::Recognised {
+            continue;
+        }
+        if !classify_with_extras(text, extras, &mut seen, &mut issues) {
+            classify_catch_all(text, &mut seen, &mut issues);
+        }
     }
     issues
 }
 
-fn classify_line(
+/// A user-supplied crash signature, loaded from JSON (see [`load_signatures`]).
+///
+/// Deliberately a flat conjunction of substrings rather than a pattern language:
+/// the built-ins need bespoke logic (splitting a plugin list, the `.node` suffix,
+/// the tsx source-dep check) that no reasonable data format expresses, so the
+/// extras cover the common case — "dsh now says X instead of Y" — and leave the
+/// rest to code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExtraSignature {
+    pub kind: CrashKind,
+    pub fix: FixAction,
+    /// Every one of these must appear in the line, case-insensitively.
+    pub contains: Vec<String>,
+    #[serde(default)]
+    pub capture: Capture,
+    /// Message shown to the user. `{name}` is replaced with the captured token
+    /// (empty when `capture` is `none`).
+    pub message: String,
+}
+
+/// Which token a signature reads out of the line as the offending name.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Capture {
+    /// No name to capture.
+    #[default]
+    None,
+    /// The first `'…'` or `"…"` token after `contains`'s last substring.
+    Quoted,
+    /// The first `[A-Za-z0-9._-]+` run after `contains`'s last substring.
+    Bare,
+}
+
+/// Apply user signatures to one line. Returns whether any matched, so the caller
+/// knows to skip the generic catch-all.
+fn classify_with_extras(
+    text: &str,
+    extras: &[ExtraSignature],
+    seen: &mut HashSet<(CrashKind, String)>,
+    issues: &mut Vec<CrashIssue>,
+) -> bool {
+    let mut matched_any = false;
+    for sig in extras {
+        // An entry with no conditions would match every line; refuse rather than
+        // let a malformed file fire a diagnosis on a healthy boot.
+        if sig.contains.is_empty() {
+            continue;
+        }
+        let mut search_from = 0usize;
+        let mut last_end = 0usize;
+        let matched = sig.contains.iter().all(|needle| {
+            match find_ci(&text[search_from..], needle) {
+                Some(i) => {
+                    last_end = search_from + i + needle.len();
+                    search_from = last_end;
+                    true
+                }
+                None => false,
+            }
+        });
+        if !matched {
+            continue;
+        }
+        matched_any = true;
+        let plugin = match sig.capture {
+            Capture::None => String::new(),
+            Capture::Quoted => quoted_after(text, last_end).unwrap_or("").to_string(),
+            Capture::Bare => bare_after(text, last_end).to_string(),
+        };
+        let key = (sig.kind, plugin.clone());
+        if !seen.insert(key) {
+            continue;
+        }
+        issues.push(CrashIssue {
+            kind: sig.kind,
+            plugin: plugin.clone(),
+            message: sig.message.replace("{name}", &plugin),
+            fix: sig.fix,
+        });
+    }
+    matched_any
+}
+
+/// Load extra signatures from a JSON file.
+///
+/// Fail-soft at every level, because this runs on the failure path: a missing
+/// file, unreadable file, or malformed JSON yields no extras rather than an
+/// error that would replace the diagnosis with a complaint about the diagnosis.
+/// Entries that do not parse are skipped individually, so one bad signature in
+/// an otherwise good file costs only that signature.
+///
+/// The file is the JSON array itself (`[ {"kind": …}, … ]`) or an object with a
+/// `signatures` array; both are accepted because hand-editing is the point.
+pub fn load_signatures(path: &std::path::Path) -> Vec<ExtraSignature> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    parse_signatures(&text)
+}
+
+/// Parse the signatures document. Split out from [`load_signatures`] so the
+/// parsing rules are testable without a filesystem.
+pub fn parse_signatures(text: &str) -> Vec<ExtraSignature> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Vec::new();
+    };
+    let array = match value {
+        serde_json::Value::Array(items) => items,
+        serde_json::Value::Object(mut map) => {
+            match map.remove("signatures") {
+                Some(serde_json::Value::Array(items)) => items,
+                _ => return Vec::new(),
+            }
+        }
+        _ => return Vec::new(),
+    };
+    array
+        .into_iter()
+        .filter_map(|item| serde_json::from_value(item).ok())
+        .collect()
+}
+
+/// What the built-in rule table made of one log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// A specific rule recognised the line's shape; it is not offered to the extras.
+    Recognised,
+    /// Nothing specific matched; a user signature may still claim it.
+    Open,
+}
+
+fn classify_specific(
     text: &str,
     seen: &mut HashSet<(CrashKind, String)>,
     issues: &mut Vec<CrashIssue>,
-) {
+) -> Verdict {
     let mut add = |kind: CrashKind, plugin: &str, message: String, fix: FixAction| {
         // Same kind + same plugin reported once across the whole log.
         if seen.insert((kind, plugin.to_string())) {
@@ -110,7 +265,7 @@ fn classify_line(
                 FixAction::ExcludeBundle,
             );
         }
-        return;
+        return Verdict::Recognised;
     }
 
     // 2. One or more plugins failed to load and aborted boot.
@@ -125,7 +280,7 @@ fn classify_line(
                 FixAction::ExcludeBundle,
             );
         }
-        return;
+        return Verdict::Recognised;
     }
 
     // 3. Malformed patch/config — only a rescue-point restore helps.
@@ -143,7 +298,7 @@ fn classify_line(
             format!("profile config is malformed — {}", excerpt(text, 160)),
             FixAction::Restore,
         );
-        return;
+        return Verdict::Recognised;
     }
 
     // 4/5. A missing package: a source checkout missing a dev dependency
@@ -172,7 +327,7 @@ fn classify_line(
                 FixAction::ExcludeBundle,
             );
         }
-        return;
+        return Verdict::Recognised;
     }
 
     // 6. Native dependency not compiled: a `.node` module is missing, or the
@@ -184,7 +339,7 @@ fn classify_line(
             "native dependency not built (missing .node binary or Node ABI mismatch) — reinstall profile deps to recompile".to_string(),
             FixAction::Reinstall,
         );
-        return;
+        return Verdict::Recognised;
     }
     if let Some(i) = find_ci(text, "cannot find module") {
         let module = quoted_after(text, i + "cannot find module".len()).unwrap_or("");
@@ -195,7 +350,7 @@ fn classify_line(
                 "native dependency not built (missing .node binary) — reinstall profile deps to recompile".to_string(),
                 FixAction::Reinstall,
             );
-            return;
+            return Verdict::Recognised;
         }
     }
 
@@ -211,7 +366,7 @@ fn classify_line(
             "client plugin failed to load (package present but not in the module table) — reinstall profile deps, or rebuild a source checkout".to_string(),
             FixAction::Reinstall,
         );
-        return;
+        return Verdict::Recognised;
     }
 
     // 8. Bundle out of sync with this dsh version (unknown file extension).
@@ -227,7 +382,7 @@ fn classify_line(
             ),
             FixAction::Reinstall,
         );
-        return;
+        return Verdict::Recognised;
     }
     if find_ci(text, "err_unknown_file_extension").is_some() {
         add(
@@ -236,7 +391,7 @@ fn classify_line(
             "profile bundle is out of sync with this dsh version (unknown file extension) — reinstall profile deps and restart".to_string(),
             FixAction::Reinstall,
         );
-        return;
+        return Verdict::Recognised;
     }
 
     // 9. Source + build output mixed after a rollback (loader called a function
@@ -251,7 +406,7 @@ fn classify_line(
             "source and build output are mixed after a dsh rollback (loader called a missing function) — clean and rebuild source".to_string(),
             FixAction::RebuildSource,
         );
-        return;
+        return Verdict::Recognised;
     }
 
     // 10. Tool scheduler not registered (#1677 / #2130) — duplicate
@@ -269,7 +424,7 @@ fn classify_line(
                 format!("tool scheduler not registered (reading '{field}') — duplicate @deepseek-ai/* deps, reinstall profile deps"),
                 FixAction::Reinstall,
             );
-            return;
+            return Verdict::Recognised;
         }
     }
 
@@ -284,7 +439,7 @@ fn classify_line(
                 FixAction::ExcludeBundle,
             );
         }
-        return;
+        return Verdict::Recognised;
     }
 
     // 12. Toolchain command missing (#2990) — spawn ENOENT.
@@ -300,7 +455,7 @@ fn classify_line(
             "toolchain command missing (spawn ENOENT) — the launcher re-bootstraps node/pnpm/npm/git, restart".to_string(),
             FixAction::Restart,
         );
-        return;
+        return Verdict::Recognised;
     }
 
     // 13. Unsupported CLI flag — restart with adapted args.
@@ -312,10 +467,29 @@ fn classify_line(
             format!("flag \"{flag}\" is not supported by this dsh version — restart with adapted args"),
             FixAction::Restart,
         );
-        return;
+        return Verdict::Recognised;
     }
+    Verdict::Open
+}
 
-    // 14. Bare CLI error line — not a connection refusal / port-in-use noise.
+/// The generic "some error happened" rule, applied only to a line no specific rule
+/// and no user signature recognised.
+///
+/// Kept out of the specific table on purpose: it matches nearly every `error:` line,
+/// so if it ran there it would claim exactly the lines an [`ExtraSignature`] exists to
+/// catch (dsh reworded a failure the built-ins no longer know).
+fn classify_catch_all(
+    text: &str,
+    seen: &mut HashSet<(CrashKind, String)>,
+    issues: &mut Vec<CrashIssue>,
+) {
+    let mut add = |kind: CrashKind, plugin: &str, message: String, fix: FixAction| {
+        if seen.insert((kind, plugin.to_string())) {
+            issues.push(CrashIssue { kind, plugin: plugin.to_string(), message, fix });
+        }
+    };
+    // Any `error:` line that is not connection noise: a port-race refusal is the
+    // launcher's own retry case, not a crash cause.
     if starts_with_ci(text, "error:")
         && find_ci(text, "econnrefused").is_none()
         && find_ci(text, "eaddrinuse").is_none()
@@ -386,7 +560,7 @@ fn excerpt(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    fn diag(lines: &[&str]) -> Vec<CrashIssue> {
+    fn diag<S: AsRef<str>>(lines: &[S]) -> Vec<CrashIssue> {
         diagnose_crash(lines)
     }
 
@@ -536,5 +710,212 @@ mod tests {
     #[test]
     fn unrecognised_log_yields_nothing() {
         assert!(diag(&["everything is fine", ""]).is_empty());
+    }
+
+    // ---- user-supplied signatures (the escape hatch for reworded dsh output) ----
+
+    fn extra(
+        kind: CrashKind,
+        fix: FixAction,
+        contains: &[&str],
+        capture: Capture,
+        message: &str,
+    ) -> ExtraSignature {
+        ExtraSignature {
+            kind,
+            fix,
+            contains: contains.iter().map(|s| (*s).to_string()).collect(),
+            capture,
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn extra_signature_catches_reworded_dsh_output() {
+        // Stand-in for a dsh release that reworded its missing-bundle failure:
+        // no built-in rule matches, which is exactly the rot this exists for.
+        let lines = vec!["boot aborted: profile refers to unavailable addon 'dsh-x'".to_string()];
+        assert!(diag(&lines).is_empty(), "built-ins must not recognise this");
+        let extras = vec![extra(
+            CrashKind::MissingBundle,
+            FixAction::ExcludeBundle,
+            &["profile refers to unavailable addon"],
+            Capture::Quoted,
+            "addon \"{name}\" is not installed",
+        )];
+        let out = diagnose_crash_with(&lines, &extras);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, CrashKind::MissingBundle);
+        assert_eq!(out[0].plugin, "dsh-x");
+        assert_eq!(out[0].message, "addon \"dsh-x\" is not installed");
+    }
+
+    #[test]
+    fn extra_requires_every_contains_in_order() {
+        let two = vec![extra(
+            CrashKind::CliError,
+            FixAction::Restart,
+            &["alpha", "beta"],
+            Capture::None,
+            "both seen",
+        )];
+        assert_eq!(diagnose_crash_with(&["alpha then beta".to_string()], &two).len(), 1);
+        // A conjunction is ordered: "beta … alpha" is not the shape it describes,
+        // and one half alone is not a match.
+        assert!(diagnose_crash_with(&["beta then alpha".to_string()], &two).is_empty());
+        assert!(diagnose_crash_with(&["only alpha".to_string()], &two).is_empty());
+    }
+
+    #[test]
+    fn capture_modes_read_the_token_after_the_match() {
+        let quoted = vec![extra(
+            CrashKind::MissingModule,
+            FixAction::ExcludeBundle,
+            &["addon"],
+            Capture::Quoted,
+            "quoted {name}",
+        )];
+        assert_eq!(
+            diagnose_crash_with(&["addon \"pkg-a\" failed".to_string()], &quoted)[0].plugin,
+            "pkg-a"
+        );
+
+        let bare = vec![extra(
+            CrashKind::MissingModule,
+            FixAction::ExcludeBundle,
+            &["addon"],
+            Capture::Bare,
+            "bare {name}",
+        )];
+        assert_eq!(
+            diagnose_crash_with(&["addon pkg-b failed".to_string()], &bare)[0].plugin,
+            "pkg-b"
+        );
+
+        // `none` has no name to read; the placeholder still has to disappear.
+        let none = vec![extra(
+            CrashKind::MissingModule,
+            FixAction::ExcludeBundle,
+            &["addon"],
+            Capture::None,
+            "nothing {name}here",
+        )];
+        let out = diagnose_crash_with(&["addon pkg-b failed".to_string()], &none);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].plugin, "");
+        assert_eq!(out[0].message, "nothing here");
+    }
+
+    #[test]
+    fn builtins_take_precedence_over_extras() {
+        // A conflicting signature, deliberately a different kind so a leak shows
+        // up as a second issue rather than being hidden by de-duplication.
+        let extras = vec![extra(
+            CrashKind::CliError,
+            FixAction::Restart,
+            &["cannot resolve profile bundle"],
+            Capture::Quoted,
+            "extra wins",
+        )];
+        let out = diagnose_crash_with(
+            &["Error: cannot resolve profile bundle \"dsh-x\"".to_string()],
+            &extras,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, CrashKind::MissingBundle);
+        assert_eq!(out[0].fix, FixAction::ExcludeBundle);
+    }
+
+    #[test]
+    fn an_extra_claims_an_error_line_the_catchall_would_otherwise_take() {
+        let text = "error: EPERM unlinking the profile lock".to_string();
+        // Without a signature this is the generic CliError — the catch-all must
+        // not get to it first, or every new `error:` wording is unreachable.
+        assert_eq!(
+            kinds(&[text.as_str()]),
+            vec![(CrashKind::CliError, String::new())]
+        );
+        let extras = vec![extra(
+            CrashKind::ToolMissing,
+            FixAction::Restart,
+            &["eperm unlinking"],
+            Capture::None,
+            "profile lock is held by another process",
+        )];
+        let out = diagnose_crash_with(&[text], &extras);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, CrashKind::ToolMissing);
+    }
+
+    #[test]
+    fn extras_dedupe_against_each_other() {
+        let extras = vec![
+            extra(CrashKind::MissingModule, FixAction::ExcludeBundle, &["addon"], Capture::Bare, "one {name}"),
+            extra(CrashKind::MissingModule, FixAction::ExcludeBundle, &["addon"], Capture::Bare, "two {name}"),
+        ];
+        let out = diagnose_crash_with(&["addon pkg-a".to_string()], &extras);
+        assert_eq!(out.len(), 1, "same kind + plugin is reported once");
+        assert_eq!(out[0].message, "one pkg-a");
+    }
+
+    #[test]
+    fn a_signature_with_no_conditions_is_refused() {
+        // An empty conjunction would match every line, including a healthy boot's.
+        let extras = vec![extra(
+            CrashKind::CliError,
+            FixAction::Restart,
+            &[],
+            Capture::None,
+            "matches anything",
+        )];
+        assert!(diagnose_crash_with(&["everything is fine".to_string()], &extras).is_empty());
+    }
+
+    #[test]
+    fn parse_signatures_accepts_both_document_shapes() {
+        let body = r#"{"kind":"cli-error","fix":"restart","contains":["x"],"message":"m"}"#;
+        assert_eq!(parse_signatures(&format!("[{body}]")).len(), 1);
+        assert_eq!(parse_signatures(&format!("{{\"signatures\":[{body}]}}")).len(), 1);
+    }
+
+    #[test]
+    fn parse_signatures_reads_capture_and_defaults_it() {
+        let with = r#"[{"kind":"missing-module","fix":"exclude-bundle","contains":["a"],"capture":"bare","message":"{name}"}]"#;
+        assert_eq!(parse_signatures(with)[0].capture, Capture::Bare);
+        let without = r#"[{"kind":"missing-module","fix":"exclude-bundle","contains":["a"],"message":"{name}"}]"#;
+        assert_eq!(parse_signatures(without)[0].capture, Capture::None);
+    }
+
+    #[test]
+    fn parse_signatures_skips_bad_entries_and_bad_documents() {
+        let good = r#"{"kind":"cli-error","fix":"restart","contains":["x"],"message":"m"}"#;
+        // One unparsable entry costs only that entry.
+        let doc = format!("[{good}, {{\"kind\":\"cli-error\"}}, {good}]");
+        assert_eq!(parse_signatures(&doc).len(), 2);
+        // Fail-soft at the document level: this runs on the failure path, so a
+        // broken file must not replace the diagnosis with a complaint about it.
+        assert!(parse_signatures("not json").is_empty());
+        assert!(parse_signatures("\"a string\"").is_empty());
+        assert!(parse_signatures("{\"other\":[]}").is_empty());
+        // A misspelled key is a typo, not an extension point.
+        let typo = r#"[{"kind":"cli-error","fix":"restart","contains":["x"],"message":"m","capture2":"bare"}]"#;
+        assert!(parse_signatures(typo).is_empty());
+    }
+
+    #[test]
+    fn load_signatures_is_fail_soft_on_a_missing_file() {
+        let missing = std::env::temp_dir().join("ahl-crash-signatures-does-not-exist.json");
+        let _ = std::fs::remove_file(&missing);
+        assert!(load_signatures(&missing).is_empty());
+
+        let path =
+            std::env::temp_dir().join(format!("ahl-crash-sig-{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"[{"kind":"cli-error","fix":"restart","contains":["boom"],"message":"m"}]"#,
+        )
+        .expect("write temp signature file");
+        assert_eq!(load_signatures(&path).len(), 1);
+        let _ = std::fs::remove_file(&path);
     }
 }

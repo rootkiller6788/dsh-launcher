@@ -464,6 +464,10 @@ async fn do_launch(
                                         r.handle.set_status(ProcessStatus::Degraded);
                                     }
                                 }
+                                // Released before the diagnosis: that path reads
+                                // `crash-signatures.json`, and no reader of the child
+                                // registry should be blocked behind a file read.
+                                drop(guard);
                                 emit_coded(
                                     &app,
                                     ErrorCode::BootTimedOut,
@@ -971,8 +975,16 @@ impl LogTail {
 /// `stage` names where the failure was noticed, because the two callers mean
 /// different things by it — `crashed` is a dead child, `degraded` is one still
 /// running but silent. The rules themselves are the same either way.
+///
+/// The user's `crash-signatures.json` is re-read here rather than cached at
+/// startup: this runs once per failed boot, and re-reading means a signature
+/// added *because* of this boot applies to the next one without a launcher
+/// restart. A missing or malformed file contributes nothing (see
+/// [`dsh_adapter::crash::load_signatures`]) — the built-ins still diagnose.
 fn diagnose_and_emit(app: &AppHandle, id: &str, stage: &'static str, tail: &LogTail) {
-    let issues = dsh_adapter::crash::diagnose_crash(&tail.lines());
+    let extras =
+        dsh_adapter::crash::load_signatures(&app.state::<AppState>().paths.crash_signatures);
+    let issues = dsh_adapter::crash::diagnose_crash_with(&tail.lines(), &extras);
     if issues.is_empty() {
         emit_debug(
             app,
