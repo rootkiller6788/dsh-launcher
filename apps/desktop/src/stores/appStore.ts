@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { listen } from '@tauri-apps/api/event'
 import { ipc } from '../lib/ipc'
+import { describeError } from '../lib/errors'
 import { applyTheme } from '../lib/theme'
 import type {
   AppPathsInfo,
@@ -111,12 +112,18 @@ interface AppStore {
   diagnostics: DiagnosticsReport | null
   busy: boolean
   error: string | null
+  /** Stable error code from the backend (e.g. `E2001`), when present. */
+  errorCode: string | null
+  /** The code's "next action" guidance, when present. */
+  errorNextAction: string | null
   /** Epoch ms captured at launch-invoke; cleared once the workspace first paints. */
   launchStartedAt: number | null
 
   setPage: (p: Page) => void
   setShellMode: (m: ShellMode) => void
   setError: (e: string | null) => void
+  /** Surface a rejection, keeping its code + next action alongside the message. */
+  fail: (e: unknown) => void
   upsertJob: (job: Job) => void
   removeJob: (id: number) => void
   refreshJobs: () => Promise<void>
@@ -231,13 +238,20 @@ export const useAppStore = create<AppStore>((set, get) => ({
   diagnostics: null,
   busy: false,
   error: null,
+  errorCode: null,
+  errorNextAction: null,
   launchStartedAt: null,
 
   setPage: (page) => set({ page }),
   setShellMode: (shellMode) => {
     set({ shellMode })
   },
-  setError: (error) => set({ error }),
+  setError: (error) => set({ error, errorCode: null, errorNextAction: null }),
+
+  fail: (e) => {
+    const d = describeError(e)
+    set({ error: d.message, errorCode: d.code, errorNextAction: d.nextAction })
+  },
 
   // Insert-or-update a job row pushed by the backend `job-updated` event.
   upsertJob: (job) =>
@@ -264,17 +278,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
         jobs: s.jobs.filter((j) => j.status === 'waiting' || j.status === 'running'),
       }))
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
     }
   },
   retryJob: async (id) => {
-    set({ error: null })
+    set({ error: null, errorCode: null, errorNextAction: null })
     try {
       const job = await ipc.jobsRetry(id)
       get().upsertJob(job)
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     }
   },
@@ -283,17 +297,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await ipc.jobsDelete(id)
       get().removeJob(id)
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
     }
   },
   cancelJob: async (id) => {
-    set({ error: null })
+    set({ error: null, errorCode: null, errorNextAction: null })
     try {
       const job = await ipc.jobsCancel(id)
       if (job) get().upsertJob(job)
       return job != null
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     }
   },
@@ -306,7 +320,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       await ipc.revealInstanceWorkspace(instanceId)
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
     }
   },
   revealJobConfig: async (id) => {
@@ -316,7 +330,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       await ipc.revealInstanceConfig(instanceId)
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
     }
   },
 
@@ -493,14 +507,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       set({ system: await ipc.systemInfo() })
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
     }
   },
   refreshAppPaths: async () => {
     try {
       set({ appPaths: await ipc.appPaths() })
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
     }
   },
   refreshSystemStats: async () => {
@@ -524,14 +538,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
       ])
       set({ provider, presets })
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
     }
   },
   refreshState: async () => {
     try {
       set({ processState: await ipc.processState() })
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
     }
   },
   refreshHistory: async () => {
@@ -566,7 +580,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await get().refresh()
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     } finally {
       set({ busy: false })
@@ -579,7 +593,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await get().refresh()
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     } finally {
       set({ busy: false })
@@ -592,7 +606,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await get().refresh()
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     } finally {
       set({ busy: false })
@@ -605,7 +619,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await get().refresh()
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     } finally {
       set({ busy: false })
@@ -618,7 +632,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await get().refresh()
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     } finally {
       set({ busy: false })
@@ -637,7 +651,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       })
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     } finally {
       set({ busy: false })
@@ -650,7 +664,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set({ settings: await ipc.setSettings(settings) })
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     } finally {
       set({ busy: false })
@@ -668,7 +682,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set({ settings: await ipc.setSettings(next) })
       return true
     } catch (e) {
-      set({ settings: current, error: String(e) })
+      set({ settings: current })
+      get().fail(e)
       return false
     }
   },
@@ -686,7 +701,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await ipc.setLanguage(lang)
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     }
   },
@@ -752,7 +767,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const cur = get().provider
       if (cur) set({ provider: { ...cur, hasKey: false } })
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
     } finally {
       set({ busy: false })
     }
@@ -768,7 +783,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       void get().refreshUpdates()
       void get().refreshSkillUpdates()
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
     } finally {
       set({ busy: false })
     }
@@ -780,7 +795,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set({ processState: await ipc.stop(), dshUrl: null })
       await get().refreshHistory()
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
     } finally {
       set({ busy: false })
     }
@@ -802,7 +817,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       void get().refreshUpdates()
       void get().refreshSkillUpdates()
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
     } finally {
       set({ busy: false })
     }
@@ -895,7 +910,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await get().refreshLibraryInventory()
       await get().refreshInstalledPlugins()
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
     }
   },
 
@@ -904,7 +919,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       set({ recommendations: await ipc.marketRecommend(need) })
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
     } finally {
       set({ searching: false })
     }
@@ -916,12 +931,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
   installMarketEntry: async (entry) => {
     const id = get().activeId
     if (!id) return false
-    set({ error: null })
+    set({ error: null, errorCode: null, errorNextAction: null })
     try {
       await ipc.marketInstall(id, entry)
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     }
   },
@@ -929,12 +944,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
   installPlugin: async (target, entry = null) => {
     const id = get().activeId
     if (!id) return false
-    set({ error: null })
+    set({ error: null, errorCode: null, errorNextAction: null })
     try {
       await ipc.pluginInstall(id, target, entry)
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     }
   },
@@ -950,7 +965,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await get().refreshLibraryDetail()
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     } finally {
       set({ busy: false })
@@ -968,7 +983,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await get().refreshLibraryDetail()
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     } finally {
       set({ busy: false })
@@ -991,12 +1006,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
   installSkill: async (entry) => {
     const id = get().activeId
     if (!id) return false
-    set({ error: null })
+    set({ error: null, errorCode: null, errorNextAction: null })
     try {
       await ipc.skillInstall(id, entry)
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     }
   },
@@ -1012,7 +1027,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await get().refreshLibraryDetail()
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     } finally {
       set({ busy: false })
@@ -1057,7 +1072,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set((s) => ({ mcpRuntime: { ...s.mcpRuntime, [server]: state } }))
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     } finally {
       set({ healthing: null })
@@ -1067,12 +1082,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
   installMcp: async (entry) => {
     const id = get().activeId
     if (!id) return false
-    set({ error: null })
+    set({ error: null, errorCode: null, errorNextAction: null })
     try {
       await ipc.mcpInstall(id, entry)
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     }
   },
@@ -1088,7 +1103,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await get().refreshLibraryDetail()
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     } finally {
       set({ busy: false })
@@ -1106,7 +1121,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await get().refreshLibraryDetail()
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     } finally {
       set({ busy: false })
@@ -1116,14 +1131,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
   importBundle: async (manifest) => {
     const id = get().activeId
     if (!id) return null
-    set({ error: null })
+    set({ error: null, errorCode: null, errorNextAction: null })
     try {
       // Enqueues a backend bundle job; per-item progress streams via
       // `job-updated`. Bundle items can install plugins/skills/MCP — the
       // terminal-job handler on the active pages refreshes every index.
       return await ipc.bundleImport(id, manifest)
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return null
     }
   },
@@ -1131,13 +1146,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
   importMcp: async (request) => {
     const id = get().activeId
     if (!id) return null
-    set({ error: null })
+    set({ error: null, errorCode: null, errorNextAction: null })
     try {
       // Enqueues a backend McpImport job (one `sync_mcp_patch` recompile for
       // the batch); the terminal-job handler refreshes Library/MCP indexes.
       return await ipc.mcpImport(id, request)
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return null
     }
   },
@@ -1149,7 +1164,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       return await ipc.environmentExport(id)
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return null
     } finally {
       set({ busy: false })
@@ -1157,7 +1172,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   importEnvironment: async (path, name) => {
-    set({ error: null })
+    set({ error: null, errorCode: null, errorNextAction: null })
     try {
       // Enqueues an environment-import job; per-leaf progress streams via
       // `job-updated`. The instance is created eagerly by the backend, so
@@ -1168,13 +1183,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
       void get().refreshJobs()
       return job
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return null
     }
   },
 
   importEnvironmentPackage: async (bytes, name) => {
-    set({ error: null })
+    set({ error: null, errorCode: null, errorNextAction: null })
     try {
       const job = await ipc.environmentImportPackage(bytes, name)
       await get().refresh()
@@ -1182,7 +1197,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       void get().refreshJobs()
       return job
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return null
     }
   },
@@ -1203,7 +1218,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   updatePlugin: async (name) => {
     const id = get().activeId
     if (!id) return false
-    set({ error: null })
+    set({ error: null, errorCode: null, errorNextAction: null })
     try {
       // Enqueues a durable Install Center job and returns at queue time; the
       // `job-updated` events drive progress and the done/failed refreshes.
@@ -1219,7 +1234,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       }))
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     }
   },
@@ -1240,7 +1255,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   updateSkill: async (skillId) => {
     const id = get().activeId
     if (!id) return false
-    set({ error: null })
+    set({ error: null, errorCode: null, errorNextAction: null })
     try {
       // Enqueues a durable Install Center job and returns at queue time; the
       // `job-updated` events drive progress and the done/failed refreshes.
@@ -1256,7 +1271,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       }))
       return true
     } catch (e) {
-      set({ error: String(e) })
+      get().fail(e)
       return false
     }
   },

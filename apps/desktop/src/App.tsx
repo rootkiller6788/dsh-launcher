@@ -208,6 +208,8 @@ export default function App() {
   const shellMode = useAppStore((s) => s.shellMode)
   const setShellMode = useAppStore((s) => s.setShellMode)
   const error = useAppStore((s) => s.error)
+  const errorCode = useAppStore((s) => s.errorCode)
+  const errorNextAction = useAppStore((s) => s.errorNextAction)
   const setError = useAppStore((s) => s.setError)
   const processState = useAppStore((s) => s.processState)
   const busy = useAppStore((s) => s.busy)
@@ -303,7 +305,13 @@ export default function App() {
 
       {error && (
         <div className="flex shrink-0 items-center gap-3 border-b border-red-500/30 bg-red-500/10 px-6 py-2 text-sm text-red-300">
-          <span className="flex-1">{error}</span>
+          <span className="flex-1">
+            {errorCode && <span className="mr-2 font-mono font-bold text-red-200">{errorCode}</span>}
+            {error}
+            {errorNextAction && (
+              <span className="ml-3 text-xs text-red-300/70">{errorNextAction}</span>
+            )}
+          </span>
           <button onClick={() => setError(null)} className="font-bold text-red-400 hover:text-red-200">
             x
           </button>
