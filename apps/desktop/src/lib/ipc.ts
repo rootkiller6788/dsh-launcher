@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
+  AllowBuildOutcome,
   AppPathsInfo,
   AppSettings,
   BundleManifest,
@@ -120,6 +121,9 @@ export const ipc = {
   pluginUninstall: (id: string, name: string) => call<void>('plugin_uninstall', { id, name }),
   pluginToggle: (id: string, name: string, enabled: boolean) =>
     call<void>('plugin_toggle', { id, name, enabled }),
+  /** Approve a package's build scripts in the profile's pnpm-workspace.yaml. */
+  pluginAllowBuild: (id: string, packageName: string) =>
+    call<AllowBuildOutcome>('plugin_allow_build', { id, package: packageName }),
   pluginUpdates: (id: string) => call<PluginUpdate[]>('plugin_updates', { id }),
   pluginUpdate: (id: string, name: string) => call<Job>('plugin_update', { id, name }),
   profileDiagnostics: (id: string) => call<DiagnosticsReport>('profile_diagnostics', { id }),

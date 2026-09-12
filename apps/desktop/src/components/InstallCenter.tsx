@@ -16,7 +16,8 @@ import {
 import { useT } from '../lib/i18n'
 import { useAppStore } from '../stores/appStore'
 import { MirrorToggle } from './MirrorToggle'
-import type { Job, JobStatus } from '../lib/types'
+import type { AllowBuildOutcome, Job, JobStatus } from '../lib/types'
+import { suggestBuildPackage } from '../lib/buildScript'
 
 const ACTIVE: JobStatus[] = ['waiting', 'running']
 const TERMINAL: JobStatus[] = ['done', 'failed', 'cancelled']
@@ -141,6 +142,11 @@ export function JobRow({ job }: { job: Job }) {
   const openJobInLibrary = useAppStore((s) => s.openJobInLibrary)
   const revealJobWorkspace = useAppStore((s) => s.revealJobWorkspace)
   const revealJobConfig = useAppStore((s) => s.revealJobConfig)
+  const allowBuildScript = useAppStore((s) => s.allowBuildScript)
+  const busy = useAppStore((s) => s.busy)
+  const [allowOpen, setAllowOpen] = useState(false)
+  const [allowPkg, setAllowPkg] = useState('')
+  const [allowDone, setAllowDone] = useState<AllowBuildOutcome | null>(null)
   const tone = toneFor(job.status)
   const Icon = iconFor(job.status)
   const spinning = job.status === 'running'
@@ -186,6 +192,68 @@ export function JobRow({ job }: { job: Job }) {
           )}
           {job.error && job.status === 'failed' && (
             <div className="mt-2 truncate text-[10px] text-red-300/80">{job.error}</div>
+          )}
+          {/* A failed plugin install is where dsh can report that pnpm skipped a
+              package's build script. The fix is one line in the profile's
+              pnpm-workspace.yaml, which is what this writes — but which package
+              is the user's to confirm (see `suggestBuildPackage`). */}
+          {job.status === 'failed' && job.kind === 'plugin' && (
+            <div className="mt-2">
+              {allowDone ? (
+                <div className="text-[10px] text-emerald-300/80">
+                  {t(
+                    allowDone.written
+                      ? 'installCenter.allowBuild.done'
+                      : 'installCenter.allowBuild.already',
+                    { line: allowDone.line },
+                  )}
+                </div>
+              ) : allowOpen ? (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <input
+                    autoFocus
+                    value={allowPkg}
+                    onChange={(e) => setAllowPkg(e.target.value)}
+                    placeholder={t('installCenter.allowBuild.package')}
+                    className="h-7 w-48 rounded-md border border-zinc-800 bg-zinc-950/60 px-2 font-mono text-[11px] text-zinc-200 placeholder:text-zinc-600 focus:border-amber-500/40 focus:outline-none"
+                  />
+                  <button
+                    disabled={busy || allowPkg.trim() === ''}
+                    onClick={() => {
+                      void (async () => {
+                        const outcome = await allowBuildScript(allowPkg.trim())
+                        if (!outcome) return
+                        setAllowDone(outcome)
+                        setAllowOpen(false)
+                      })()
+                    }}
+                    className="flex h-7 items-center rounded-md border border-amber-500/40 bg-amber-500/10 px-2 text-[11px] text-amber-200 transition-colors hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-transparent disabled:text-zinc-600"
+                  >
+                    {t('installCenter.allowBuild.confirm')}
+                  </button>
+                  <button
+                    onClick={() => setAllowOpen(false)}
+                    className="flex h-7 items-center rounded-md border border-zinc-800 px-2 text-[11px] text-zinc-400 hover:border-zinc-600 hover:text-zinc-200"
+                  >
+                    {t('installCenter.allowBuild.cancel')}
+                  </button>
+                  <span className="text-[10px] text-zinc-500">
+                    {t('installCenter.allowBuild.hint')}
+                  </span>
+                </div>
+              ) : (
+                <button
+                  onClick={() => {
+                    setAllowPkg(suggestBuildPackage(job.stderrTail))
+                    setAllowOpen(true)
+                  }}
+                  title={t('installCenter.allowBuild.hint')}
+                  className="flex h-7 items-center rounded-md border border-amber-500/40 bg-amber-500/10 px-2 text-[11px] text-amber-200 transition-colors hover:bg-amber-500/20"
+                >
+                  {t('installCenter.allowBuild.open')}
+                </button>
+              )}
+            </div>
           )}
           <div className="mt-3 flex flex-wrap gap-1.5">
             <button onClick={() => openJobInLibrary()} className="flex h-7 items-center gap-1.5 rounded-md border border-zinc-800 px-2 text-[11px] text-zinc-400 hover:border-blue-500/40 hover:text-blue-200">

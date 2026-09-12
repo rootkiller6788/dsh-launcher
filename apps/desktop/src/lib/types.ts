@@ -527,6 +527,19 @@ export interface PluginUpdate {
 }
 
 /**
+ * What approving a package's build scripts did to the profile's
+ * `pnpm-workspace.yaml` (wire form of `dsh_adapter::pnpm::AllowBuildOutcome`).
+ */
+export interface AllowBuildOutcome {
+  /** `false` when the package was already approved — nothing was written. */
+  written: boolean
+  /** The exact line added or rewritten, e.g. `esbuild: true`. */
+  line: string
+  /** Where the pre-edit copy went, when a file existed to back up. */
+  backup: string | null
+}
+
+/**
  * One skill's update status. Skills have no version number, so both sides are
  * content SHA-256s: `installed` is what's on disk (record hash, or a hash of
  * the file for legacy records), `latest` is what the source serves now.

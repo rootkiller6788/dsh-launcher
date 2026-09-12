@@ -4,6 +4,7 @@ import { ipc } from '../lib/ipc'
 import { describeError } from '../lib/errors'
 import { applyTheme } from '../lib/theme'
 import type {
+  AllowBuildOutcome,
   AppPathsInfo,
   AppSettings,
   BundleManifest,
@@ -194,6 +195,12 @@ interface AppStore {
   installPlugin: (target: string, entry?: RegistryPlugin | null) => Promise<boolean>
   uninstallPlugin: (name: string) => Promise<boolean>
   togglePlugin: (name: string, enabled: boolean) => Promise<boolean>
+  /**
+   * Approve a package's build scripts in the profile's `pnpm-workspace.yaml` —
+   * the fix for an install that reported pnpm ignored a build script. Resolves
+   * to what was written, or null on failure.
+   */
+  allowBuildScript: (packageName: string) => Promise<AllowBuildOutcome | null>
   installSkill: (entry: RegistryPlugin) => Promise<boolean>
   uninstallSkill: (id: string) => Promise<boolean>
   refreshInstalledSkills: () => Promise<void>
@@ -1044,6 +1051,23 @@ export const useAppStore = create<AppStore>((set, get) => ({
     } catch (e) {
       get().fail(e)
       return false
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  // No re-fetch after this one: it changes a profile file, not the installed
+  // plugin set — the install it unblocks is a separate, explicit step (Retry).
+  // The command's own log line is what the Activity panel shows for it.
+  allowBuildScript: async (packageName) => {
+    const id = get().activeId
+    if (!id) return null
+    set({ busy: true, error: null })
+    try {
+      return await ipc.pluginAllowBuild(id, packageName)
+    } catch (e) {
+      get().fail(e)
+      return null
     } finally {
       set({ busy: false })
     }
