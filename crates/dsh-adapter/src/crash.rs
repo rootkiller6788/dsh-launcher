@@ -41,11 +41,19 @@ pub enum CrashKind {
     ToolMissing,
     CliArg,
     CliError,
+    /// The harness is up but refused to serve the workspace URL it printed.
+    /// The only kind here that no rule produces — see [`web_auth_refused`].
+    WebAuthRefused,
 }
 
 /// The repair action a diagnosis recommends. `exclude-bundle` / `restore` are
 /// the L1/L2 recovery-ladder actions; `reinstall` / `install-deps` /
 /// `rebuild-source` are dependency-level; `restart` is a plain retry.
+///
+/// `reopen-url` is the one action no code carries out: it is the harness's own
+/// instruction ("reopen the URL printed by dsh web"), translated into the two
+/// commands the launcher has — stop, then launch again for a freshly printed
+/// URL. See [`web_auth_refused`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FixAction {
@@ -55,6 +63,7 @@ pub enum FixAction {
     Reinstall,
     RebuildSource,
     Restart,
+    ReopenUrl,
 }
 
 /// One diagnosed crash cause.
@@ -76,6 +85,29 @@ pub fn diagnose_crash<S: AsRef<str>>(lines: &[S]) -> Vec<CrashIssue> {
     diagnose_crash_with(lines, &[])
 }
 
+/// The diagnosis for a boot whose workspace URL the harness itself refused.
+///
+/// Every other issue in this module is read off a log line; this one is not.
+/// The launcher probes the URL the harness printed (`web_check`) and this is
+/// what a refusal means, so it is built by name rather than matched by a rule —
+/// nothing is printed for it to match. `detail` is the harness's own refusal
+/// text, quoted rather than paraphrased, and the message says what was observed
+/// (a refusal of that URL) rather than what will be seen (the workspace cannot
+/// be opened): a browser holding a still-valid session cookie for the same
+/// authority could load it anyway.
+pub fn web_auth_refused(detail: &str) -> CrashIssue {
+    CrashIssue {
+        kind: CrashKind::WebAuthRefused,
+        plugin: String::new(),
+        message: format!(
+            "the harness refused to serve the workspace URL it printed — it answered that URL \
+             with \"{detail}\", so it does not accept the token in it. A window opening that URL \
+             shows that notice instead of the workspace"
+        ),
+        fix: FixAction::ReopenUrl,
+    }
+}
+
 /// Diagnose a crash, with user-supplied signatures checked after the built-ins.
 ///
 /// The built-in table is bound to specific dsh releases and will rot as dsh
@@ -87,7 +119,10 @@ pub fn diagnose_crash<S: AsRef<str>>(lines: &[S]) -> Vec<CrashIssue> {
 /// the extras, so the shipped behaviour cannot be shadowed from a data file —
 /// the extras can only ever *add* diagnoses to a log that would otherwise come
 /// back empty.
-pub fn diagnose_crash_with<S: AsRef<str>>(lines: &[S], extras: &[ExtraSignature]) -> Vec<CrashIssue> {
+pub fn diagnose_crash_with<S: AsRef<str>>(
+    lines: &[S],
+    extras: &[ExtraSignature],
+) -> Vec<CrashIssue> {
     let mut issues = Vec::new();
     let mut seen: HashSet<(CrashKind, String)> = HashSet::new();
     for raw in lines {
@@ -156,16 +191,17 @@ fn classify_with_extras(
         }
         let mut search_from = 0usize;
         let mut last_end = 0usize;
-        let matched = sig.contains.iter().all(|needle| {
-            match find_ci(&text[search_from..], needle) {
-                Some(i) => {
-                    last_end = search_from + i + needle.len();
-                    search_from = last_end;
-                    true
-                }
-                None => false,
-            }
-        });
+        let matched =
+            sig.contains
+                .iter()
+                .all(|needle| match find_ci(&text[search_from..], needle) {
+                    Some(i) => {
+                        last_end = search_from + i + needle.len();
+                        search_from = last_end;
+                        true
+                    }
+                    None => false,
+                });
         if !matched {
             continue;
         }
@@ -214,12 +250,10 @@ pub fn parse_signatures(text: &str) -> Vec<ExtraSignature> {
     };
     let array = match value {
         serde_json::Value::Array(items) => items,
-        serde_json::Value::Object(mut map) => {
-            match map.remove("signatures") {
-                Some(serde_json::Value::Array(items)) => items,
-                _ => return Vec::new(),
-            }
-        }
+        serde_json::Value::Object(mut map) => match map.remove("signatures") {
+            Some(serde_json::Value::Array(items)) => items,
+            _ => return Vec::new(),
+        },
         _ => return Vec::new(),
     };
     array
@@ -261,7 +295,9 @@ fn classify_specific(
             add(
                 CrashKind::MissingBundle,
                 plugin,
-                format!("profile declares bundle \"{plugin}\" but it is not installed, so boot aborted"),
+                format!(
+                    "profile declares bundle \"{plugin}\" but it is not installed, so boot aborted"
+                ),
                 FixAction::ExcludeBundle,
             );
         }
@@ -412,8 +448,8 @@ fn classify_specific(
     // 10. Tool scheduler not registered (#1677 / #2130) — duplicate
     // @deepseek-ai/* deps, same class as bundle mismatch.
     if let Some(i) = find_ci(text, "cannot read properties of undefined") {
-        let field = quoted_after(text, i + "cannot read properties of undefined".len())
-            .unwrap_or("");
+        let field =
+            quoted_after(text, i + "cannot read properties of undefined".len()).unwrap_or("");
         if find_ci(text, "prepare").is_some()
             || find_ci(text, "toolruntime").is_some()
             || find_ci(text, "scheduler").is_some()
@@ -464,7 +500,9 @@ fn classify_specific(
         add(
             CrashKind::CliArg,
             "",
-            format!("flag \"{flag}\" is not supported by this dsh version — restart with adapted args"),
+            format!(
+                "flag \"{flag}\" is not supported by this dsh version — restart with adapted args"
+            ),
             FixAction::Restart,
         );
         return Verdict::Recognised;
@@ -485,7 +523,12 @@ fn classify_catch_all(
 ) {
     let mut add = |kind: CrashKind, plugin: &str, message: String, fix: FixAction| {
         if seen.insert((kind, plugin.to_string())) {
-            issues.push(CrashIssue { kind, plugin: plugin.to_string(), message, fix });
+            issues.push(CrashIssue {
+                kind,
+                plugin: plugin.to_string(),
+                message,
+                fix,
+            });
         }
     };
     // Any `error:` line that is not connection noise: a port-race refusal is the
@@ -494,7 +537,12 @@ fn classify_catch_all(
         && find_ci(text, "econnrefused").is_none()
         && find_ci(text, "eaddrinuse").is_none()
     {
-        add(CrashKind::CliError, "", excerpt(text, 200), FixAction::Restart);
+        add(
+            CrashKind::CliError,
+            "",
+            excerpt(text, 200),
+            FixAction::Restart,
+        );
     }
 }
 
@@ -508,7 +556,8 @@ fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
 }
 
 fn starts_with_ci(s: &str, prefix: &str) -> bool {
-    s.to_ascii_lowercase().starts_with(&prefix.to_ascii_lowercase())
+    s.to_ascii_lowercase()
+        .starts_with(&prefix.to_ascii_lowercase())
 }
 
 /// The quoted token (`'…'` or `"…"`) that first appears at or after `start`.
@@ -759,7 +808,10 @@ mod tests {
             Capture::None,
             "both seen",
         )];
-        assert_eq!(diagnose_crash_with(&["alpha then beta".to_string()], &two).len(), 1);
+        assert_eq!(
+            diagnose_crash_with(&["alpha then beta".to_string()], &two).len(),
+            1
+        );
         // A conjunction is ordered: "beta … alpha" is not the shape it describes,
         // and one half alone is not a match.
         assert!(diagnose_crash_with(&["beta then alpha".to_string()], &two).is_empty());
@@ -850,8 +902,20 @@ mod tests {
     #[test]
     fn extras_dedupe_against_each_other() {
         let extras = vec![
-            extra(CrashKind::MissingModule, FixAction::ExcludeBundle, &["addon"], Capture::Bare, "one {name}"),
-            extra(CrashKind::MissingModule, FixAction::ExcludeBundle, &["addon"], Capture::Bare, "two {name}"),
+            extra(
+                CrashKind::MissingModule,
+                FixAction::ExcludeBundle,
+                &["addon"],
+                Capture::Bare,
+                "one {name}",
+            ),
+            extra(
+                CrashKind::MissingModule,
+                FixAction::ExcludeBundle,
+                &["addon"],
+                Capture::Bare,
+                "two {name}",
+            ),
         ];
         let out = diagnose_crash_with(&["addon pkg-a".to_string()], &extras);
         assert_eq!(out.len(), 1, "same kind + plugin is reported once");
@@ -875,7 +939,10 @@ mod tests {
     fn parse_signatures_accepts_both_document_shapes() {
         let body = r#"{"kind":"cli-error","fix":"restart","contains":["x"],"message":"m"}"#;
         assert_eq!(parse_signatures(&format!("[{body}]")).len(), 1);
-        assert_eq!(parse_signatures(&format!("{{\"signatures\":[{body}]}}")).len(), 1);
+        assert_eq!(
+            parse_signatures(&format!("{{\"signatures\":[{body}]}}")).len(),
+            1
+        );
     }
 
     #[test]
@@ -908,8 +975,7 @@ mod tests {
         let _ = std::fs::remove_file(&missing);
         assert!(load_signatures(&missing).is_empty());
 
-        let path =
-            std::env::temp_dir().join(format!("ahl-crash-sig-{}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!("ahl-crash-sig-{}.json", std::process::id()));
         std::fs::write(
             &path,
             r#"[{"kind":"cli-error","fix":"restart","contains":["boom"],"message":"m"}]"#,
