@@ -36,6 +36,7 @@ AHL 不调用就绪 API，而是 grep dsh 打印的 ready-line。桌面与 TUI �
 | 7 | `$DSH_HOME/node_modules/`（扁平回退 `profiles/node_modules`） | 强 | `diagnostics.rs:70-78`（`resolve_bundle_dir`） | bundle 实际落在 node_modules |
 | 8 | `$DSH_HOME/skills/<id>/SKILL.md` | 强 | `content.rs`（`install_skill`） | skill 落地为该路径单文件；frontmatter 的 `name` 字段是元数据 |
 | 9 | `$DSH_HOME/cordis.patch.yml`（home 级） | 强 | `content.rs:889-905`（`sync_mcp_patch`） | 存在 home 级 patch 文件 |
+| 53 | `$DSH_HOME/profiles/<profile>/pnpm-workspace.yaml`，键 `allowBuilds: {<pkg>: true}` | 弱 | 尚无（2.5 待落地）；只读方：pnpm | **dsh 自己的指路目标**：`dsh plugin` 失败时打印"把 pnpm 上面印出的确切键加到 `<profileDir>/pnpm-workspace.yaml` 的 `allowBuilds` 下，然后重跑"（dsh 0.1.5-rc.1 `lib/plugin-Ddi42qoW.js:125`）。⚠️ **键名随 pnpm 大版本变**：pnpm 10 是列表 `onlyBuiltDependencies`，pnpm 11 是映射 `allowBuilds`。AHL 根目录自己的 `pnpm-workspace.yaml`（`packageManager: pnpm@11.18.0`）用的正是后者的形状。`ln(name, home) = join(home, "profiles", name)`（`dsh-app-boot/lib/index.js:325`）与 AHL 的 `profile_dir` 一致 |
 
 ---
 
@@ -128,6 +129,7 @@ AHL 不调用就绪 API，而是 grep dsh 打印的 ready-line。桌面与 TUI �
 | 46 | 子命令 `plugin` + flag `--profile <profile>` | 弱 | `lib.rs:589-624`（`run_plugin_command`） | 插件管理走 `dsh plugin --profile <profile> <args>` |
 | 47 | `plugin add` / `remove` / `update` | 弱 | `commands/plugins.rs:1337/1351/1382/1459/1666` | 经 `run_plugin_command` 转发 |
 | 48 | flag `--no-open` | 弱 | `tui/host/index.js:109` | 阻止 dsh 自动打开浏览器（**仅 TUI 侧传此 flag**；桌面侧源码 checkout 不需要，见 `lib.rs:337-342` 注释） |
+| 54 | `dsh plugin` 内部再 spawn `pnpm`，**从 PATH 解析**（win32 走 `shell: true`） | 弱 | `lib.rs:589-624`（AHL 间接依赖） | AHL **不管理 pnpm**：找不到时 dsh 打印 `pnpm not found on PATH — install pnpm to manage profile plugins` 并以 **127** 退出（`lib/plugin-Ddi42qoW.js:109-120`）。构建脚本被拦时，其提示**只对 git 源生效**（`/^git\+|^github:|\.git(?:#|$)/`，同文件 `:125`）——不是"所有安装都受影响" |
 
 ---
 
@@ -175,6 +177,12 @@ AHL 不调用就绪 API，而是 grep dsh 打印的 ready-line。桌面与 TUI �
 8. 环境变量（`DSH_HOME` 等）
 9. CLI 子命令 / flag（有文档，最稳）
 
+另有一条**形状随上游大版本变**的依赖，不排进上表，单独记：#53 的 `allowBuilds` 键名
+（pnpm 10 → 11 从 `onlyBuiltDependencies` 列表改成 `allowBuilds` 映射）。它脆弱的方式和
+上面九条不同——不是"上游改措辞"，而是"上游换了字段形状"，症状是 AHL 写进 profile 的
+白名单**静默失效**（pnpm 不认这个键，构建脚本照样被拦），而不是报错。任何按此键写文件的
+动作都必须能验证自己的写入被上游认了。
+
 ## 附三：关键源文件
 
 - `crates/dsh-adapter/src/lib.rs`（launch / plugin_inventory / cordis.patch 编译 / resolve_bin / build_env）
@@ -184,6 +192,11 @@ AHL 不调用就绪 API，而是 grep dsh 打印的 ready-line。桌面与 TUI �
 - `tui/host/index.js`、`tui/src-tauri/src/sidecar.rs`
 - `apps/desktop/src/stores/appStore.ts`
 
+**dsh 侧**：本清单里以 `lib/…` 或 `node_modules/@deepseek-ai/dsh-app-boot/…` 形式给出的
+引用，指的是**本机全局安装的 dsh**（核实时为 `@deepseek-ai/dsh@0.1.5-rc.1`），路径里的
+哈希段（如 `plugin-Ddi42qoW.js`）**随构建变化**——按文件名找不到时按内容搜（例如搜
+`allowBuilds`），不要按文件名假设它还在。行号同理，只用于核实时定位。
+
 ---
 
 ## 维护记录
@@ -191,3 +204,4 @@ AHL 不调用就绪 API，而是 grep dsh 打印的 ready-line。桌面与 TUI �
 | 日期 | 变更 |
 |---|---|
 | 2026-09-12 | 首版。由 `docs/absorb-plan.md` Phase 0.5 产出，覆盖 52 条依赖 + 8 条已核实不存在 + 脆弱度排序。 |
+| 2026-09-12 | 补 #53 / #54：profile 的 `pnpm-workspace.yaml` + `allowBuilds` 键（2.5 的前置核实，直接读 dsh 0.1.5-rc.1 源码取得，非转述）；附二加一条"形状随大版本变"的依赖。 |
