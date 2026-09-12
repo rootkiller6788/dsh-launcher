@@ -155,7 +155,7 @@
 | 机制 | 价值 | AHL 现状 → 移植方式 |
 |---|---|---|
 | **健康检查项集合**<br>约 13 项分 6 组：运行时环境（node/pnpm/dsh 版本、磁盘）/ Home（存在可写、凭据权限位、YAML 可解析）/ Profile（bundle 声明 vs 实装一致性）/ 运行态（端口）/ 数据文件（会话日志总量）/ 管理器（最近备份）。每项输出 `status + detail + fixHint + 可选 repair 动作` | ★★★★★ | `diagnostics.rs` **仅 `check_tool`** → **2026-09-12 已落地为 5 组 11 项**（`health.rs`）。⚠️ **清单不能直接搬**：磁盘 / 权限位 / clean-cache / repair-session-log 四项经逐项核对是桩或坏实现，已弃用，详见 Phase 2 实施记录。`fixHint → repair` 的关联设计搬了，但只导向 AHL 已有的命令 |
-| **修复动作库**<br>6 个：`fix-permissions`（只收紧不放开）/ `restore-yaml-from-bak` / `pnpm-install-profile` / `repair-session-log`（截断到最后一个完整 zstd 帧）/ `clean-cache` / `add-allowbuilds` | ★★★★★ | 无 → 每个动作统一"确认 → 快照 → 执行 → 报告"。**`add-allowbuilds` 对 AHL 尤其重要**——pnpm ≥10 拦构建会同时打击 AHL 现有的 MCP / skill 安装路径 |
+| **修复动作库**<br>6 个：`fix-permissions`（只收紧不放开）/ `restore-yaml-from-bak` / `pnpm-install-profile` / `repair-session-log`（截断到最后一个完整 zstd 帧）/ `clean-cache` / `add-allowbuilds` | ★★★ | 无 → **2026-09-12 核后只留 1 个**：`add-allowbuilds`（键名与目标文件已核实，见 Phase 2 实施记录）。其余 5 个各有明确理由不搬。**"确认 → 快照 → 执行 → 报告"这个形状照搬**，但落地时它要求 `pnpm-workspace.yaml` 进救援点集合——目前不在（`rescue.rs` 的注释里写明不读此文件），这是 2.5 要一并处理的前提 |
 | **备份与恢复**<br>全量 cp + `manifest.json`；`restorePreview` dry-run 给 toAdd/toOverwrite/toDelete/unchanged；恢复前把现状移入 `restore-trash/<ts>`；保留策略 | ★★★★★ | 无 → 全量搬运。默认排除 `.credentials.yaml` / `.env` / `node_modules` / `cache` |
 | **系统服务化**<br>launchd LaunchAgent（`KeepAlive=true`）/ systemd user unit（`Restart=always`）/ Windows 启动文件夹，**独立于管理器进程** | ★★★★ | 无 → 让实例在管理器关闭后继续常驻 |
 | **配置编辑器安全栈**<br>凭据掩码 + 写前 `.bak-<ts>` + 同目录 tmp→rename 原子写（防 DSH 热重载读到半截）+ `dsh --profile X --patch tmp --dump-config` 全链路校验 + LCS diff | ★★★★ | 有编辑、无全链路校验 → 这条最关键：AHL 的目录清单是 `include_str!` 内嵌的，更需要"写进去之前先让 dsh 自己验一遍" |
@@ -225,10 +225,12 @@
 | 2.2 | 救援点快照 / 还原（关键 profile 文件 + 时间戳目录） | `3/zat` |
 | 2.3 | 三级恢复阶梯（L1 对症 / L2 完整恢复 / L3 工厂重置）—— 与 1.6 的安全模式**合并为一条阶梯** | `3/zat` + `1/` |
 | 2.4 | 健康检查项集合（**已落地为 5 组 11 项**，只读，输出 `status + detail + fixes[]`） | `dsh-manager` |
-| 2.5 | 修复动作库（6 个，统一"确认 → 快照 → 执行 → 报告"） | `dsh-manager` |
+| 2.5 | 修复动作库（**已缩为 1 个：`add-allowbuilds`**，统一"确认 → 快照 → 执行 → 报告"） | `dsh-manager` |
 | 2.6 | 诊断包导出（脱敏 zip：env / errors / log）—— **已落地**为六段包，含失败启动自动落盘 | `1/` |
 
-**交叉收益**：2.5 的 `add-allowbuilds` 同时修复 AHL 现有的 MCP / skill 安装失败路径；2.2 的快照机制应成为 2.5 所有破坏性动作以及 §2.3 包回滚的**前置强制步骤**——一处实现，三处受益。
+**交叉收益**：2.5 的 `add-allowbuilds` 修复的是 **git 源安装**这一条路径（核实后缩窄，
+原写"MCP / skill 安装失败路径"过宽，见 Phase 2 实施记录）；2.2 的快照机制应成为 2.5 所有
+破坏性动作以及 §2.3 包回滚的**前置强制步骤**——一处实现，三处受益。
 
 #### Phase 2 实施记录（2026-09-12）
 
@@ -277,6 +279,20 @@
   下一次启动就生效**，不必重启启动器。
 - 测试：`crash.rs` 新增 13 项（合取有序性、三种 capture、内建优先、兜底让位、去重、
   空 `contains` 拒收、两种文档形态、坏条目跳过、文件缺失）。
+
+**2.5 的前置核实已完成，2.5 本身从 6 个动作缩到 1 个**（2026-09-12）。核实结论进了
+`docs/dsh-contract-inventory.md` 的 #53 / #54，这里记它对本计划的影响：
+
+| 原计划的说法 | 核实后 |
+|---|---|
+| 键名待核（`allowBuilds` vs `onlyBuiltDependencies`） | **`allowBuilds`**（pnpm 11 的映射形状），写进 `<DSH_HOME>/profiles/<profile>/pnpm-workspace.yaml`——**这是 dsh 自己打印的指路目标**（`dsh plugin` 在 git 源失败时告知"把 pnpm 印出的键加到 `allowBuilds` 下再重跑"），不是我们替它决定。AHL 自己根目录的 `pnpm-workspace.yaml` 用的也是这个形状 |
+| "`add-allowbuilds` 同时修复 AHL 现有的 MCP / skill 安装失败路径" | **范围要缩窄**：dsh 只在 **git 源**（`git+` / `github:` / `.git#`）失败时才给这条提示，且触发条件是 pnpm **忽略了构建脚本**。普通 npm 源的 MCP / skill 安装不受影响。这是"装 GitHub 上的插件"这一条路径的修复，不是全量安装路径的修复 |
+| 6 个修复动作全搬 | **只留 1 个**：`add-allowbuilds`。`fix-permissions`（win32 必失败）、`clean-cache`（异常被吞导致 `rmSync` 永不执行）、`repair-session-log`（定义了从未接线）三个在 2.4 已按"照搬别家的 bug"砍过，理由不变；`restore-yaml-from-bak` 与 AHL 的 `rescue_restore` 重叠（后者还原的是**启动成功过**的状态，更强）；`pnpm-install-profile` 在 AHL 没有对应命令——按 2.4 的同一条纪律（**有检查无按钮也不给按不动的按钮**），等命令存在再说 |
+
+**顺带发现的一条**：`pnpm` 不在 PATH 是**另一个**独立故障（dsh 打印
+`pnpm not found on PATH` 并 `exit 127`）——AHL 不管理 pnpm，`dsh plugin` 是从 PATH 找的。
+这属于 2.4 的健康检查能真实测量的东西（`pnpm --version` 是一条真测量），比再做一个
+修复按钮更对症。
 
 **2.3 的处置：L1 / L2 已在，L3 不做**（2026-09-12）。先纠一处口径：计划里 2.3 写的是"无"，
 但 AHL 已有 `BootRecovery.tsx`（按诊断结论给出的对症动作，含"停用某 bundle"与"还原救援点"）
