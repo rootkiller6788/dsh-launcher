@@ -134,3 +134,18 @@
 | **每 profile 操作串行化**<br>profile 级锁，防并发安装互踩 | ★★★ | 有 `JobStore.claim_next` 原子 FIFO → 基本覆盖，可跳过 |
 | **deep-link 协议**<br>`dsh-launcher://launch` / `pack` | ★★ | 无 → Tauri 有 `deep-link` 插件，成本低但优先级低 |
 | **PTY 内嵌终端 + TUI 会话**<br>portable-pty + xterm | ★★ | 无 → ⚠️ **建议不吸收**：终端是旁路，与 DSH-first 边界冲突；AHL 已有 Activity 面板 |
+
+### 2.4 从 `3/zat`（mishibeikejie，纯 JS Electron）吸收 —— 痛点：**多实例污染 + 崩溃自救**
+
+| 机制 | 价值 | AHL 现状 → 移植方式 |
+|---|---|---|
+| **崩溃诊断规则引擎**<br>`rescue.js` 的 `diagnoseCrash`：13+ 类正则（missing-bundle / plugin-failed / bad-profile / missing-module / source-deps / native-deps / client-module-missing / bundle-mismatch / source-mixed / duplicate-plugin / tool-missing / cli-arg / cli-error），**每条映射真实的 GitHub issue 编号**（#880 / #1677 / #2130 / #2990 / #3263 / #2889） | ★★★★★ | 无 → **规则表直接搬**。本计划最值钱的一条。注意它"每条对应真实 issue"的做法——这是规则可信度的来源，不要写成拍脑袋的匹配 |
+| **救援点快照 / 还原**<br>`createRescueSnapshot`：快照 profile 的 `cordis.yml` / `cordis.patch.yml` / `package.json` / `pnpm-workspace.yaml` | ★★★★★ | 无 → 成本极低（4 个文件 + 时间戳目录），收益极高。应成为所有破坏性动作的**强制前置步骤** |
+| **三级恢复阶梯**<br>L1 对症 → L2 完整恢复 → L3 工厂重置（保留引擎注册） | ★★★★ | 无 → 与 `1/` 的安全模式**合并设计为一条阶梯**，不要做两套 |
+| **会话日志实时逆解析**<br>`session-activity.js`：zstd 逐帧 + `fromByte` 回退 64KB 找帧魔数 `28 B5 2F FD`，流式碎片聚合（text-chunks / tool-call-chunks） | ★★★★ | 无 → Rust 侧有 zstd crate，比 JS 更好做。另可调 DSH 的 `/api/session.list` 拿权威标题 |
+| **CLI 参数兼容性探测**<br>`cli-probe.js`：启动前先探明这版 dsh 认不认某个 flag | ★★★★ | **零命中** → 与 §2.3 的 `--no-open` 字面量扫描合并成一套"启动前探明能力"的机制。AHL 会向 dsh 传 flag，传错就是启动失败 |
+| **token-401 页识别**<br>`terminal-supervisor.js` 的 `check()`：TCP → HTTP → cmdline → 归属四级递进，能识别"token 失效的 401 页"而不是当成健康页 | ★★★★ | 只等 URL 行 → 直接进 §2.1 的页面层自检签名表。这是"假就绪"最典型的形态 |
+| **工具链自举**<br>node / pnpm / npm / git 自举到用户目录，绝不摸系统工具 | ★★★ | 内置 node，pnpm / git 待核 → AHL 已有受管 `runtimes/`，补 pnpm / git 即可 |
+| **删除安全规划**<br>`planTerminalDeletion`：保护 `~/.dsh`、主目录一级、盘根、其他实例的共享/嵌套路径 | ★★★ | 有 `sanitize_mcp_segment`，删除保护待核 → 删除前先算"删除根范围"，返回 blocked / roots 结构 |
+| ~~copy 模式物理隔离~~ | — | ⚠️ **不吸收**，见 §3 |
+| ~~隐藏控制台~~ | — | 已有 `CREATE_NO_WINDOW`（`process.rs:649-659`） |
