@@ -43,6 +43,7 @@ pub mod mcp_local;
 pub mod mcp_prefetch;
 pub mod mcp_probe;
 pub mod mcp_resolver;
+pub mod page_signature;
 pub mod runtimes;
 pub mod theme;
 
