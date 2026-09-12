@@ -121,3 +121,16 @@
 | **launchToken 日志脱敏**<br>正则 `([?&](?:token\|launchToken)=)[^&\s"']+` → `***` | ★★★★ | token 存在，脱敏待核 → 改动极小。AHL 的日志会进 Activity 面板和 `logs/launcher.log`，暴露面比同类更大 |
 | **泄露检测规则**<br>`securityRisk`：必须**同时**满足"含 credential 标记 + type 是 tool/call \| result + actor 不在官方工具集 + 不在白名单"，分红/橙/黄三级 | ★★★ | 有 keyring、无运行时检测 → 规则表可直接搬。保持它的**保守判定**：宁可漏报不可误报 |
 | **内置说明问答**<br>Q&A 入口紧贴功能标题 | ★★ | 无 → 纯 UI，放 UI polish pass |
+
+### 2.3 从 `2/`（dsh-plugins，Tauri 2 + Rust）吸收 —— 痛点：**环境耦合**
+
+| 机制 | 价值 | AHL 现状 → 移植方式 |
+|---|---|---|
+| **三种 DSH_HOME 模式**<br>复用现有 / 自动采纳 `~/.dsh` / 每实例独立 | ★★★★★ | 仅"每实例独立" → `instance.rs` 的 manifest 加 mode 枚举。让用户能接入已有环境而不必重建 |
+| **包完整性与回滚**<br>`modpack.rs`：manifest v2–v5 + `.dspack` 打包 + sha256 校验 + 回滚 | ★★★★ | `bundle.rs` **仅 94 行，无 sha256 / 无 rollback** → AHL 有 `Bundle{...}` 任务类型但缺完整性保障。补校验和失败回滚，与 §2.4 的救援点快照共用同一套"改动前先留退路"机制 |
+| **三版本通道**<br>`PluginChannel` stable（releases / npm `latest`）/ beta（pre-release / `next`）/ alpha（GitHub 最新 commit），另有 `PluginSource` 双市场 | ★★★★ | `market.rs` **只有 `latest` dist-tag** → 补 dist-tag 与 GitHub commit 两种通道。alpha 通道尤其重要——很多 dsh 插件只在 GitHub 上发预发布 |
+| **外部实例扫描与采纳**<br>`scan_local_dsh`（`~/.dsh*` + `DSH_HOME` 环境变量）+ `probe_external_port` TCP 探测 | ★★★★ | 无 → 与第一条同批做，逻辑相邻 |
+| **CLI 特性探测**<br>`--no-open` 不比对版本号，而是**扫描已装代码里有无该 flag 字面量** | ★★★ | **零命中** → 比版本比对可靠得多（预发布版本号不可比）。与 `3/zat` 的 cli-probe 是同一思路的两种实现，取长补短 |
+| **每 profile 操作串行化**<br>profile 级锁，防并发安装互踩 | ★★★ | 有 `JobStore.claim_next` 原子 FIFO → 基本覆盖，可跳过 |
+| **deep-link 协议**<br>`dsh-launcher://launch` / `pack` | ★★ | 无 → Tauri 有 `deep-link` 插件，成本低但优先级低 |
+| **PTY 内嵌终端 + TUI 会话**<br>portable-pty + xterm | ★★ | 无 → ⚠️ **建议不吸收**：终端是旁路，与 DSH-first 边界冲突；AHL 已有 Activity 面板 |
