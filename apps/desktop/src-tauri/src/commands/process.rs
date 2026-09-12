@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use dsh_adapter::web_check::{check_root, WebVerdict};
 use launcher_core::instance::InstanceManifest;
 use launcher_core::process::{
     sweep_leftover, wait_for_port, PidLedger, ProcessState, ProcessStatus,
@@ -44,6 +45,13 @@ const BOOT_HINT_SECS: u64 = 15;
 /// from DSH-Launcher: a plugin stuck in an infinite print loop would evade this,
 /// but that is rarer than the cold boot this saves.
 const BOOT_SILENCE_SECS: u64 = 120;
+
+/// How long the workspace-URL check may take before its verdict is "unreadable"
+/// (see [`dsh_adapter::web_check`]). Generous for a loopback request that is
+/// already accepting connections, short enough that a server which never
+/// answers the root cannot stall a launch — the verdict fails open, so a longer
+/// wait buys nothing.
+const WEB_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Launch an instance's harness as a managed child, wait for DSH to report its
 /// web URL, then show the UI in a launcher-owned DSH window. One instance runs
@@ -325,7 +333,10 @@ async fn do_launch(
     if url.is_some() {
         emit_debug(
             app,
-            &format!("{id} · DSH URL ready after {}ms", launch_start.elapsed().as_millis()),
+            &format!(
+                "{id} · DSH URL ready after {}ms",
+                launch_start.elapsed().as_millis()
+            ),
         );
     }
 
@@ -1055,12 +1066,14 @@ fn dump_diagnostic_package(
             line: format!("launcher diagnosis (boot {stage}): {}", issue.message),
         })
         .collect();
-    activity.extend(tail.lines().into_iter().map(|line| {
-        crate::commands::diagnose::ActivityLine {
-            level: "error".into(),
-            line,
-        }
-    }));
+    activity.extend(
+        tail.lines()
+            .into_iter()
+            .map(|line| crate::commands::diagnose::ActivityLine {
+                level: "error".into(),
+                line,
+            }),
+    );
 
     let Ok(package) = crate::commands::diagnose::collect(&state, &settings, &instance, &activity)
     else {
@@ -1160,18 +1173,83 @@ async fn finalize_ready(
             );
         }
     }
+    // An open port is not an answerable URL: dsh can refuse the very URL it
+    // printed (that URL's token is not the one the server is authenticating
+    // with) while the port accepts perfectly, which is how a boot used to be
+    // reported ready with the window showing an authentication notice. Ask the
+    // URL itself and let its answer decide what this boot may claim.
+    //
+    // Short timeout on purpose: the verdict fails open anyway, so waiting longer
+    // would only delay a boot for a signal that cannot change the outcome.
+    let verdict = port.map(|_| check_root(url, WEB_CHECK_TIMEOUT));
+    let verdict = match verdict {
+        Some(pending) => Some(pending.await),
+        None => None, // no port in the ready line: nothing to ask
+    };
+    let refused = matches!(&verdict, Some(v) if v.refused());
     handle.set_status(ProcessStatus::Running);
-    emit_log(app, &format!("{} · DSH web ready at {url}", instance.id));
+    match &verdict {
+        Some(WebVerdict::Refused { status, detail }) => {
+            emit_warn(
+                app,
+                &format!(
+                    "{} · dsh refused the URL it printed — HTTP {status}: {detail}",
+                    instance.id
+                ),
+            );
+            // dsh is up and the profile booted; what failed is the workspace
+            // URL, so this is a diagnosis rather than a failed launch. The
+            // process is left running: restarting it would not change which
+            // token its server authenticates with, and stopping it would take
+            // the user's harness down over a page they may still be able to
+            // open (a saved session cookie covers a refused token).
+            let _ = app.emit(
+                LAUNCH_DIAGNOSIS_EVENT,
+                LaunchDiagnosis {
+                    instance_id: instance.id.clone(),
+                    stage: "refused".to_string(),
+                    issues: vec![dsh_adapter::crash::web_auth_refused(detail)],
+                },
+            );
+        }
+        other => {
+            if let Some(WebVerdict::Unreadable { detail }) = other {
+                emit_debug(
+                    app,
+                    &format!("{} · workspace URL unclassified: {detail}", instance.id),
+                );
+            }
+            emit_log(app, &format!("{} · DSH web ready at {url}", instance.id));
+        }
+    }
     let _ = app.emit(DSH_URL_EVENT, url.to_string());
     // The profile files that got here boot, so they are the ones worth restoring
     // to — refresh the instance's rescue point. A failed boot never reaches this
     // point, which is what makes the pairing with `reserve_rescue_point` work.
     //
-    // Known limitation: this fires on "server up + port accepting", which is the
-    // strongest signal available today. It does not prove the page *rendered* —
-    // a broken client bundle can still serve. When the page self-check lands
-    // (absorb-plan 1.4) this refresh should move behind that check.
-    crate::commands::rescue::refresh_rescue_point(&app.state::<AppState>(), app, &instance.id);
+    // This sits behind the URL check above, which is what absorb-plan 1.4 asked
+    // for, and the reason is now sharper than "the page might not have
+    // rendered": a refusal means the workspace was never usable at that URL, and
+    // a rescue point is supposed to be a state worth going back to.
+    //
+    // What the check still cannot see, and why this refresh is fail-open on
+    // `Unreadable`: reachability and token acceptance are all that can be
+    // measured from here. A client bundle that serves the root but renders an
+    // error panel is invisible — the launcher has no DOM access to a dsh page
+    // (`App.tsx` renders it in a cross-origin iframe), so that class of failure
+    // stays where it was: diagnosed from the log when it also breaks the boot
+    // (`crash.rs` rule 7), silent when it does not.
+    if refused {
+        emit_debug(
+            app,
+            &format!(
+                "{} · rescue point left as it was: this boot never served its workspace URL",
+                instance.id
+            ),
+        );
+    } else {
+        crate::commands::rescue::refresh_rescue_point(&app.state::<AppState>(), app, &instance.id);
+    }
     // Subscribe to DSH's host SSE stream so an appearance/language change made
     // inside the DSH window reaches the launcher immediately (no poll lag). The
     // sender is handed to the caller to cancel on stop.
@@ -1395,7 +1473,10 @@ mod tests {
         assert_eq!(package_epoch(Path::new("boot-degraded-42.zip")), Some(42));
         assert_eq!(package_epoch(Path::new("boot-crashed-nope.zip")), None);
         assert_eq!(package_epoch(Path::new("boot-crashed-42")), None);
-        assert_eq!(package_epoch(Path::new("ahl-diagnose-default-42.zip")), None);
+        assert_eq!(
+            package_epoch(Path::new("ahl-diagnose-default-42.zip")),
+            None
+        );
     }
 
     #[test]
