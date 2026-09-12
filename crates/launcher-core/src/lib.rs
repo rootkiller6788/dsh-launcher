@@ -11,6 +11,7 @@ pub mod crash;
 pub mod diagnostics;
 pub mod download;
 pub mod environment;
+pub mod error_code;
 pub mod github;
 pub mod history;
 pub mod instance;
@@ -39,6 +40,7 @@ pub use capabilities::{
 };
 pub use download::{download_file, file_sha256, part_path, sha256_hex, DownloadOutcome};
 pub use environment::{EnvironmentManifest, EnvironmentSource, ExportedItem};
+pub use error_code::{CodedError, ErrorCode};
 pub use history::{LaunchHistory, LaunchSession};
 pub use instance::{
     load_runtime, save_runtime, InstanceManifest, McpRuntimeState, McpServerRecord, RuntimeRef,
