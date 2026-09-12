@@ -34,6 +34,7 @@ use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 pub mod content;
+pub mod crash;
 pub mod diagnostics;
 pub mod events;
 pub mod language;
