@@ -391,8 +391,13 @@ fn copy_tree_recursive(src: &Path, dst: &Path) -> Result<()> {
 /// every link would otherwise take the slow fallback path.
 #[cfg(windows)]
 fn restore_junctions(src: &Path, dst: &Path) -> Result<()> {
+    // `read_link` on junctions can return a different path form than the `src`
+    // we walked (8.3 short names on CI runners, `\\?\` verbatim prefixes).
+    // Normalize both sides up front so strip_prefix can match.
+    let src_n = normalize_path(src);
+    let dst_n = normalize_path(dst);
     let mut links: Vec<(PathBuf, PathBuf)> = Vec::new(); // (dest_link, abs_target)
-    let mut stack = vec![src.to_path_buf()];
+    let mut stack = vec![src_n.clone()];
     while let Some(from) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&from) else { continue };
         for entry in entries.flatten() {
@@ -400,13 +405,13 @@ fn restore_junctions(src: &Path, dst: &Path) -> Result<()> {
             let Ok(ft) = std::fs::symlink_metadata(&path) else { continue };
             if ft.file_type().is_symlink() {
                 let Ok(target) = std::fs::read_link(&path) else { continue };
-                let Some(rel) = path.strip_prefix(src).ok() else { continue };
-                let dl = dst.join(rel);
+                let Some(rel) = path.strip_prefix(&src_n).ok() else { continue };
+                let dl = dst_n.join(rel);
                 if let Some(parent) = dl.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                let link_dir = path.parent().unwrap_or(src);
-                links.push((dl, remap_target(&target, link_dir, src, dst)));
+                let link_dir = path.parent().unwrap_or(&src_n);
+                links.push((dl, remap_target(&target, link_dir, &src_n, &dst_n)));
                 continue; // never descend into a link target
             }
             if ft.is_dir() {
@@ -421,15 +426,41 @@ fn restore_junctions(src: &Path, dst: &Path) -> Result<()> {
     create_junctions_batch(&links)
 }
 
+/// Drop the Windows verbatim (`\\?\`) / UNC-verbatim prefix so paths compare
+/// and display as ordinary drive paths.
+fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    let s = path.as_os_str().to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest.to_string());
+    }
+    path.to_path_buf()
+}
+
+/// Canonicalize when the path exists (expands 8.3 short names on Windows),
+/// then strip any verbatim prefix. Falls back to the input path.
+fn normalize_path(path: &Path) -> PathBuf {
+    match std::fs::canonicalize(path) {
+        Ok(c) => strip_verbatim_prefix(&c),
+        Err(_) => strip_verbatim_prefix(path),
+    }
+}
+
 /// Resolve a source link target to where it must point in `dst`. A relative
 /// target resolves against the link's own directory (both Windows junction and
 /// Unix symlink semantics); the resulting in-`src` path becomes the matching
 /// path in `dst`. Targets outside `src` stay verbatim.
+///
+/// `src` and `dst` must already be normalized (see [`normalize_path`]); the
+/// junction target is normalized here because `read_link` is the step that
+/// introduces short names / verbatim prefixes.
 fn remap_target(target: &Path, link_dir: &Path, src: &Path, dst: &Path) -> PathBuf {
     let abs_src = if target.is_absolute() {
-        target.to_path_buf()
+        normalize_path(target)
     } else {
-        link_dir.join(target)
+        normalize_path(&link_dir.join(target))
     };
     match abs_src.strip_prefix(src) {
         Ok(rel) => dst.join(rel),
@@ -650,12 +681,60 @@ mod tests {
         assert!(dl.join("index.js").is_file(), "junction target not reachable via dest");
         assert!(dst.join("store/pkg/index.js").is_file(), "store not copied");
         let recreated = std::fs::read_link(&dl).expect("read recreated junction target");
+        // Compare normalized forms: CI runners may report short names or `\\?\`
+        // prefixes that do not string-match the `dst` we constructed.
+        let recreated_n = normalize_path(&recreated);
+        let dst_n = normalize_path(&dst);
         assert!(
-            recreated.starts_with(&dst),
-            "junction must point into the copied tree (dst), got: {}",
-            recreated.display()
+            recreated_n.starts_with(&dst_n),
+            "junction must point into the copied tree (dst), got: {} (normalized {} vs dst {})",
+            recreated.display(),
+            recreated_n.display(),
+            dst_n.display()
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn strip_verbatim_prefix_unwraps_drive_and_unc() {
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\C:\Temp\a")),
+            PathBuf::from(r"C:\Temp\a")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\UNC\server\share\x")),
+            PathBuf::from(r"\\server\share\x")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"C:\Temp\a")),
+            PathBuf::from(r"C:\Temp\a")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remap_target_rewrites_in_src_paths() {
+        let src = PathBuf::from(r"C:\proj\src");
+        let dst = PathBuf::from(r"C:\proj\dst");
+        let link_dir = src.join("node_modules");
+        let remapped = remap_target(
+            Path::new(r"C:\proj\src\store\pkg"),
+            &link_dir,
+            &src,
+            &dst,
+        );
+        assert_eq!(remapped, dst.join(r"store\pkg"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remap_target_keeps_outside_src() {
+        let src = PathBuf::from(r"C:\proj\src");
+        let dst = PathBuf::from(r"C:\proj\dst");
+        let outside = PathBuf::from(r"C:\shared\store");
+        let remapped = remap_target(&outside, &src, &src, &dst);
+        assert_eq!(remapped, outside);
     }
 }
