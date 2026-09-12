@@ -158,13 +158,19 @@ async fn do_launch(
                 status,
                 ProcessStatus::Running | ProcessStatus::Starting | ProcessStatus::Degraded
             ) {
-                if running.instance_id == id {
+                // A normal relaunch of the instance already running is a no-op.
+                // Safe mode is not: its whole point is to stop the broken boot
+                // and boot the scratch profile instead, so it must fall through
+                // to the stop-and-switch below rather than return the live state.
+                if running.instance_id == id && safe_tier.is_none() {
                     return Ok(running.handle.state());
                 }
-                emit_log(
-                    app,
-                    &format!("Stopping {} to switch to {id}…", running.instance_id),
-                );
+                let stop_note = if safe_tier.is_some() {
+                    format!("Stopping {id} to start it in safe mode…")
+                } else {
+                    format!("Stopping {} to switch to {id}…", running.instance_id)
+                };
+                emit_log(app, &stop_note);
                 if let Some(mut r) = guard.take() {
                     drop(guard);
                     let prev_pid = r.handle.pid;
