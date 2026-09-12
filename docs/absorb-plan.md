@@ -110,3 +110,14 @@
 | **诊断包导出**<br>`--diagnose` 生成脱敏 zip（env / errors / log 三段） | ★★★★ | `diagnostics.rs` 薄、无导出 → `zip` crate 已在 `Cargo.toml`，成本极低 |
 | **结构化错误码**<br>`ErrorCodes.cs`（E1xxx 运行时 / E2xxx 服务 / E4xxx 更新 / E9001 内部），`Describe()` 被弹窗、日志、诊断包三处共用 | ★★★★ | 有"下一步动作"文案、无编号 → 补编号与分类，三处共用同一码 |
 | **Outcome Contract 测试**<br>只断言系统最终物理状态，不关心内部调用顺序 | ★★★ | 有 e2e、无此粒度 → 补在 `crates/*/tests/`：如"启动失败后必定存在安全模式入口" |
+
+### 2.2 从 `DSH-Launcher`（MarcoG-h，Electron）吸收 —— 痛点：**冷启动摩擦**
+
+| 机制 | 价值 | AHL 现状 → 移植方式 |
+|---|---|---|
+| **自适应启动超时**<br>不用固定秒数判死：进程活着且持续有输出 → 判"仍在启动"，每 15s 提示耗时；**120s 无任何输出**才判超时 | ★★★★★ | **硬编码 20s / 240s**（`commands/process.rs:280` / `:359`）→ 直接替换这两个常量。这是全计划性价比最高的一条 |
+| **超时自愈**<br>即便被误判，端口真就绪后状态自动恢复 | ★★★★ | 无 → 超时后不销毁句柄，保留 watcher，让晚到的 URL 仍能触发 `finalize_ready` |
+| **事件流驱动状态**<br>托盘状态用 `/api/events.host` + `/api/events.mux`，而不是刮 stdout | ★★★★ | ⚠️ **已订阅 `events.host`，但仅 `ui-theme` / `locale`**（`events.rs`）→ 扩到生命周期信号 + 补 `events.mux`。注意 apiproxy 可能比端口晚就绪，它的重连退避写法可直接照搬 |
+| **launchToken 日志脱敏**<br>正则 `([?&](?:token\|launchToken)=)[^&\s"']+` → `***` | ★★★★ | token 存在，脱敏待核 → 改动极小。AHL 的日志会进 Activity 面板和 `logs/launcher.log`，暴露面比同类更大 |
+| **泄露检测规则**<br>`securityRisk`：必须**同时**满足"含 credential 标记 + type 是 tool/call \| result + actor 不在官方工具集 + 不在白名单"，分红/橙/黄三级 | ★★★ | 有 keyring、无运行时检测 → 规则表可直接搬。保持它的**保守判定**：宁可漏报不可误报 |
+| **内置说明问答**<br>Q&A 入口紧贴功能标题 | ★★ | 无 → 纯 UI，放 UI polish pass |
