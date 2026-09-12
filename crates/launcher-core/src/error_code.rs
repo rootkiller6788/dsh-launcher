@@ -160,6 +160,12 @@ impl CodedError {
     }
 }
 
+impl std::fmt::Display for CodedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
