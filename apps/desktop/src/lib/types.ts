@@ -654,6 +654,9 @@ export interface CrashIssue {
   fix: FixAction
 }
 
+/** Which rung of the safe-mode recovery ladder a boot is at (serde lowercase). */
+export type SafeTier = 'plugins' | 'minimal'
+
 /** Emitted on the `launch-diagnosis` event when a boot goes wrong. */
 export interface LaunchDiagnosis {
   instanceId: string

@@ -36,6 +36,7 @@ import type {
   Registry,
   RegistryPlugin,
   RescueStatus,
+  SafeTier,
   ShellMode,
   SkillRecord,
   SkillUpdate,
@@ -127,6 +128,12 @@ interface AppStore {
   /** This instance's rescue point (Phase 2.2) — the state "restore" goes back to. */
   rescue: RescueStatus | null
   /**
+   * Which safe-mode tier the running child was booted at (Phase 2.3), or null
+   * for a normal boot. Read back from the backend rather than assumed, so a
+   * safe launch dsh refused never shows a "safe mode active" banner.
+   */
+  safeTier: SafeTier | null
+  /**
    * The instance measured right now (Phase 2.4) — what is wrong *before* it
    * becomes a crash. Read-only; re-measured after every fix and every boot.
    */
@@ -182,6 +189,7 @@ interface AppStore {
   syncLanguage: () => Promise<void>
   removeProviderKey: () => Promise<void>
   launch: (id: string) => Promise<void>
+  safeLaunch: (id: string, tier: SafeTier) => Promise<void>
   stop: () => Promise<void>
   restart: () => Promise<void>
   loadRegistry: (opts?: { force?: boolean }) => Promise<void>
@@ -284,6 +292,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   diagnostics: null,
   launchDiagnosis: null,
   rescue: null,
+  safeTier: null,
   health: null,
   busy: false,
   error: null,
@@ -602,7 +611,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
   refreshState: async () => {
     try {
-      set({ processState: await ipc.processState() })
+      const [processState, safeTier] = await Promise.all([
+        ipc.processState(),
+        ipc.runningSafeTier().catch(() => null),
+      ])
+      set({ processState, safeTier })
     } catch (e) {
       get().fail(e)
     }
@@ -844,7 +857,32 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       const processState = await ipc.launch(id)
       const dshUrl = await ipc.currentDshUrl().catch(() => get().dshUrl)
-      set({ processState, dshUrl, shellMode: 'workspace' })
+      set({ processState, dshUrl, shellMode: 'workspace', safeTier: null })
+      void get().refreshLibraryInventory()
+      void get().refreshUpdates()
+      void get().refreshSkillUpdates()
+    } catch (e) {
+      get().fail(e)
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  safeLaunch: async (id, tier) => {
+    set({
+      busy: true,
+      error: null,
+      launchStartedAt: Date.now(),
+      launchDiagnosis: null,
+    })
+    try {
+      const processState = await ipc.safeLaunch(id, tier)
+      const dshUrl = await ipc.currentDshUrl().catch(() => get().dshUrl)
+      // Read the tier back rather than assume: a safe profile dsh refused is a
+      // failed launch, and the backend is the one that knows whether a child is
+      // actually running in safe mode.
+      const safeTier = await ipc.runningSafeTier().catch(() => null)
+      set({ processState, dshUrl, shellMode: 'workspace', safeTier })
       void get().refreshLibraryInventory()
       void get().refreshUpdates()
       void get().refreshSkillUpdates()
@@ -858,7 +896,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   stop: async () => {
     set({ busy: true, error: null })
     try {
-      set({ processState: await ipc.stop(), dshUrl: null })
+      set({ processState: await ipc.stop(), dshUrl: null, safeTier: null })
       await get().refreshHistory()
     } catch (e) {
       get().fail(e)
@@ -878,7 +916,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await get().refreshHistory()
       const processState = await ipc.launch(id)
       const dshUrl = await ipc.currentDshUrl().catch(() => get().dshUrl)
-      set({ processState, dshUrl, shellMode: 'workspace' })
+      set({ processState, dshUrl, shellMode: 'workspace', safeTier: null })
       void get().refreshLibraryInventory()
       void get().refreshUpdates()
       void get().refreshSkillUpdates()

@@ -31,6 +31,7 @@ import type {
   Registry,
   RegistryPlugin,
   RescueStatus,
+  SafeTier,
   RuntimeEntry,
   RuntimeManagerView,
   SystemInfo,
@@ -66,6 +67,7 @@ export const ipc = {
   removeProviderKey: () => call<void>('remove_provider_key', { id: 'default' }),
 
   launch: (id: string) => call<ProcessState>('launch', { id }),
+  safeLaunch: (id: string, tier: SafeTier) => call<ProcessState>('safe_launch', { id, tier }),
   stop: () => call<ProcessState>('stop'),
   openDsh: () => call<void>('open_dsh'),
   openDshExternal: () => call<void>('open_dsh_external'),
@@ -76,6 +78,7 @@ export const ipc = {
   currentDshUrl: () => call<string | null>('current_dsh_url'),
   processState: () => call<ProcessState>('process_state'),
   runningInstance: () => call<string | null>('running_instance'),
+  runningSafeTier: () => call<SafeTier | null>('running_safe_tier'),
   recentSessions: (limit?: number) =>
     call<LaunchSession[]>('recent_sessions', { limit }),
   usageRecent: (instanceId?: string | null, limit?: number) =>

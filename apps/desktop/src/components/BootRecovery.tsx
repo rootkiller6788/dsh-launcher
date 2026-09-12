@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { LifeBuoy, RotateCcw, TriangleAlert, X } from 'lucide-react'
+import { LifeBuoy, RotateCcw, ShieldAlert, TriangleAlert, X } from 'lucide-react'
 
 import { useT } from '../lib/i18n'
 import type { CrashIssue, FixAction, LaunchDiagnosis } from '../lib/types'
@@ -20,15 +20,20 @@ export function BootRecovery({ running }: { running: boolean }) {
   const t = useT()
   const diagnosis = useAppStore((s) => s.launchDiagnosis)
   const rescue = useAppStore((s) => s.rescue)
+  const safeTier = useAppStore((s) => s.safeTier)
+  const activeId = useAppStore((s) => s.activeId)
   const clearLaunchDiagnosis = useAppStore((s) => s.clearLaunchDiagnosis)
   const createRescue = useAppStore((s) => s.createRescue)
   const restoreRescue = useAppStore((s) => s.restoreRescue)
   const applyCrashFix = useAppStore((s) => s.applyCrashFix)
+  const safeLaunch = useAppStore((s) => s.safeLaunch)
+  const restart = useAppStore((s) => s.restart)
   const [restoring, setRestoring] = useState(false)
   const [applying, setApplying] = useState(false)
+  const [safeStarting, setSafeStarting] = useState(false)
 
   const hasRescue = rescue?.exists ?? false
-  if (!diagnosis && !hasRescue) return null
+  if (!diagnosis && !hasRescue && !safeTier) return null
 
   const onRestore = async () => {
     setRestoring(true)
@@ -46,6 +51,24 @@ export function BootRecovery({ running }: { running: boolean }) {
     } finally {
       setApplying(false)
     }
+  }
+
+  const onSafeLaunch = async () => {
+    if (!activeId) return
+    setSafeStarting(true)
+    try {
+      await safeLaunch(activeId, 'plugins')
+    } finally {
+      setSafeStarting(false)
+    }
+  }
+
+  // Leaving safe mode is a normal relaunch — `restart` composes stop + launch,
+  // and a same-instance launch on its own would early-return while the safe-mode
+  // child is still up.
+  const onLeaveSafeMode = async () => {
+    if (!activeId) return
+    await restart()
   }
 
   return (
@@ -103,6 +126,43 @@ export function BootRecovery({ running }: { running: boolean }) {
               ))}
             </ul>
           )}
+          <div className="mt-3 flex items-center gap-2 border-t border-zinc-800/60 pt-2.5">
+            <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-zinc-400" strokeWidth={1.75} />
+            <span className="min-w-0 flex-1 truncate text-[11px] text-zinc-500">
+              {t('crash.safeModeHint')}
+            </span>
+            <button
+              onClick={() => void onSafeLaunch()}
+              disabled={safeStarting}
+              title={t('crash.safeMode')}
+              className="shrink-0 rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 transition-colors hover:border-zinc-500 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {safeStarting ? '…' : t('crash.safeMode')}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {safeTier && (
+        <div className="flex items-center gap-3 rounded-lg border border-sky-500/25 bg-sky-500/5 px-4 py-2.5">
+          <ShieldAlert className="h-4 w-4 shrink-0 text-sky-300" strokeWidth={1.75} />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium text-sky-200">{t('safeMode.title')}</span>
+              <span className="truncate text-[11px] text-sky-300/70">
+                {t(safeTier === 'plugins' ? 'safeMode.tierPlugins' : 'safeMode.tierMinimal')}
+              </span>
+            </div>
+            <div className="mt-0.5 truncate text-[11px] text-zinc-500">{t('safeMode.body')}</div>
+          </div>
+          <button
+            onClick={() => void onLeaveSafeMode()}
+            disabled={safeStarting}
+            title={t('safeMode.leaveHint')}
+            className="shrink-0 rounded-md border border-sky-500/40 bg-sky-500/10 px-2 py-1 text-[11px] text-sky-200 transition-colors hover:bg-sky-500/20 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-transparent disabled:text-zinc-600"
+          >
+            {t('safeMode.leave')}
+          </button>
         </div>
       )}
 
