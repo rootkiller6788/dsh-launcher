@@ -228,6 +228,30 @@ pub fn sanitize_mcp_segment(server: &str) -> String {
     }
 }
 
+/// A name reduced to a lowercase `[a-z0-9-]` segment, for file names built out of
+/// user-visible names — an instance id from an instance name, an exported archive
+/// from an instance or environment name.
+///
+/// `fallback` is a parameter rather than a constant because the callers name
+/// different things, and a shared fallback would have one of them calling an
+/// instance "environment" (or worse, silently overwriting another package's file).
+/// What must not differ is the algorithm: a second copy of it here is a second
+/// thing to drift, and file names are how these artifacts are told apart.
+pub fn slug(name: &str, fallback: &str) -> String {
+    let s: String = name
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let s = s.trim_matches('-').to_string();
+    if s.is_empty() {
+        fallback.into()
+    } else {
+        s
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,6 +374,21 @@ mod tests {
         assert_eq!(paths.rescue_dir("default"), instance.join("rescue"));
         assert_eq!(paths.diagnostics_dir("default"), instance.join("diagnostics"));
         let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn slug_reduces_a_name_to_a_segment() {
+        assert_eq!(slug("My Instance", "instance"), "my-instance");
+        assert_eq!(slug("  padded  ", "instance"), "padded");
+        assert_eq!(slug("a.b_c", "x"), "a-b-c");
+        // Only separators, empty, and a name with no ASCII alphanumerics in it all
+        // fall back — a CJK instance name gets the fallback, not an empty segment.
+        assert_eq!(slug("---", "instance"), "instance");
+        assert_eq!(slug("", "instance"), "instance");
+        assert_eq!(slug("环境", "instance"), "instance");
+        // The fallback is the caller's, and it is what keeps two callers' file
+        // names from colliding on a name neither can slug.
+        assert_eq!(slug("环境", "environment"), "environment");
     }
 
     #[test]

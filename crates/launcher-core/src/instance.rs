@@ -682,19 +682,12 @@ impl InstanceManifest {
 }
 
 /// Lowercase name, spaces → `-`, drop non-alphanumerics; fallback `instance`.
+///
+/// An instance's id *is* its directory name, and the same reduction names its
+/// exported archives, so the algorithm lives once in [`crate::paths::slug`] with
+/// the fallback as an argument rather than in a copy per caller.
 fn slugify(name: &str) -> String {
-    let base: String = name
-        .trim()
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let base = base.trim_matches('-').to_string();
-    if base.is_empty() {
-        "instance".into()
-    } else {
-        base
-    }
+    crate::paths::slug(name, "instance")
 }
 
 fn existing_ids(paths: &AppPaths) -> Result<Vec<String>> {
@@ -1037,5 +1030,20 @@ mod tests {
         assert_eq!(loaded.transport, "stdio");
         assert_eq!(loaded.tools, snap.tools);
         let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn an_instance_id_is_a_slug_of_its_name() {
+        // An id is a directory name, so this reduction is a storage format:
+        // changing it would rename every existing instance's folder out from
+        // under it. Pinned here as well as in `paths`, because that is the
+        // consequence this call site carries.
+        assert_eq!(slugify("My Instance"), "my-instance");
+        assert_eq!(slugify("环境"), "instance", "nothing to slug → fallback");
+        assert_eq!(
+            unique_id("default", &["default".into(), "default-2".into()]),
+            "default-3"
+        );
+        assert_eq!(unique_id("fresh", &["default".into()]), "fresh");
     }
 }
