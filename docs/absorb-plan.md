@@ -182,3 +182,36 @@
 | **悬浮球 / 开屏动画 / 托盘三态灯** | 与 AHL「生态管理平台」的定位不符，那是消费级产品的语言 |
 | **直接改 `package.json` bundles 数组启停插件** | 违反 DSH-first 边界。`DSH-Launcher` 走过这条路，其 `repairProfile` 就是为修此而生 |
 | **未知来源的 MCP 安装命令** | AHL 已有的铁律不能松：LLM 只返回严格 JSON `{kind,entry,args,env}`，且 entry 走组件级路径校验（`resolve_inside`），超出即丢 |
+
+---
+
+## 4. 分阶段计划
+
+排序依据：**（价值 ÷ 成本）× 是否解除其他工作的阻塞**。每阶段内的条目按依赖顺序排列。
+
+### Phase 0 — 地基核对（先做，否则后续基于错误输入排期）
+
+| # | 任务 | 来源 | 验收 |
+|---|---|---|---|
+| 0.1 | 更新 `optimization-backlog.md`，划掉已完成的第 1/2/3/5/7/8 条 | 自查 | 清单与代码一致，不再误导决策 |
+| 0.2 | 加 `core:smoke` 式关卡：无 GUI 直驱 `launcher-core` 冒烟，进 CI | `dsh-manager` | 一条命令跑通核心层，不启动窗口 |
+| 0.3 | 统一错误编号 + 分类，每条带"下一步动作" | `1/` | 弹窗 / Activity 日志 / 诊断包三处共用同一码 |
+| 0.4 | 核实并补 launchToken 日志脱敏 | `DSH-Launcher` | 日志里 token 显示为 `***` |
+| 0.5 | **上游契约清单**：把 AHL 依赖的 dsh 接口逐条登记（`pluginInventory.list`、`/api/events.host`、`cordis.patch.yml` 语义、CLI flag、DSH_HOME 布局……） | `1/` | 上游任一改动能对照清单判断影响了哪条吸收项 |
+
+**为什么先做**：0.1 消除错误输入（本计划已踩过这个坑）；0.2 让后续每条改动都有低成本回归网；0.3 是 Phase 2 诊断输出的前提；0.5 是一次性盘点，之后每次跟进 dsh 新版本都靠它。
+
+### Phase 1 — 启动可靠性（最高优先，直接对症现有硬编码超时）
+
+| # | 任务 | 来源 | 涉及文件 |
+|---|---|---|---|
+| 1.1 | **自适应启动超时**：进程活着 + 持续有输出 → 不判死；每 15s 提示耗时；N 秒无输出才超时 | `DSH-Launcher` | `commands/process.rs:280`、`:359` |
+| 1.2 | 超时自愈：晚到的 URL 仍能触发 `finalize_ready` | `DSH-Launcher` | `commands/process.rs` |
+| 1.3 | **启动前能力探明**：合并 `2/` 的"扫代码字面量"与 `3/zat` 的 cli-probe，启动前判定这版 dsh 认不认某个 flag | `2/` + `3/zat` | `dsh-adapter` |
+| 1.4 | 页面层自检：坏签名一票判死、好符号算健康、`Rendered` 豁免；**签名表含 token-401 页** | `1/` + `3/zat` | `dsh-adapter` |
+| 1.5 | 事件流驱动生命周期：把已有的 `events.host` 订阅从设置扩展到生命周期，补 `events.mux` | `DSH-Launcher` | `events.rs` |
+| 1.6 | 两级安全模式（Tier1 保核心 / Tier2 Minimal） | `1/` | `launcher-core` + `dsh-adapter` |
+
+**验收 1.1**：一个装了 100+ 插件的实例冷启动（真实耗时 > 240s）不再被误判失败；一个真卡死的实例在无输出 N 秒内被判定。
+**验收 1.4**：token 失效时不再报"启动成功"。
+**验收 1.6**：装一个会让页面崩的插件后，实例仍能通过安全模式启动到可用。
