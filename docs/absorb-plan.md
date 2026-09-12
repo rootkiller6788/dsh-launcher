@@ -288,3 +288,22 @@
 | P6（crash / telemetry / resume / portable） | 已完成，不动 |
 | DSH-first 阶段 11（页面切换 gate、大实例压测）、阶段 13（验收脚本、UI polish、发布衔接） | 与本计划 Phase 0 / 1 / 5 部分重叠，需合并排期避免重复劳动 |
 | `docs/optimization-backlog.md` 27 条 | **先执行 Phase 0.1 校准**，剩余条目按本计划优先级重排 |
+
+---
+
+## 附：如果只做三件事
+
+时间有限时按这个顺序做，收益最集中：
+
+1. **Phase 1.1 自适应启动超时** —— 直接消除现有的误杀，改动局限在一个文件。
+2. **Phase 2.1 + 2.2 崩溃诊断 + 救援点快照** —— 把 AHL 从"起不来就没办法"变成"起不来能自救"。
+3. **Phase 2.4 + 2.5 健康检查 + 修复动作库** —— 把"能自救"变成"能预防"，且 `add-allowbuilds` 顺带修掉现有的安装失败路径。
+
+这三件做完，AHL 在"坏了怎么办"这个维度会超过除 `3/zat` 和 `dsh-manager` 之外的所有同类项目——而它本来就有的 MCP 全生命周期、用量账本、凭证库，是那两家都没有的。
+
+---
+
+### 关于本文档
+
+- **核实时间**：2026-09-12，对照 AHL `v0.1.0`（`main` 分支）。§1 的每条"现状"都经 grep 或读源码确认；AHL 迭代快，引用具体行号前请重新核对。
+- `docs/` 下的姐妹文档（`mcp-ecosystem-roadmap.md`、`release-test-plan.md`、`dsh-first-capability-boundaries.md`、`optimization-backlog.md`）逐个被 `.gitignore` 排除，本文档是其中唯一随仓库发布的——所以本文的表述按公开文档的标准写。
