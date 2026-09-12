@@ -53,7 +53,7 @@ pub mod web_check;
 
 pub use diagnostics::{BundleInfo, DiagnosticsReport, OrderViolation};
 use runtimes::Runtimes;
-use safe_boot::{SafeBundlePlan, SafeProfileVerdict, SafeTier};
+pub use safe_boot::{SafeBundlePlan, SafeProfileVerdict, SafeTier};
 
 /// The web profile's default port.
 pub const DEFAULT_WEB_PORT: u16 = 3080;
@@ -332,6 +332,30 @@ impl RuntimeAdapter for DshAdapter {
         on_log: LogSink,
         on_exit: Option<ExitSink>,
     ) -> Result<ChildHandle> {
+        self.launch_profile(settings, instance, env, None, on_log, on_exit)
+            .await
+    }
+}
+
+impl DshAdapter {
+    /// Spawn dsh to serve a profile: `None` boots the `web` alias (the normal
+    /// path), `Some(profile)` boots `--profile <profile>` — the safe-mode launch
+    /// passes [`safe_boot::SAFE_PROFILE_NAME`] here.
+    ///
+    /// Nothing else differs between the two: dsh prints the same
+    /// `dsh web: http://127.0.0.1:<port>…` ready line for a `--profile` boot
+    /// whose bundles are the web template (verified against the shipped
+    /// runtime), so every downstream step — the URL tap, the `web_check`, the
+    /// settings watch — works unchanged.
+    pub async fn launch_profile(
+        &self,
+        settings: &AppSettings,
+        instance: &InstanceManifest,
+        env: &HashMap<String, String>,
+        profile: Option<&str>,
+        on_log: LogSink,
+        on_exit: Option<ExitSink>,
+    ) -> Result<ChildHandle> {
         let info = self.detect(settings)?;
         // Spawn through the resolved Node executable (bundled / managed / PATH),
         // never a bare `node` — PATH noise or a wedged env must not matter.
@@ -346,7 +370,15 @@ impl RuntimeAdapter for DshAdapter {
         // collisions between instances. The CLI's web app never opens a
         // browser itself, so no `--no-open` is needed (that flag is specific
         // to the newer vendored `@deepseek-ai/dsh`, not the source checkout).
-        cmd.arg("web");
+        match profile {
+            Some(profile) => {
+                cmd.arg("--profile");
+                cmd.arg(profile);
+            }
+            None => {
+                cmd.arg("web");
+            }
+        }
         cmd.arg("--host");
         cmd.arg("127.0.0.1");
         cmd.arg("--port");

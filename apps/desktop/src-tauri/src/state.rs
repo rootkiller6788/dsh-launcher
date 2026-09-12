@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use dsh_adapter::DshAdapter;
+use dsh_adapter::{DshAdapter, SafeTier};
 use launcher_core::process::ChildHandle;
 use launcher_core::{
     AppPaths, AppSettings, JobStore, LaunchHistory, ProviderVault, Registry, UsageLedger,
@@ -28,6 +28,11 @@ pub struct RunningChild {
     pub usage_proxy_shutdown: Option<oneshot::Sender<()>>,
     /// Cancels the DSH settings SSE subscription (appearance/language watch).
     pub settings_watch_shutdown: Option<oneshot::Sender<()>>,
+    /// Which safe-mode tier this child was booted at, when it was — `None` is
+    /// a normal `web` boot. It is what the UI reads to show the "safe mode"
+    /// banner, and what suppresses the rescue-point refresh: a safe boot did
+    /// not validate the user's profile, so it must not mark it last-known-good.
+    pub safe_tier: Option<SafeTier>,
 }
 
 /// Managed application state shared across commands.

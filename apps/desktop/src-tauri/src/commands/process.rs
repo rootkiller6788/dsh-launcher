@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use dsh_adapter::safe_boot::SAFE_PROFILE_NAME;
 use dsh_adapter::web_check::{check_root, WebVerdict};
+use dsh_adapter::{SafeProfileVerdict, SafeTier};
 use launcher_core::instance::InstanceManifest;
 use launcher_core::process::{
     sweep_leftover, wait_for_port, PidLedger, ProcessState, ProcessStatus,
@@ -65,15 +67,83 @@ pub async fn launch(
 ) -> Result<ProcessState, AppError> {
     let job_id = id.clone();
     run_instance_job(&state, &app, &job_id, HeavyJobKind::Launch, || async {
-        do_launch(&state, &app, id).await
+        do_launch(&state, &app, id, None).await
     })
     .await
+}
+
+/// Start the instance's harness in safe mode at `tier` (see
+/// [`dsh_adapter::safe_boot`]): generate the scratch profile, let dsh judge it,
+/// then boot `--profile .ahl-safe`. A refusal from dsh is returned to the
+/// caller rather than a boot that would fail the same way.
+#[tauri::command]
+pub async fn safe_launch(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    id: String,
+    tier: SafeTier,
+) -> Result<ProcessState, AppError> {
+    let job_id = id.clone();
+    run_instance_job(&state, &app, &job_id, HeavyJobKind::Launch, || async {
+        do_safe_launch(&state, &app, id, tier).await
+    })
+    .await
+}
+
+/// The pre-flight half of [`safe_launch`]: build the safe profile and let dsh
+/// compose it before anything is stopped or booted. On a refusal, the user's
+/// profile is untouched and dsh's own sentence is what the caller sees.
+async fn do_safe_launch(
+    state: &AppState,
+    app: &AppHandle,
+    id: String,
+    tier: SafeTier,
+) -> Result<ProcessState, AppError> {
+    let settings = settings_snapshot(state)?;
+    let instance = InstanceManifest::get(&state.paths, &id)?;
+    let (plan, verdict) = state
+        .adapter
+        .prepare_safe_profile(&settings, &instance, tier)
+        .await
+        .map_err(|e| AppError::coded(ErrorCode::LaunchFailed, e.to_string()))?;
+    match verdict {
+        SafeProfileVerdict::Composed { .. } => {
+            let tier_label = match tier {
+                SafeTier::Plugins => "L1 (first-party plugins)",
+                SafeTier::Minimal => "L2 (minimal)",
+            };
+            emit_log(
+                app,
+                &format!(
+                    "{id} · dsh composed the safe profile ({tier_label}){}",
+                    if plan.dropped.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; not loaded this boot: {}", plan.dropped.join(", "))
+                    }
+                ),
+            );
+        }
+        SafeProfileVerdict::Refused { message, from_dsh } => {
+            // Never boot a profile dsh just refused: the dump composes the same
+            // layers the boot does, so this would fail again — but with the
+            // advantage that dsh already said why, and we can quote it.
+            emit_error(app, &AppError::msg(message.clone()));
+            return Err(AppError::msg(if from_dsh {
+                message
+            } else {
+                format!("the safe profile did not compose: {message}")
+            }));
+        }
+    }
+    do_launch(state, app, id, Some(tier)).await
 }
 
 async fn do_launch(
     state: &AppState,
     app: &AppHandle,
     id: String,
+    safe_tier: Option<SafeTier>,
 ) -> Result<ProcessState, AppError> {
     let launch_start = Instant::now();
     {
@@ -291,19 +361,27 @@ async fn do_launch(
     // ERR_MODULE_NOT_FOUND — DSH dies before the post-launch reconcile (which
     // only runs once DSH is up) can act. Disable its loader rows now; the
     // launch proceeds with the package off and the user removes it in Library.
-    for pkg in dsh_adapter::content::quarantine_unloadable_client_bundles(&instance) {
-        emit_warn(
-            app,
-            &format!(
-                "{id} · quarantined {pkg}: no built client entry — remove it in Library to uninstall"
-            ),
-        );
+    //
+    // Safe mode skips this: it edits the user's profile (`cordis.patch.yml`),
+    // and the one thing a safe boot must not do is touch the profile it is
+    // booting around. The safe profile does not list the user's bundles anyway,
+    // so there is nothing to quarantine.
+    if safe_tier.is_none() {
+        for pkg in dsh_adapter::content::quarantine_unloadable_client_bundles(&instance) {
+            emit_warn(
+                app,
+                &format!(
+                    "{id} · quarantined {pkg}: no built client entry — remove it in Library to uninstall"
+                ),
+            );
+        }
     }
 
     let spawn_start = Instant::now();
+    let profile = safe_tier.map(|_| SAFE_PROFILE_NAME);
     let handle = match state
         .adapter
-        .launch(&settings, &instance, &env, on_log, Some(on_exit))
+        .launch_profile(&settings, &instance, &env, profile, on_log, Some(on_exit))
         .await
     {
         Ok(h) => h,
@@ -354,6 +432,7 @@ async fn do_launch(
             port: None,
             usage_proxy_shutdown: usage_proxy,
             settings_watch_shutdown: None,
+            safe_tier,
         });
         let st = guard.as_ref().expect("just stored").handle.state();
         if st.status == ProcessStatus::Crashed {
@@ -376,6 +455,7 @@ async fn do_launch(
                 url,
                 usage_proxy_base_url.as_deref(),
                 launch_start,
+                safe_tier,
             )
             .await
         }
@@ -442,6 +522,7 @@ async fn do_launch(
                                                 &url,
                                                 usage_proxy_base_url.as_deref(),
                                                 boot_start,
+                                                safe_tier,
                                             )
                                             .await;
                                         }
@@ -519,6 +600,7 @@ async fn do_launch(
         port,
         usage_proxy_shutdown: usage_proxy,
         settings_watch_shutdown: settings_watch,
+        safe_tier,
     });
     let st = guard.as_ref().expect("just stored").handle.state();
     let _ = app.emit(PROCESS_STATE_EVENT, &st);
@@ -609,6 +691,15 @@ pub async fn process_state(
 pub async fn running_instance(state: State<'_, AppState>) -> Result<Option<String>, AppError> {
     let guard = state.child.lock().await;
     Ok(guard.as_ref().map(|r| r.instance_id.clone()))
+}
+
+/// The safe-mode tier the running child was booted at, if it was a safe boot.
+/// The frontend reads this to show the "safe mode" banner, and to know the
+/// next normal launch must clear the scratch profile.
+#[tauri::command]
+pub async fn running_safe_tier(state: State<'_, AppState>) -> Result<Option<SafeTier>, AppError> {
+    let guard = state.child.lock().await;
+    Ok(guard.as_ref().and_then(|r| r.safe_tier))
 }
 
 /// Stop the managed harness (if any) and close its DSH window. Shared by the
@@ -1157,6 +1248,7 @@ async fn finalize_ready(
     url: &str,
     usage_proxy_base_url: Option<&str>,
     boot_start: Instant,
+    safe_tier: Option<SafeTier>,
 ) -> Option<oneshot::Sender<()>> {
     let mut clock = BootClock::since(boot_start);
     let port = url_port(url);
@@ -1244,6 +1336,18 @@ async fn finalize_ready(
             app,
             &format!(
                 "{} · rescue point left as it was: this boot never served its workspace URL",
+                instance.id
+            ),
+        );
+    } else if safe_tier.is_some() {
+        // A safe boot reached a serving URL, but that proves the scratch
+        // profile boots — not the user's. Refresh would capture the (still
+        // broken) user profile as last-known-good, so the point is left alone:
+        // the next normal boot is the one that may refresh it.
+        emit_debug(
+            app,
+            &format!(
+                "{} · rescue point left as it was: safe mode does not validate the user's profile",
                 instance.id
             ),
         );
