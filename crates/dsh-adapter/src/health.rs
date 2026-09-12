@@ -56,7 +56,8 @@ impl HealthStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HealthGroup {
-    /// Node + the DSH CLI the launcher would actually run.
+    /// Node, the DSH CLI the launcher would actually run, and the `pnpm` dsh
+    /// itself would find when it needs one.
     Runtime,
     /// The profile's own files: the two patch layers and `package.json`.
     Profile,
@@ -200,6 +201,32 @@ fn runtime_checks(adapter: &DshAdapter, settings: &AppSettings) -> Vec<HealthChe
             "no DSH CLI entry found — set one in Settings, or install a runtime".to_string(),
         )),
     }
+
+    // `dsh plugin` shells out to `pnpm` resolved from PATH, so this is a
+    // separate failure from a missing DSH CLI: dsh's own report for it is
+    // `pnpm not found on PATH`, exit 127 (see
+    // `docs/dsh-contract-inventory.md` #54). A PATH lookup, not a run of the
+    // tool — `check_tool` would spawn a process to answer what the filesystem
+    // already knows, and this report is re-measured on every open. Warn rather
+    // than Fail because nothing about booting needs pnpm; only changing the
+    // installed plugin set does.
+    out.push(match which::which("pnpm") {
+        Ok(path) => HealthCheck::new(
+            "runtime-pnpm",
+            HealthGroup::Runtime,
+            HealthStatus::Ok,
+            path.display().to_string(),
+        ),
+        Err(_) => HealthCheck::new(
+            "runtime-pnpm",
+            HealthGroup::Runtime,
+            HealthStatus::Warn,
+            "pnpm is not on PATH — `dsh plugin` runs it to install or remove a \
+             plugin and exits 127 without one, and a git-hosted plugin's build \
+             script can never be approved or run"
+                .to_string(),
+        ),
+    });
 
     out
 }
