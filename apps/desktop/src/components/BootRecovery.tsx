@@ -23,7 +23,9 @@ export function BootRecovery({ running }: { running: boolean }) {
   const clearLaunchDiagnosis = useAppStore((s) => s.clearLaunchDiagnosis)
   const createRescue = useAppStore((s) => s.createRescue)
   const restoreRescue = useAppStore((s) => s.restoreRescue)
+  const applyCrashFix = useAppStore((s) => s.applyCrashFix)
   const [restoring, setRestoring] = useState(false)
+  const [applying, setApplying] = useState(false)
 
   const hasRescue = rescue?.exists ?? false
   if (!diagnosis && !hasRescue) return null
@@ -34,6 +36,15 @@ export function BootRecovery({ running }: { running: boolean }) {
       await restoreRescue()
     } finally {
       setRestoring(false)
+    }
+  }
+
+  const onApply = async (issue: CrashIssue) => {
+    setApplying(true)
+    try {
+      await applyCrashFix(issue)
+    } finally {
+      setApplying(false)
     }
   }
 
@@ -69,8 +80,20 @@ export function BootRecovery({ running }: { running: boolean }) {
               {diagnosis.issues.map((issue, i) => (
                 <li key={`${issue.kind}-${issue.plugin}-${i}`}>
                   <div className="text-xs text-zinc-300">{issue.message}</div>
-                  <div className="mt-0.5 text-[11px] text-amber-200/80">
-                    {t('crash.nextStep')} {fixText(t, issue)}
+                  <div className="mt-0.5 flex items-center gap-2">
+                    <span className="text-[11px] text-amber-200/80">
+                      {t('crash.nextStep')} {fixText(t, issue)}
+                    </span>
+                    {ACTIONABLE.includes(issue.fix) && (
+                      <button
+                        onClick={() => void onApply(issue)}
+                        disabled={applying || (issue.fix !== 'restore' && running)}
+                        title={running && issue.fix !== 'restore' ? t('rescue.stopFirst') : undefined}
+                        className="shrink-0 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-200 transition-colors hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-transparent disabled:text-zinc-600"
+                      >
+                        {t(`crash.apply.${FIX_KEYS[issue.fix]}`)}
+                      </button>
+                    )}
                   </div>
                 </li>
               ))}
@@ -143,3 +166,13 @@ const FIX_KEYS: Record<FixAction, string> = {
   'rebuild-source': 'rebuildSource',
   restart: 'restart',
 }
+
+/**
+ * The fixes the launcher can carry out itself.
+ *
+ * The rest (`install-deps` / `reinstall` / `rebuild-source`) are dependency-level
+ * repairs that need the repair library from absorb-plan 2.5 — until that exists
+ * the diagnosis states what to do and offers no button, rather than a button
+ * that cannot work.
+ */
+const ACTIONABLE: FixAction[] = ['exclude-bundle', 'restore', 'restart']

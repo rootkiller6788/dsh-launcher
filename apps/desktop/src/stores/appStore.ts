@@ -7,6 +7,7 @@ import type {
   AppPathsInfo,
   AppSettings,
   BundleManifest,
+  CrashIssue,
   DiagnosticsReport,
   EnvironmentExportResult,
   InstanceManifest,
@@ -216,6 +217,11 @@ interface AppStore {
   restoreRescue: () => Promise<void>
   /** Dismiss the diagnosed failure without restoring. */
   clearLaunchDiagnosis: () => void
+  /**
+   * Carry out a diagnosis's recommended fix. Only some `FixAction`s have a
+   * launcher-side action; the rest are copy-only until Phase 2.5 exists.
+   */
+  applyCrashFix: (issue: CrashIssue) => Promise<void>
 }
 
 export const useAppStore = create<AppStore>((set, get) => ({
@@ -1365,4 +1371,36 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   clearLaunchDiagnosis: () => set({ launchDiagnosis: null }),
+
+  applyCrashFix: async (issue) => {
+    const id = get().activeId
+    if (!id) return
+    try {
+      switch (issue.fix) {
+        // Disabling goes through `plugin_toggle`, which writes cordis.patch.yml —
+        // the harness's own config, never a launcher-side override.
+        case 'exclude-bundle': {
+          if (!issue.plugin) return
+          await ipc.pluginToggle(id, issue.plugin, false)
+          break
+        }
+        case 'restore':
+          await get().restoreRescue()
+          return
+        case 'restart':
+          await get().launch(id)
+          return
+        // The dependency-level repairs need the repair library (Phase 2.5);
+        // until it exists the copy tells the user what to do by hand rather
+        // than offering a button that cannot work.
+        default:
+          return
+      }
+      set({ launchDiagnosis: null })
+      await get().refreshDiagnostics()
+      await get().refreshInstalledPlugins()
+    } catch (e) {
+      get().fail(e)
+    }
+  },
 }))
