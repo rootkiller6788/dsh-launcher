@@ -15,10 +15,21 @@
 //! | `package.json`             | `profiles/<profile>/package.json`            |
 //! | `profile-cordis.patch.yml` | `profiles/<profile>/cordis.patch.yml`        |
 //! | `home-cordis.patch.yml`    | `$DSH_HOME/cordis.patch.yml` (workspace)     |
+//! | `pnpm-workspace.yaml`      | `profiles/<profile>/pnpm-workspace.yaml`     |
 //!
-//! `cordis.yml` and `pnpm-workspace.yaml` — which `3/zat` also snapshots — are
-//! deliberately absent: the source-checkout `dsh web` AHL runs never reads them
-//! (see `docs/dsh-contract-inventory.md` 附一, "已核实不存在").
+//! `cordis.yml` — which `3/zat` also snapshots — remains deliberately absent: the
+//! source-checkout `dsh web` AHL runs never reads it (see
+//! `docs/dsh-contract-inventory.md` 附一, "已核实不存在").
+//!
+//! `pnpm-workspace.yaml` joined the set when the launcher started writing it
+//! ([`crate::pnpm::add_allow_build`]). The old reason for leaving it out — that
+//! nothing AHL did touched it — stopped holding at that point: pnpm reads it on
+//! every `dsh plugin` run in the profile directory, so an entry there is now part
+//! of what a restore has to be able to undo. Note the asymmetry for an instance
+//! that already has a rescue point: `refresh_rescue_point` only runs after a
+//! boot, so a point taken before this file was in the set does not contain it,
+//! and a restore from that point cannot undo a change to it — which is why
+//! `add_allow_build` also keeps its own single-slot sibling `.bak`.
 
 use std::path::{Path, PathBuf};
 
@@ -56,6 +67,10 @@ pub fn rescue_files(instance: &InstanceManifest) -> Vec<RescueFile> {
         RescueFile {
             source: workspace.join("cordis.patch.yml"),
             name: "home-cordis.patch.yml",
+        },
+        RescueFile {
+            source: profile.join("pnpm-workspace.yaml"),
+            name: "pnpm-workspace.yaml",
         },
     ]
 }
@@ -202,8 +217,31 @@ mod tests {
         dir
     }
 
-    /// A minimal profile tree with `package.json` and both patch layers, so the
-    /// full rescue file set is present.
+    /// An instance rooted at `workspace`, for the tests that go through
+    /// `rescue_files` rather than a hand-written file list.
+    fn manifest(workspace: &Path) -> InstanceManifest {
+        InstanceManifest {
+            id: "r".into(),
+            name: "R".into(),
+            runtime: launcher_core::RuntimeRef {
+                id: "dsh".into(),
+                version: String::new(),
+            },
+            profile: "web".into(),
+            provider_ref: "default".into(),
+            plugins: vec![],
+            skills: vec![],
+            mcp: vec![],
+            skins: vec![],
+            skin_packages: vec![],
+            workspace: workspace.display().to_string(),
+        }
+    }
+
+    /// A minimal profile tree with one of every file the rescue set captures.
+    /// The list comes from [`rescue_files`], not a copy of it, so a file added to
+    /// or dropped from the set is exercised by every test below rather than only
+    /// by the one that asserts the set's contents.
     fn profile_tree(tag: &str) -> (PathBuf, Vec<RescueFile>) {
         let workspace = tmp_dir(tag);
         let profile = workspace.join("profiles").join("web");
@@ -211,36 +249,29 @@ mod tests {
         std::fs::write(profile.join("package.json"), r#"{"dsh":{"profile":{"bundles":[]}}}"#).unwrap();
         std::fs::write(profile.join("cordis.patch.yml"), "- id: a\n").unwrap();
         std::fs::write(workspace.join("cordis.patch.yml"), "- id: home-a\n").unwrap();
-        let files = vec![
-            RescueFile {
-                source: profile.join("package.json"),
-                name: "package.json",
-            },
-            RescueFile {
-                source: profile.join("cordis.patch.yml"),
-                name: "profile-cordis.patch.yml",
-            },
-            RescueFile {
-                source: workspace.join("cordis.patch.yml"),
-                name: "home-cordis.patch.yml",
-            },
-        ];
+        std::fs::write(profile.join("pnpm-workspace.yaml"), "allowBuilds:\n  esbuild: true\n").unwrap();
+        let files = rescue_files(&manifest(&workspace));
         (workspace, files)
     }
 
     #[test]
-    fn create_and_restore_round_trips_all_three_files() {
+    fn create_and_restore_round_trips_every_captured_file() {
         let (workspace, files) = profile_tree("roundtrip");
         let rescue_dir = workspace.join("rescue");
 
         let meta = create_snapshot(&files, &rescue_dir).unwrap();
         assert_eq!(
             meta.files,
-            vec!["package.json", "profile-cordis.patch.yml", "home-cordis.patch.yml"]
+            vec![
+                "package.json",
+                "profile-cordis.patch.yml",
+                "home-cordis.patch.yml",
+                "pnpm-workspace.yaml"
+            ]
         );
         assert!(rescue_dir.join("package.json").is_file());
 
-        // Corrupt all three live files, then restore.
+        // Corrupt every live file, then restore.
         for f in &files {
             std::fs::write(&f.source, "corrupted").unwrap();
         }
@@ -258,6 +289,11 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(files[2].source.clone()).unwrap(),
             "- id: home-a\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(files[3].source.clone()).unwrap(),
+            "allowBuilds:\n  esbuild: true\n",
+            "the pnpm file comes back too, not just the three that predate it"
         );
         let _ = std::fs::remove_dir_all(&workspace);
     }
@@ -338,7 +374,7 @@ mod tests {
         create_snapshot(&files, &rescue_dir).unwrap();
         let status = snapshot_status(&rescue_dir);
         assert!(status.exists);
-        assert_eq!(status.files.len(), 3);
+        assert_eq!(status.files.len(), 4);
 
         // Corrupt metadata degrades to "absent" (status is read-only).
         std::fs::write(rescue_dir.join(SNAPSHOT_META), "not json").unwrap();
@@ -350,32 +386,27 @@ mod tests {
     }
 
     #[test]
-    fn rescue_files_points_at_the_three_mutated_locations() {
+    fn rescue_files_points_at_the_mutated_locations() {
         let workspace = tmp_dir("paths");
-        let instance = InstanceManifest {
-            id: "r".into(),
-            name: "R".into(),
-            runtime: launcher_core::RuntimeRef {
-                id: "dsh".into(),
-                version: String::new(),
-            },
-            profile: "web".into(),
-            provider_ref: "default".into(),
-            plugins: vec![],
-            skills: vec![],
-            mcp: vec![],
-            skins: vec![],
-            skin_packages: vec![],
-            workspace: workspace.display().to_string(),
-        };
-        let files = rescue_files(&instance);
+        let files = rescue_files(&manifest(&workspace));
         let names: Vec<&str> = files.iter().map(|f| f.name).collect();
         assert_eq!(
             names,
-            vec!["package.json", "profile-cordis.patch.yml", "home-cordis.patch.yml"]
+            vec![
+                "package.json",
+                "profile-cordis.patch.yml",
+                "home-cordis.patch.yml",
+                "pnpm-workspace.yaml"
+            ]
         );
-        assert_eq!(files[1].source, workspace.join("profiles").join("web").join("cordis.patch.yml"));
+        let profile = workspace.join("profiles").join("web");
+        assert_eq!(files[1].source, profile.join("cordis.patch.yml"));
         assert_eq!(files[2].source, workspace.join("cordis.patch.yml"));
+        assert_eq!(
+            files[3].source,
+            profile.join("pnpm-workspace.yaml"),
+            "the file pnpm reads is the profile's, not the workspace's"
+        );
         let _ = std::fs::remove_dir_all(&workspace);
     }
 }
