@@ -8,6 +8,7 @@
 pub mod bundle;
 pub mod capabilities;
 pub mod crash;
+pub mod diagnose;
 pub mod diagnostics;
 pub mod download;
 pub mod environment;

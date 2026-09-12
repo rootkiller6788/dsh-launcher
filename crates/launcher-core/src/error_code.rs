@@ -70,6 +70,34 @@ impl ErrorCode {
         }
     }
 
+    /// Every code in the table, for callers that need to enumerate it.
+    pub const ALL: &'static [ErrorCode] = &[
+        Self::NodeNotFound,
+        Self::DshBinUnresolvable,
+        Self::LaunchFailed,
+        Self::BootTimedOut,
+        Self::TokenInvalid,
+        Self::PluginOpFailed,
+        Self::SkillInstallFailed,
+        Self::McpOpFailed,
+        Self::RuntimeOpFailed,
+        Self::MarketFetchFailed,
+        Self::UpdateCheckFailed,
+        Self::Internal,
+    ];
+
+    /// The table entry for a code string, if this build knows it.
+    ///
+    /// The inverse of [`code`](Self::code), for the surfaces that read a code
+    /// back *out* of text rather than writing one in — today the diagnostic
+    /// package's error summary, which turns `[E2001] …` log lines back into
+    /// titles and next actions. `None` means the code came from a newer build (or
+    /// was mistyped); callers should show it rather than drop it, since that is
+    /// exactly the line a reader wants.
+    pub fn from_code(code: &str) -> Option<ErrorCode> {
+        Self::ALL.iter().copied().find(|c| c.code() == code)
+    }
+
     /// The band, one of `runtime` / `service` / `update` / `internal`.
     pub fn category(self) -> &'static str {
         match self {
@@ -185,25 +213,37 @@ mod tests {
     #[test]
     fn every_code_has_metadata() {
         // Cheap completeness guard: each band is covered by at least one code,
-        // and none of the static strings are empty.
-        for code in [
-            ErrorCode::NodeNotFound,
-            ErrorCode::DshBinUnresolvable,
-            ErrorCode::LaunchFailed,
-            ErrorCode::BootTimedOut,
-            ErrorCode::TokenInvalid,
-            ErrorCode::PluginOpFailed,
-            ErrorCode::SkillInstallFailed,
-            ErrorCode::McpOpFailed,
-            ErrorCode::RuntimeOpFailed,
-            ErrorCode::MarketFetchFailed,
-            ErrorCode::UpdateCheckFailed,
-            ErrorCode::Internal,
-        ] {
+        // and none of the static strings are empty. Iterating `ALL` rather than a
+        // hand-written list is the point — a second copy of the list would go
+        // stale the first time a code is added, and `from_code` keys on it.
+        for code in ErrorCode::ALL {
             assert!(!code.code().is_empty());
             assert!(!code.title().is_empty());
             assert!(!code.next_action().is_empty());
+            assert!(!code.category().is_empty());
         }
+    }
+
+    #[test]
+    fn every_code_round_trips_through_from_code() {
+        for code in ErrorCode::ALL {
+            assert_eq!(ErrorCode::from_code(code.code()), Some(*code));
+        }
+        // An unknown code is absent, not a guess — the diagnostic summary relies
+        // on that to report a newer build's code instead of mislabelling it.
+        assert_eq!(ErrorCode::from_code("E7777"), None);
+        assert_eq!(ErrorCode::from_code(""), None);
+    }
+
+    #[test]
+    fn no_two_codes_share_a_string() {
+        // The code is a contract; a collision would make the diagnostic summary's
+        // per-code counts merge two different failures.
+        let mut seen: Vec<&str> = ErrorCode::ALL.iter().map(|c| c.code()).collect();
+        seen.sort_unstable();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(seen.len(), before, "duplicate code in the table");
     }
 
     #[test]
