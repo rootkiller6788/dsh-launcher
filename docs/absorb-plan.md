@@ -93,3 +93,20 @@
 | 仅一种 DSH_HOME 模式（每实例独立） | 无法复用已有环境 | `2/` | 读源码 |
 | 无**核心层冒烟关卡** | CI 只测端到端 | `dsh-manager` | 零命中 |
 | P2/P3/P5 未开工 | 出不了安装包/不自更新/未签名 | `dsh-manager` 的 CI 模板 | 读 `TODO.md` |
+
+---
+
+## 2. 五家的"最值钱"清单
+
+每张表三列：机制 → 价值 → AHL 现状与移植方式。"价值"按「解决痛点的彻底程度 ÷ 移植成本」评，星数不表示工作量。
+
+### 2.1 从 `1/`（Ruler4396，C#）吸收 —— 痛点：**失败不可观测**
+
+| 机制 | 价值 | AHL 现状 → 移植方式 |
+|---|---|---|
+| **两级安全模式**<br>`SafeProfileBuilder`：Tier1 保留 `@deepseek-ai` 核心 / Tier2 Minimal 空 profile | ★★★★★ | 无 → 用 Rust 重建：生成隔离 profile 目录，只保留核心 bundle、剥离第三方。触发条件接启动健康判定 |
+| **页面层自检 + 坏签名优先**<br>`BootHealthMonitor` 四个观测点（进程 / 日志 / HTTP / 页面），**坏签名一票判死，好符号才算健康** | ★★★★★ | 只等 URL 行，不等页面真渲染 → AHL 已有 "spawn → URL ready → web ready" 三段（`commands/process.rs:782` 注释），补页面层探测 |
+| **上游契约清单**<br>`docs/DSH_CONTRACT_INVENTORY.md` 把依赖的 33 条上游接口逐条登记 | ★★★★★ | **零命中** → 对 AHL 尤其该补：它的 DSH-first 边界本身就是"依赖面最小化"的声明，但没有清单就察觉不到上游变更打断了假设。成本低（一次盘点 + 一份文档） |
+| **诊断包导出**<br>`--diagnose` 生成脱敏 zip（env / errors / log 三段） | ★★★★ | `diagnostics.rs` 薄、无导出 → `zip` crate 已在 `Cargo.toml`，成本极低 |
+| **结构化错误码**<br>`ErrorCodes.cs`（E1xxx 运行时 / E2xxx 服务 / E4xxx 更新 / E9001 内部），`Describe()` 被弹窗、日志、诊断包三处共用 | ★★★★ | 有"下一步动作"文案、无编号 → 补编号与分类，三处共用同一码 |
+| **Outcome Contract 测试**<br>只断言系统最终物理状态，不关心内部调用顺序 | ★★★ | 有 e2e、无此粒度 → 补在 `crates/*/tests/`：如"启动失败后必定存在安全模式入口" |
