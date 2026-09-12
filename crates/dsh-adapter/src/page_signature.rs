@@ -1,5 +1,27 @@
 //! Page-level boot self-check for dsh's web UI.
 //!
+//! **Parked: no call sites, and none reachable on the primary path.** The probe
+//! script below has to be evaluated *inside* the page that renders dsh, and AHL
+//! renders dsh in a cross-origin iframe (`apps/desktop/src/App.tsx`) — `eval` on
+//! the launcher's own window cannot reach into it. The one webview AHL owns on
+//! a dsh page is the opt-in escape-hatch window (`process.rs::open_dsh_external`)
+//! whose contents the user is looking at anyway, so a classification only
+//! available there decides nothing.
+//!
+//! What that costs is small and written down: of the markers this table matches,
+//! `failed to import loader entry` is already a rule over dsh's stdout
+//! (`crash.rs` rule 7), and the two DOM-only ones (`bootstrap facade is
+//! missing`, plus the two invented strings beside it) have no launcher-visible
+//! twin. The failure this module was ported to catch — a boot that prints a
+//! valid ready line while its page is an error screen — is instead caught for
+//! the one case measurable from Rust: the ready URL dsh refuses to serve
+//! (`web_check`, absorb-plan 1.4).
+//!
+//! Kept rather than deleted (tests included) so the probe is here if the
+//! launcher ever owns a dsh webview on the primary path. See
+//! `docs/absorb-plan.md` §Phase 1 实施记录 and `docs/optimization-backlog.md`
+//! Phase 1 笔记 for the reasoning.
+//!
 //! After the webview loads dsh's ready URL, the launcher probes the rendered
 //! DOM for dsh's boot markers and classifies the result. Ported from `1/`'s
 //! ADR-023 `BootSignature` (`ShellLogic.BootProfile` + `EvaluatePageProbe`),
@@ -185,7 +207,10 @@ mod tests {
         let out = sig.evaluate(&probe(true, "Failed to import loader entry foo", ""));
         match out {
             ProbeClass::BadSignature { detail } => {
-                assert!(detail.starts_with("dom[failed to import loader entry]"), "{detail}");
+                assert!(
+                    detail.starts_with("dom[failed to import loader entry]"),
+                    "{detail}"
+                );
             }
             other => panic!("expected BadSignature, got {other:?}"),
         }
