@@ -198,6 +198,77 @@ pub fn remove_safe_profile(instance: &InstanceManifest) -> Result<()> {
     std::fs::remove_dir_all(&dir).with_context(|| format!("remove {}", dir.display()))
 }
 
+/// What dsh said about a profile when asked to compose it
+/// (`dsh --profile <name> --dump-config`).
+///
+/// The point of asking dsh rather than deciding in AHL: composition is dsh's
+/// own step — bundle resolution against the installation, then the profile
+/// patch layer, then the home patch layer — and a hand-written profile can fail
+/// at any of them. dsh fails *before* booting and says which file or bundle was
+/// at fault, which is a diagnosis AHL could only guess at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SafeProfileVerdict {
+    /// Exit 0 with a dump on stdout: dsh resolved every bundle and parsed every
+    /// patch layer of this profile.
+    Composed { dump_bytes: usize },
+    /// dsh refused it. `message` is dsh's own sentence, lifted verbatim from its
+    /// output (the `Error:` line of an uncaught throw — never the `at …` stack
+    /// frames under it). `from_dsh` is false only when dsh exited non-zero
+    /// without saying anything, in which case `message` is AHL's plain reading
+    /// of the exit code and must not be presented as dsh's words.
+    Refused { message: String, from_dsh: bool },
+}
+
+/// Classify a finished `--dump-config` run. Pure: no process, no clock.
+///
+/// Verified against the shipped runtime (`dsh` 0.1.0-rc.7):
+///
+/// - a good profile dumps the composed tree to stdout and exits 0;
+/// - an unresolvable bundle exits 1 with *empty* stdout and
+///   `Error: dsh: cannot resolve profile bundle "…" from the dsh installation
+///   or <dir>; run 'dsh plugin --profile <name> install' …`;
+/// - a malformed patch layer exits 1 with
+///   `Error: dsh: failed to parse patches <file>: …` (the home layer included,
+///   which is why this verdict is worth showing whole).
+pub fn classify_dump(code: i32, stdout: &str, stderr: &str) -> SafeProfileVerdict {
+    if code == 0 {
+        return SafeProfileVerdict::Composed {
+            dump_bytes: stdout.len(),
+        };
+    }
+    match dsh_message(stderr).or_else(|| dsh_message(stdout)) {
+        Some(message) => SafeProfileVerdict::Refused {
+            message,
+            from_dsh: true,
+        },
+        None => SafeProfileVerdict::Refused {
+            message: format!("--dump-config exited with code {code} and printed nothing"),
+            from_dsh: false,
+        },
+    }
+}
+
+/// Lift dsh's own sentence out of a node child's output.
+///
+/// A node uncaught throw renders as the throwing source line, then
+/// `Error: <message>`, then `    at …` frames — so "the last line" is a stack
+/// frame and "the first line" is dsh's own *source code*. The `Error:` line is
+/// the message. Anything else that produced output without that marker (a
+/// `program.error()` write goes straight to stderr) is taken as-is, because it
+/// is still dsh's own words.
+fn dsh_message(output: &str) -> Option<String> {
+    let lines: Vec<&str> = output
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    lines
+        .iter()
+        .find_map(|l| l.strip_prefix("Error: "))
+        .or_else(|| lines.first().copied())
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +443,72 @@ mod tests {
             profile_entries,
             vec![SAFE_PROFILE_NAME.to_string(), "web".to_string()]
         );
+    }
+
+    #[test]
+    fn a_clean_dump_is_a_composition() {
+        // The real good case: 494 lines of composed tree, empty stderr.
+        let dump = "--- # root\nid: root\noverride:\n  - id: a\n";
+        assert_eq!(
+            classify_dump(0, dump, ""),
+            SafeProfileVerdict::Composed {
+                dump_bytes: dump.len()
+            }
+        );
+    }
+
+    #[test]
+    fn a_refusal_quotes_dshs_sentence_not_its_stack_frames() {
+        // Byte-for-byte the shape the shipped dsh produced for an unresolvable
+        // bundle: throwing source line, `Error:` line, then frames.
+        let stderr = "\tthrow new Error(`${binName}: cannot resolve profile bundle ${JSON.stringify(packageName)} from the dsh installation or ${profileDir}; run 'dsh plugin --profile ${basename(profileDir)} install' if its dependency is not installed`);\n\t      ^\n\nError: dsh: cannot resolve profile bundle \"nope/not-a-bundle\" from the dsh installation or C:\\ws\\profiles\\web; run 'dsh plugin --profile web install' if its dependency is not installed\n    at resolveBundleDir (file:///C:/dsh/app-boot/lib/index.js:523:8)\n    at loadProfile (file:///C:/dsh/app-boot/lib/index.js:546:117)\n";
+        let verdict = classify_dump(1, "", stderr);
+        match verdict {
+            SafeProfileVerdict::Refused { message, from_dsh } => {
+                assert!(from_dsh);
+                assert!(
+                    message.starts_with("dsh: cannot resolve profile bundle "),
+                    "{message}"
+                );
+                // Not the source line, not `^`, not a frame.
+                assert!(!message.contains("throw new Error"), "{message}");
+                assert!(!message.contains("at resolveBundleDir"), "{message}");
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_refusal_is_read_from_stdout_too() {
+        // dsh's `program.error()` writes go to stderr, but a child that puts its
+        // message on stdout is still quoting dsh.
+        let verdict = classify_dump(
+            1,
+            "error: --dump-config and --dump-default-config are mutually exclusive\n",
+            "",
+        );
+        assert_eq!(
+            verdict,
+            SafeProfileVerdict::Refused {
+                message: "error: --dump-config and --dump-default-config are mutually exclusive"
+                    .to_string(),
+                from_dsh: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_silent_non_zero_exit_is_not_attributed_to_dsh() {
+        // Nothing was said, so nothing may be quoted: this message is AHL's
+        // reading of an exit code, and `from_dsh: false` is how the UI knows.
+        let verdict = classify_dump(1, "\n  \n", "");
+        match verdict {
+            SafeProfileVerdict::Refused { message, from_dsh } => {
+                assert!(!from_dsh);
+                assert!(message.contains("exited with code 1"), "{message}");
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
     }
 
     #[test]

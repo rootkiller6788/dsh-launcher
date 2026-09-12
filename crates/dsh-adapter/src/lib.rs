@@ -29,7 +29,7 @@ use launcher_core::{
 };
 use serde::{Deserialize, Serialize};
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 pub mod content;
 pub mod crash;
@@ -53,6 +53,7 @@ pub mod web_check;
 
 pub use diagnostics::{BundleInfo, DiagnosticsReport, OrderViolation};
 use runtimes::Runtimes;
+use safe_boot::{SafeBundlePlan, SafeProfileVerdict, SafeTier};
 
 /// The web profile's default port.
 pub const DEFAULT_WEB_PORT: u16 = 3080;
@@ -627,6 +628,75 @@ impl DshAdapter {
             anyhow!("dsh plugin {op} {e}")
         })
     }
+
+    /// Ask dsh whether a profile composes: `dsh --profile <name> --dump-config`.
+    ///
+    /// This runs dsh's own composition step — bundle resolution against the
+    /// installation, the profile patch layer, the home patch layer — without
+    /// booting: nothing mounts and no `!!js` expression is evaluated. So a
+    /// bundle that cannot resolve or a patch row that cannot parse fails here,
+    /// as a sentence from dsh, instead of as a boot the user has to interpret.
+    ///
+    /// Two deliberate choices:
+    ///
+    /// - **No API key in the child's environment.** Composition needs none, and
+    ///   a diagnostic process has no business holding the user's credentials.
+    /// - **`Ok(non-zero)` is a verdict, not an error.** `Err` means dsh never
+    ///   got to speak (spawn failure or timeout) — the launcher must not report
+    ///   a refusal it cannot substantiate.
+    ///
+    /// Not read-only, and not AHL's doing: `prepareProfile` links the
+    /// installation into `$DSH_HOME/profiles/node_modules` on the way, which is
+    /// the same thing a boot does. It touches no profile of the user's.
+    pub async fn dump_profile_config(
+        &self,
+        settings: &AppSettings,
+        instance: &InstanceManifest,
+        profile: &str,
+    ) -> Result<CapturedOutput, String> {
+        let info = self.detect(settings).map_err(|e| format!("{e:#}"))?;
+        let node = self
+            .resolve_node(settings)
+            .ok_or_else(|| "Node not found — can't run DSH".to_string())?;
+        let node = node.to_string_lossy().to_string();
+        let args = vec![
+            info.bin_path,
+            "--profile".to_string(),
+            profile.to_string(),
+            "--dump-config".to_string(),
+        ];
+        let envs = vec![("DSH_HOME".to_string(), instance.workspace.clone())];
+        run_capture(
+            &node,
+            &args,
+            Path::new(&instance.workspace),
+            &envs,
+            DUMP_CONFIG_TIMEOUT,
+        )
+        .await
+    }
+
+    /// Write the safe profile for `tier`, then let dsh judge it — the whole
+    /// pre-flight in one call, in the order that makes it mean anything.
+    ///
+    /// Returns dsh's verdict alongside the plan whether or not it composed, so
+    /// the caller can quote dsh verbatim when it did not. It does **not**
+    /// launch: whether to boot a profile dsh just refused is the caller's
+    /// decision, and it should be a decision made on the verdict.
+    pub async fn prepare_safe_profile(
+        &self,
+        settings: &AppSettings,
+        instance: &InstanceManifest,
+        tier: SafeTier,
+    ) -> Result<(SafeBundlePlan, SafeProfileVerdict)> {
+        let plan = safe_boot::write_safe_profile(instance, tier)?;
+        let captured = self
+            .dump_profile_config(settings, instance, safe_boot::SAFE_PROFILE_NAME)
+            .await
+            .map_err(|e| anyhow!("dsh --dump-config {e}"))?;
+        let verdict = safe_boot::classify_dump(captured.code, &captured.stdout, &captured.stderr);
+        Ok((plan, verdict))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -651,6 +721,101 @@ pub const INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
 /// already routed elsewhere).
 pub fn silent_log_sink() -> LogSink {
     std::sync::Arc::new(|_| {})
+}
+
+/// A short probe that must finish or die: `dsh --profile <x> --dump-config`
+/// composes a profile without booting it (no mounts, no `!!js` evaluation), so
+/// this is a cold node start plus file reads — generous at a minute.
+pub const DUMP_CONFIG_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Capture of a finished probe process.
+pub struct CapturedOutput {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Run `program` to completion and *capture* stdout/stderr, for callers that
+/// need the child's words as data rather than as log lines (dsh's own verdict
+/// on a profile). Same timeout and whole-tree-kill discipline as
+/// [`run_timed`]: a probe that hangs must not hang the launcher, and killing
+/// only the direct child would leave node's grandchildren behind.
+///
+/// `Ok` carries a non-zero exit: a refusal is a result. `Err` is reserved for
+/// spawn failure and timeout, because neither is something the child said.
+pub async fn run_capture(
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    envs: &[(String, String)],
+    timeout: Duration,
+) -> Result<CapturedOutput, String> {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args);
+    cmd.current_dir(cwd);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.kill_on_drop(true);
+
+    let mut child = cmd.spawn().map_err(|e| format!("spawn {program}: {e}"))?;
+
+    // Drain both pipes on their own tasks, like `run_timed` — reading them in
+    // sequence would deadlock on a child that fills the other pipe first.
+    let mut out_drain = None;
+    if let Some(out) = child.stdout.take() {
+        out_drain = Some(tokio::spawn(async move {
+            let mut buf = String::new();
+            let _ = BufReader::new(out).read_to_string(&mut buf).await;
+            buf
+        }));
+    }
+    let mut err_drain = None;
+    if let Some(err) = child.stderr.take() {
+        err_drain = Some(tokio::spawn(async move {
+            let mut buf = String::new();
+            let _ = BufReader::new(err).read_to_string(&mut buf).await;
+            buf
+        }));
+    }
+
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(status) => {
+            let code = status
+                .map_err(|e| format!("wait {program}: {e}"))?
+                .code()
+                .unwrap_or(1);
+            let stdout = match out_drain {
+                Some(drain) => drain.await.unwrap_or_default(),
+                None => String::new(),
+            };
+            let stderr = match err_drain {
+                Some(drain) => drain.await.unwrap_or_default(),
+                None => String::new(),
+            };
+            Ok(CapturedOutput {
+                code,
+                stdout,
+                stderr,
+            })
+        }
+        Err(_) => {
+            if let Some(pid) = child.id() {
+                kill_tree(pid);
+            }
+            let _ = child.wait().await;
+            if let Some(drain) = out_drain {
+                let _ = drain.await;
+            }
+            if let Some(drain) = err_drain {
+                let _ = drain.await;
+            }
+            Err(format!("{program} timed out after {}s", timeout.as_secs()))
+        }
+    }
 }
 
 /// Spawn `program`, stream stdout/stderr lines through `sink`, and wait with a
