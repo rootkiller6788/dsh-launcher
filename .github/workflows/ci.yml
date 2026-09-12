@@ -1,0 +1,66 @@
+name: ci
+
+# 打开 PR / 合入 main 时跑与 release 相同的验收 gate，外加前端单测。
+# 真机 e2e（#[ignore]）仍按 CONTRIBUTING 本地单独跑，不在此流水线。
+# rustfmt 暂未纳入：release 尚未 gate，单独引入会让本 PR 卡在历史格式上。
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  gates:
+    name: test-and-lint
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.18.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      # --- 与 release.yml 对齐的四道 gate ---
+
+      - name: Gate 1 — cargo test
+        run: cargo test --workspace
+
+      - name: Gate 2 — cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Gate 3 — tsc
+        working-directory: apps/desktop
+        run: npx tsc --noEmit
+
+      - name: Gate 4 — instance_system 集成测试
+        run: cargo test -p launcher-core --test instance_system
+
+      # --- 前端单测（release 尚未跑，PR 必须绿） ---
+
+      - name: Gate 5 — vitest
+        working-directory: apps/desktop
+        run: npx vitest run
