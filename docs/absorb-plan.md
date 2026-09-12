@@ -306,4 +306,4 @@
 ### 关于本文档
 
 - **核实时间**：2026-09-12，对照 AHL `v0.1.0`（`main` 分支）。§1 的每条"现状"都经 grep 或读源码确认；AHL 迭代快，引用具体行号前请重新核对。
-- `docs/` 下的姐妹文档（`mcp-ecosystem-roadmap.md`、`release-test-plan.md`、`dsh-first-capability-boundaries.md`、`optimization-backlog.md`）逐个被 `.gitignore` 排除，本文档是其中唯一随仓库发布的——所以本文的表述按公开文档的标准写。
+- `docs/` 下随仓库发布的文档有两份：本文（吸收计划）与 `dsh-contract-inventory.md`（上游 dsh 契约清单，由 Phase 0.5 产出）。其余姐妹文档（`mcp-ecosystem-roadmap.md`、`release-test-plan.md`、`dsh-first-capability-boundaries.md`、`optimization-backlog.md`）逐个被 `.gitignore` 排除——所以本文与契约清单的表述都按公开文档的标准写。
