@@ -47,6 +47,7 @@ pub mod page_signature;
 pub mod pnpm;
 pub mod rescue;
 pub mod runtimes;
+pub mod safe_boot;
 pub mod theme;
 pub mod web_check;
 
@@ -371,7 +372,12 @@ impl DshAdapter {
             .join(&instance.profile)
     }
 
-    fn read_profile_manifest(instance: &InstanceManifest) -> Option<serde_json::Value> {
+    /// The instance's profile manifest as read from disk, or `None` when it is
+    /// missing or unparseable. Read-only by design: DSH owns this file (it
+    /// rewrites `dsh.profile.bundles` on every plugin operation), so the
+    /// launcher never writes it — see [`safe_boot`] for the scratch profile
+    /// that exists instead of editing this one.
+    pub(crate) fn read_profile_manifest(instance: &InstanceManifest) -> Option<serde_json::Value> {
         let path = Self::profile_dir(instance).join("package.json");
         let text = std::fs::read_to_string(path).ok()?;
         serde_json::from_str(&text).ok()
