@@ -85,6 +85,23 @@ pub struct LogLine {
     pub line: String,
 }
 
+impl LogLine {
+    /// A copy safe to show or persist: secrets in the text are masked.
+    ///
+    /// Applied at the point a line leaves the process boundary (Activity emit,
+    /// tracing/log file, on-disk transcript) — **never** to the line a caller
+    /// still needs to parse. DSH's ready line carries the web token, and that
+    /// same URL is handed to the webview, so redacting upstream of the URL
+    /// parse would break the handoff. See [`crate::redact`].
+    pub fn redacted(&self) -> LogLine {
+        LogLine {
+            stream: self.stream,
+            level: self.level,
+            line: crate::redact::redact_secrets(&self.line).into_owned(),
+        }
+    }
+}
+
 /// Callback invoked once per streamed line. Clone-heavy on purpose: each read
 /// task holds its own copy.
 pub type LogSink = Arc<dyn Fn(LogLine) + Send + Sync>;

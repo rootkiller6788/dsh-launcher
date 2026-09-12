@@ -1144,11 +1144,15 @@ pub(crate) async fn mcp_import_job(
 fn health_sink(app: AppHandle, buf: Arc<Mutex<String>>) -> LogSink {
     let forward = make_sink(app);
     Arc::new(move |log_line: LogLine| {
+        // The transcript is written to `<server>/logs/last.log` next to
+        // `runtime.json`, so it persists exactly like the log file does — mask
+        // before buffering, not just before display.
+        let masked = log_line.redacted();
         if let Ok(mut text) = buf.lock() {
-            text.push_str(&log_line.line);
+            text.push_str(&masked.line);
             text.push('\n');
         }
-        forward(log_line);
+        forward(masked);
     })
 }
 

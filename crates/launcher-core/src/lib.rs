@@ -22,6 +22,7 @@ pub mod paths;
 pub mod pricing;
 pub mod process;
 pub mod provider;
+pub mod redact;
 pub mod runtime;
 pub mod settings;
 pub mod telemetry;
@@ -55,6 +56,7 @@ pub use process::{
     ChildHandle, ExitSink, LogLevel, LogLine, LogSink, LogStream, ProcessState, ProcessStatus,
 };
 pub use provider::{ProviderPreset, ProviderProfile, ProviderVault, ResolvedProvider};
+pub use redact::{redact_secrets, MASK};
 pub use runtime::{RuntimeAdapter, RuntimeInfo};
 pub use settings::AppSettings;
 pub use usage::{

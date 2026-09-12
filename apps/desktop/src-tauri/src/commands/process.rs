@@ -610,6 +610,10 @@ fn close_session(state: &AppState, status: &str) -> bool {
 
 pub(crate) fn make_sink(app: AppHandle) -> LogSink {
     Arc::new(move |line: LogLine| {
+        // Both destinations outlive the process (Activity panel + rolling log
+        // file), and DSH's ready line carries the web token — mask before
+        // either. The caller still holds the raw line for URL parsing.
+        let line = line.redacted();
         if line.stream == LogStream::Stderr {
             tracing::warn!(target: "dsh", "{}", line.line);
         } else {
@@ -626,11 +630,8 @@ fn make_usage_sink(
     fallback_model: String,
 ) -> LogSink {
     Arc::new(move |line: LogLine| {
-        if line.stream == LogStream::Stderr {
-            tracing::warn!(target: "dsh", "{}", line.line);
-        } else {
-            tracing::info!(target: "dsh", "{}", line.line);
-        }
+        // Parse the *raw* line: a usage record legitimately carries fields like
+        // `total_tokens`, and masking before parsing would corrupt the number.
         if let Some(record) =
             parse_usage_record(&line.line, &instance_id, &api_key_alias, &fallback_model)
         {
@@ -638,6 +639,13 @@ fn make_usage_sink(
             if let Ok(Some(saved)) = state.usage.record(record) {
                 let _ = app.emit(USAGE_EVENT, &saved);
             }
+        }
+        // Only what leaves the process gets masked.
+        let line = line.redacted();
+        if line.stream == LogStream::Stderr {
+            tracing::warn!(target: "dsh", "{}", line.line);
+        } else {
+            tracing::info!(target: "dsh", "{}", line.line);
         }
         let _ = app.emit(LOG_EVENT, &line);
     })
@@ -1008,7 +1016,9 @@ pub(crate) fn emit_log_at(app: &AppHandle, line: &str, level: LogLevel) {
         LogLine {
             stream: LogStream::Stdout,
             level,
-            line: line.to_string(),
+            // Launcher-authored messages are not exempt: a ready-URL or an MCP
+            // env value interpolated into one would leak the same way.
+            line: launcher_core::redact_secrets(line).into_owned(),
         },
     );
 }
