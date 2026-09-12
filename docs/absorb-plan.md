@@ -238,3 +238,25 @@
 | 3.3 | 会话日志解码 / 导出（zstd 多帧 + torn-tail 检测 + Markdown/JSONL 导出） | `3/zat` + `dsh-manager` |
 | 3.4 | 配置编辑器安全栈（掩码 + `.bak` + 原子写 + `--patch --dump-config` 全链路校验 + diff） | `dsh-manager` |
 | 3.5 | 日志轮转（Activity 与 `logs/launcher.log` 加上限与按大小切分） | `dsh-manager` |
+
+### Phase 4 — 环境模型与生态
+
+| # | 任务 | 来源 |
+|---|---|---|
+| 4.1 | 三种 DSH_HOME 模式（复用 / 自动采纳 `~/.dsh` / 每实例独立） | `2/` |
+| 4.2 | 外部实例扫描与采纳（`scan_local_dsh` + TCP 探测） | `2/` |
+| 4.3 | **包完整性与回滚**：`bundle.rs` 补 sha256 校验 + 失败回滚（复用 2.2 的快照机制） | `2/` |
+| 4.4 | **三版本通道**：`market.rs` 补 beta（`next` dist-tag）与 alpha（GitHub 最新 commit） | `2/` |
+| 4.5 | 工具链自举补齐 pnpm / git | `3/zat` |
+| 4.6 | 删除安全规划（保护 `~/.dsh`、主目录一级、盘根、实例间共享路径） | `3/zat` |
+
+### Phase 5 — 发布工程（AHL 自己的 P2 / P3 / P5）
+
+这一阶段不是"吸收"，是 AHL roadmap 上的必做项，但**结构可以借 `dsh-manager` 的 CI**：
+
+| # | 任务 | 借什么 |
+|---|---|---|
+| 5.1 | CI 三平台矩阵 + `typecheck → core:smoke → build → 打包 → 发布` | `dsh-manager` 的 `release.yml` |
+| 5.2 | 签名 + 公证（有 secret 则签，无则回退 unsigned） | `dsh-manager` 的分支回退写法 |
+| 5.3 | 应用内自动更新 + npm/PyPI 更新检查 | `2/` + `DSH-Launcher` |
+| 5.4 | 一条 tag 出安装包（v0.6 里程碑） | — |
