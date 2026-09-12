@@ -102,6 +102,29 @@ pub fn create_snapshot(files: &[RescueFile], rescue_dir: &Path) -> Result<Rescue
     Ok(meta)
 }
 
+/// Take a rescue point only when one does not already exist.
+///
+/// This is the one to call *before* a destructive change, and the asymmetry with
+/// [`create_snapshot`] is deliberate. A rescue point is only worth restoring if
+/// it holds a state that was known to boot, so the pair of rules is:
+///
+/// - refresh the point after every successful boot ([`create_snapshot`]), and
+/// - create one before a change only if none exists yet ([`snapshot_if_absent`]).
+///
+/// If this overwrote instead, the *second* change made without an intervening
+/// boot would capture the already-damaged files and destroy the only good copy —
+/// exactly when the user needs it. Returns `Ok(None)` when a point was already
+/// present (nothing written).
+pub fn snapshot_if_absent(
+    files: &[RescueFile],
+    rescue_dir: &Path,
+) -> Result<Option<RescueSnapshotMeta>> {
+    if snapshot_status(rescue_dir).exists {
+        return Ok(None);
+    }
+    create_snapshot(files, rescue_dir).map(Some)
+}
+
 /// Copy the rescue point back over the live profile files. Fails when there is
 /// no rescue point (or its metadata is unreadable). Returns the restored
 /// snapshot's metadata.
@@ -247,6 +270,54 @@ mod tests {
             name: "package.json",
         }];
         assert!(create_snapshot(&files, &workspace.join("rescue")).is_err());
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn snapshot_if_absent_captures_once_and_never_overwrites() {
+        let (workspace, files) = profile_tree("if-absent");
+        let rescue_dir = workspace.join("rescue");
+
+        // First change: no point yet → one is taken.
+        let first = snapshot_if_absent(&files, &rescue_dir).unwrap();
+        assert!(first.is_some());
+
+        // The change lands (files are now modified).
+        std::fs::write(&files[0].source, "modified-by-first-change").unwrap();
+
+        // Second change with no intervening boot: the point already holds the
+        // last known-good state and must survive untouched. Overwriting here
+        // would capture the damage and destroy the only recoverable copy.
+        assert!(snapshot_if_absent(&files, &rescue_dir).unwrap().is_none());
+        assert_eq!(
+            std::fs::read_to_string(rescue_dir.join("package.json")).unwrap(),
+            r#"{"dsh":{"profile":{"bundles":[]}}}"#
+        );
+
+        // So restoring still gets back the pre-first-change state.
+        restore_snapshot(&files, &rescue_dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&files[0].source).unwrap(),
+            r#"{"dsh":{"profile":{"bundles":[]}}}"#
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn a_good_boot_refreshes_the_point_over_a_stale_one() {
+        let (workspace, files) = profile_tree("refresh");
+        let rescue_dir = workspace.join("rescue");
+
+        snapshot_if_absent(&files, &rescue_dir).unwrap();
+        // A change lands, then the instance boots successfully → the new state
+        // is known-good and becomes the point to restore to.
+        std::fs::write(&files[0].source, "known-good-after-boot").unwrap();
+        create_snapshot(&files, &rescue_dir).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(rescue_dir.join("package.json")).unwrap(),
+            "known-good-after-boot"
+        );
         let _ = std::fs::remove_dir_all(&workspace);
     }
 

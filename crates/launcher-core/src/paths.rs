@@ -123,6 +123,13 @@ impl AppPaths {
         self.mcp_dir(id, server).join("logs").join("last.log")
     }
 
+    /// An instance's rescue-point dir (`instances/<id>/rescue/`), holding the
+    /// pre-change copy of the profile files the launcher mutates. One rescue
+    /// point per instance — a new snapshot overwrites the previous one.
+    pub fn rescue_dir(&self, id: &str) -> PathBuf {
+        self.instance_dir(id).join("rescue")
+    }
+
     /// The SQLite file for launch history / index (`root/launcher.db`).
     pub fn db_file(&self) -> PathBuf {
         self.root.join("launcher.db")
