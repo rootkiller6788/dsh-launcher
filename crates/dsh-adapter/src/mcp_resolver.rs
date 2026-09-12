@@ -23,7 +23,10 @@ const PYPI_MIRROR: &str = "https://pypi.org/pypi";
 /// Probe one github repo and, when its root manifest names a package that is
 /// actually published, return a canonical install plan. `hint` is the runtime
 /// suggested by an existing command (`npx`/`uvx`), used to order the probes.
-pub async fn probe_mcp_install(entry: &RegistryPlugin, hint: Option<&str>) -> Option<McpInstallManifest> {
+pub async fn probe_mcp_install(
+    entry: &RegistryPlugin,
+    hint: Option<&str>,
+) -> Option<McpInstallManifest> {
     let (owner, repo) = owner_repo(entry.url.as_str())?;
     let client = http_client();
 
@@ -73,7 +76,10 @@ fn node_plan(name: &str) -> McpInstallManifest {
         runtime: "node".into(),
         method: "npm".into(),
         package: name.to_string(),
-        launch: McpLaunchSpec { command: "npx".into(), args: vec!["-y".into(), name.into()] },
+        launch: McpLaunchSpec {
+            command: "npx".into(),
+            args: vec!["-y".into(), name.into()],
+        },
     }
 }
 
@@ -82,14 +88,20 @@ fn python_plan(name: &str) -> McpInstallManifest {
         runtime: "python".into(),
         method: "uv".into(),
         package: name.to_string(),
-        launch: McpLaunchSpec { command: "uvx".into(), args: vec![name.into()] },
+        launch: McpLaunchSpec {
+            command: "uvx".into(),
+            args: vec![name.into()],
+        },
     }
 }
 
 // --- parsers (pure) ---------------------------------------------------------
 
 fn owner_repo(url: &str) -> Option<(String, String)> {
-    let rest = url.trim().trim_end_matches('/').strip_prefix("https://github.com/")?;
+    let rest = url
+        .trim()
+        .trim_end_matches('/')
+        .strip_prefix("https://github.com/")?;
     let mut segs = rest.split('/');
     let owner = segs.next()?.to_string();
     let repo = segs.next()?.trim_end_matches(".git").to_string();
@@ -160,7 +172,12 @@ fn http_client() -> reqwest::Client {
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
-async fn fetch_raw(client: &reqwest::Client, owner: &str, repo: &str, file: &str) -> Result<String, anyhow::Error> {
+async fn fetch_raw(
+    client: &reqwest::Client,
+    owner: &str,
+    repo: &str,
+    file: &str,
+) -> Result<String, anyhow::Error> {
     let url = format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{file}");
     let resp = client.get(&url).send().await?;
     if !resp.status().is_success() {
@@ -174,7 +191,11 @@ async fn fetch_raw(client: &reqwest::Client, owner: &str, repo: &str, file: &str
 }
 
 async fn published_npm(client: &reqwest::Client, name: &str) -> bool {
-    let url = format!("{}/{}", npm_registry().trim_end_matches('/'), urlencoding(name));
+    let url = format!(
+        "{}/{}",
+        npm_registry().trim_end_matches('/'),
+        urlencoding(name)
+    );
     matches!(client.get(&url).send().await, Ok(r) if r.status().is_success())
 }
 
@@ -226,7 +247,10 @@ mod tests {
 
     #[test]
     fn setup_name_parses() {
-        assert_eq!(setup_name("setup(name=\"mcp-git\", version=\"0.1\")").unwrap(), "mcp-git");
+        assert_eq!(
+            setup_name("setup(name=\"mcp-git\", version=\"0.1\")").unwrap(),
+            "mcp-git"
+        );
         assert_eq!(setup_name("x = 1"), None);
     }
 

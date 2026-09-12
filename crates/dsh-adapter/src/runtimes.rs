@@ -133,7 +133,12 @@ impl Runtimes {
     /// The runtime `verify`/`detect` would pick when nothing is marked active:
     /// the first installed, newest-first.
     pub fn pick_default_version(&self) -> Option<String> {
-        self.list().ok().into_iter().flatten().next().map(|e| e.version)
+        self.list()
+            .ok()
+            .into_iter()
+            .flatten()
+            .next()
+            .map(|e| e.version)
     }
 
     /// Resolve which installed version should run: the explicit `active`
@@ -148,7 +153,11 @@ impl Runtimes {
     /// `runtimes/dsh-<version>/`. On Windows this is `robocopy /E /SL` so
     /// pnpm's junction/symlink forest survives intact; elsewhere a plain
     /// recursive copy. Fails if that version is already installed.
-    pub fn install_from_source(&self, source: &Path, version: Option<&str>) -> Result<RuntimeEntry> {
+    pub fn install_from_source(
+        &self,
+        source: &Path,
+        version: Option<&str>,
+    ) -> Result<RuntimeEntry> {
         self.ensure_dir()?;
         let source = canonicalize_plain(source)?;
         let src_bin = source.join("apps/cli/lib/bin.js");
@@ -160,21 +169,30 @@ impl Runtimes {
         }
         let version = match version {
             Some(v) if !v.trim().is_empty() => v.trim().to_string(),
-            _ => read_cli_version(&src_bin)
-                .ok_or_else(|| anyhow!("can't read a version from {} — pass one explicitly", src_bin.display()))?,
+            _ => read_cli_version(&src_bin).ok_or_else(|| {
+                anyhow!(
+                    "can't read a version from {} — pass one explicitly",
+                    src_bin.display()
+                )
+            })?,
         };
         let dest = self.dsh_dir(&version);
         if dest.exists() {
             let bin = self.bin_path(&version);
             if bin.is_file() {
-                return Err(anyhow!("runtime {version} is already installed — remove it first"));
+                return Err(anyhow!(
+                    "runtime {version} is already installed — remove it first"
+                ));
             }
             // Stale/broken install (no runnable bin): replace it on import so a
             // fresh re-import can self-heal instead of blocking on a useless
             // dir. remove_dir_all removes junctions as links (does not follow
             // them), so a pnpm-junction tree — even one with reparse cycles —
             // is safe to drop.
-            tracing::warn!(version, "runtime exists but is broken (no bin) — replacing on import");
+            tracing::warn!(
+                version,
+                "runtime exists but is broken (no bin) — replacing on import"
+            );
             std::fs::remove_dir_all(&dest)?;
         }
         copy_tree(&source, &dest)?;
@@ -245,7 +263,9 @@ impl Runtimes {
             });
         }
         let Some(src) = source else {
-            return Err(anyhow!("{version} is broken — point repair at a valid DSH source tree"));
+            return Err(anyhow!(
+                "{version} is broken — point repair at a valid DSH source tree"
+            ));
         };
         let _ = std::fs::remove_dir_all(self.dsh_dir(version));
         self.install_from_source(src, Some(version))
@@ -294,7 +314,11 @@ pub(crate) fn node_version(exe: &Path) -> Result<String> {
         .output()
         .map_err(|e| anyhow!("spawn {}: {e}", exe.display()))?;
     if !out.status.success() {
-        return Err(anyhow!("`{} --version` exited with {}", exe.display(), out.status));
+        return Err(anyhow!(
+            "`{} --version` exited with {}",
+            exe.display(),
+            out.status
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
@@ -323,7 +347,9 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
         let status = std::process::Command::new("robocopy")
             .arg(src)
             .arg(dst)
-            .args(["/E", "/SL", "/XJ", "/MT:16", "/R:1", "/W:1", "/NFL", "/NDL", "/NP", "/NJH", "/NJS"])
+            .args([
+                "/E", "/SL", "/XJ", "/MT:16", "/R:1", "/W:1", "/NFL", "/NDL", "/NP", "/NJH", "/NJS",
+            ])
             .arg("/XD")
             .arg(".git")
             .arg(".turbo")
@@ -394,13 +420,21 @@ fn restore_junctions(src: &Path, dst: &Path) -> Result<()> {
     let mut links: Vec<(PathBuf, PathBuf)> = Vec::new(); // (dest_link, abs_target)
     let mut stack = vec![src.to_path_buf()];
     while let Some(from) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&from) else { continue };
+        let Ok(entries) = std::fs::read_dir(&from) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
-            let Ok(ft) = std::fs::symlink_metadata(&path) else { continue };
+            let Ok(ft) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
             if ft.file_type().is_symlink() {
-                let Ok(target) = std::fs::read_link(&path) else { continue };
-                let Some(rel) = path.strip_prefix(src).ok() else { continue };
+                let Ok(target) = std::fs::read_link(&path) else {
+                    continue;
+                };
+                let Some(rel) = path.strip_prefix(src).ok() else {
+                    continue;
+                };
                 let dl = dst.join(rel);
                 if let Some(parent) = dl.parent() {
                     let _ = std::fs::create_dir_all(parent);
@@ -455,10 +489,17 @@ fn create_junctions_batch(links: &[(PathBuf, PathBuf)]) -> Result<()> {
         ));
     }
     script.push_str("if ($errs.Count) { Write-Error \"$($errs.Count) junction(s) failed to create\"; exit 1 }\n");
-    let script_path = std::env::temp_dir().join(format!("dsh-restore-junctions-{}.ps1", std::process::id()));
+    let script_path =
+        std::env::temp_dir().join(format!("dsh-restore-junctions-{}.ps1", std::process::id()));
     std::fs::write(&script_path, script)?;
     let status = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
         .arg(&script_path)
         .status()
         .map_err(|e| anyhow!("batch junction creation failed: {e}"))?;
@@ -582,7 +623,10 @@ mod tests {
         make_junction(&b.join("a"), &a);
         std::fs::remove_dir_all(&a).unwrap();
         assert!(!a.exists(), "a must be removed");
-        assert!(b.is_dir(), "b (junction target) must survive — links are removed, not followed");
+        assert!(
+            b.is_dir(),
+            "b (junction target) must survive — links are removed, not followed"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -641,13 +685,18 @@ mod tests {
         // The junction was recreated, not materialized as a real copy.
         let dl = dst.join("node_modules/pkg");
         assert!(
-            std::fs::symlink_metadata(&dl).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+            std::fs::symlink_metadata(&dl)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false),
             "dest junction missing: {}",
             dl.display()
         );
         // And it resolves through the dest's OWN store copy: the recreated
         // junction's target is remapped inside dst, never back at the source.
-        assert!(dl.join("index.js").is_file(), "junction target not reachable via dest");
+        assert!(
+            dl.join("index.js").is_file(),
+            "junction target not reachable via dest"
+        );
         assert!(dst.join("store/pkg/index.js").is_file(), "store not copied");
         let recreated = std::fs::read_link(&dl).expect("read recreated junction target");
         assert!(

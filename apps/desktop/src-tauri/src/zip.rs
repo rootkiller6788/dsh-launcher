@@ -28,7 +28,8 @@ pub(crate) fn write_zip(entries: &[(&str, &[u8])]) -> Result<Vec<u8>, AppError> 
     for (name, body) in entries {
         zip.start_file(*name, options)
             .with_context(|| format!("start {name}"))?;
-        zip.write_all(body).with_context(|| format!("write {name}"))?;
+        zip.write_all(body)
+            .with_context(|| format!("write {name}"))?;
     }
     zip.finish().context("finish zip")?;
     Ok(out.into_inner())

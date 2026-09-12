@@ -234,8 +234,7 @@ pub async fn skill_updates(
         let mut workers = tokio::task::JoinSet::new();
         for (probe, source) in probes {
             workers.spawn(async move {
-                let fetched =
-                    content_adapter::fetch_skill_hash(&source, &probe.name, mirror).await;
+                let fetched = content_adapter::fetch_skill_hash(&source, &probe.name, mirror).await;
                 (probe.id, probe.current, fetched)
             });
         }
@@ -356,10 +355,7 @@ pub(crate) async fn skill_update_job(
 /// manifest (the single source of truth; `cordis.patch.yml` is compiled from
 /// them, so the record list *is* what DSH loads).
 #[tauri::command]
-pub fn mcp_list(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<Vec<McpServerRecord>, AppError> {
+pub fn mcp_list(state: State<'_, AppState>, id: String) -> Result<Vec<McpServerRecord>, AppError> {
     let instance = InstanceManifest::get(&state.paths, &id)?;
     Ok(instance.mcp)
 }
@@ -390,7 +386,10 @@ pub async fn mcp_install(
 /// The MCP record to persist: the resolver's canonical launch — `mcpInstall.launch`
 /// when the catalog precomputed one (it replaces any best-effort pseudo command) —
 /// otherwise the entry's own command as today.
-fn mcp_record_effective(entry: &RegistryPlugin, plan: Option<&McpInstallManifest>) -> McpServerRecord {
+fn mcp_record_effective(
+    entry: &RegistryPlugin,
+    plan: Option<&McpInstallManifest>,
+) -> McpServerRecord {
     let mut record = content_adapter::mcp_record(entry);
     if let Some(plan) = plan {
         if !plan.launch.command.is_empty() {
@@ -422,7 +421,10 @@ pub(crate) async fn mcp_install_job(
         if let Some(probed) = probe_mcp_install(entry, entry.command.as_deref()).await {
             emit_log(
                 app,
-                &format!("{id} · {mcp}: resolver found published package {}", probed.package),
+                &format!(
+                    "{id} · {mcp}: resolver found published package {}",
+                    probed.package
+                ),
             );
             plan = Some(probed);
         }
@@ -546,7 +548,10 @@ pub(crate) async fn mcp_install_job(
     // actually operates on its own workspace; the user can re-point it later.
     // Recognition bound lives in `content_adapter::needs_allowed_directory`.
     if content_adapter::needs_allowed_directory(&record)
-        && !record.args.iter().any(|a| std::path::Path::new(a).is_absolute())
+        && !record
+            .args
+            .iter()
+            .any(|a| std::path::Path::new(a).is_absolute())
     {
         let inst = InstanceManifest::get(&state.paths, id)?;
         emit_log(
@@ -708,34 +713,40 @@ pub async fn mcp_set_enabled(
     enabled: bool,
 ) -> Result<Vec<McpServerRecord>, AppError> {
     let job_id = id.clone();
-    run_instance_job(&state, &app, &job_id, HeavyJobKind::ProfileMutation, || async {
-        ensure_not_running(&state, &id).await?;
-        let mut instance = InstanceManifest::get(&state.paths, &id)?;
-        let Some(record) = instance.mcp.iter_mut().find(|r| r.id == mcp) else {
-            return Err(AppError::msg(format!("MCP '{mcp}' is not installed")));
-        };
-        if record.enabled == enabled {
-            return Ok(instance.mcp);
-        }
-        record.enabled = enabled;
-        instance.save(&state.paths.instance_file(&id))?;
-        emit_log(
-            &app,
-            &format!(
-                "{id} · {} MCP {mcp}",
-                if enabled { "enabled" } else { "disabled" }
-            ),
-        );
-        content_adapter::sync_mcp_patch(&instance, &instance.mcp)?;
-        reconcile_library_inventory_after_market_change(
-            &state,
-            &app,
-            &id,
-            if enabled { "MCP enable" } else { "MCP disable" },
-        )
-        .await?;
-        Ok(instance.mcp)
-    })
+    run_instance_job(
+        &state,
+        &app,
+        &job_id,
+        HeavyJobKind::ProfileMutation,
+        || async {
+            ensure_not_running(&state, &id).await?;
+            let mut instance = InstanceManifest::get(&state.paths, &id)?;
+            let Some(record) = instance.mcp.iter_mut().find(|r| r.id == mcp) else {
+                return Err(AppError::msg(format!("MCP '{mcp}' is not installed")));
+            };
+            if record.enabled == enabled {
+                return Ok(instance.mcp);
+            }
+            record.enabled = enabled;
+            instance.save(&state.paths.instance_file(&id))?;
+            emit_log(
+                &app,
+                &format!(
+                    "{id} · {} MCP {mcp}",
+                    if enabled { "enabled" } else { "disabled" }
+                ),
+            );
+            content_adapter::sync_mcp_patch(&instance, &instance.mcp)?;
+            reconcile_library_inventory_after_market_change(
+                &state,
+                &app,
+                &id,
+                if enabled { "MCP enable" } else { "MCP disable" },
+            )
+            .await?;
+            Ok(instance.mcp)
+        },
+    )
     .await
 }
 
@@ -802,7 +813,13 @@ async fn probe_and_persist(
     // transcript for `logs/last.log`.
     let buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let sink = health_sink(app.clone(), buf.clone());
-    line(&sink, &format!("{id} · health-check MCP {} (transport {})…", record.id, record.transport));
+    line(
+        &sink,
+        &format!(
+            "{id} · health-check MCP {} (transport {})…",
+            record.id, record.transport
+        ),
+    );
 
     let incoming = probe_mcp(&record, node.as_deref(), sink.clone()).await;
     snapshot.record(&incoming);
@@ -813,8 +830,14 @@ async fn probe_and_persist(
     if let Ok(text) = buf.lock() {
         let _ = std::fs::write(&log_file, text.as_str());
     }
-    line(&sink, &format!("{id} · MCP {} → {}", record.id, snapshot.state));
-    emit_log(app, &format!("{id} · MCP {} health: {}", record.id, snapshot.state));
+    line(
+        &sink,
+        &format!("{id} · MCP {} → {}", record.id, snapshot.state),
+    );
+    emit_log(
+        app,
+        &format!("{id} · MCP {} health: {}", record.id, snapshot.state),
+    );
     Ok(snapshot)
 }
 
@@ -1056,7 +1079,9 @@ pub async fn mcp_import(
             .into_iter()
             .find(|(k, _)| k == &request.source)
             .map(|(_, p)| p)
-            .ok_or_else(|| AppError::msg(format!("unknown MCP import source '{}'", request.source)))?;
+            .ok_or_else(|| {
+                AppError::msg(format!("unknown MCP import source '{}'", request.source))
+            })?;
         let text = std::fs::read_to_string(&path)
             .map_err(|e| AppError::msg(format!("read {}: {e}", path.display())))?;
         let list = parse_for_source(&request.source, &text).map_err(AppError::msg)?;
@@ -1332,7 +1357,9 @@ pub(crate) async fn install_bundle_item(
             // ERR_MODULE_NOT_FOUND (the tp7 skin family). If the just-added
             // package is not a bundle and ships no loadable entry artifact,
             // remove it now and fail the install — never leave it for boot.
-            if let Some(pkg) = content_adapter::skin_package_name(std::path::Path::new(&install_target)) {
+            if let Some(pkg) =
+                content_adapter::skin_package_name(std::path::Path::new(&install_target))
+            {
                 if !content_adapter::installed_skin_loadable(instance, &pkg) {
                     emit_log(
                         app,
@@ -1375,8 +1402,9 @@ pub(crate) async fn install_bundle_item(
             // New plugin/skin installs land DISABLED — record (skins) + patch
             // state, but never auto-mount. Enabling is an explicit later toggle.
             if item.kind == ContentKind::Theme || item.kind == ContentKind::Plugin {
-                let package = content_adapter::skin_package_name(std::path::Path::new(&install_target))
-                    .unwrap_or_else(|| install_target.clone());
+                let package =
+                    content_adapter::skin_package_name(std::path::Path::new(&install_target))
+                        .unwrap_or_else(|| install_target.clone());
                 land_install_disabled(state, id, &key, &package, item.kind)?;
             }
             record_install_metadata_with_source(state, id, item, source)?;

@@ -123,7 +123,8 @@ fn main_walk() {
         .build()
         .expect("tokio runtime");
 
-    let outcome = rt.block_on(async { drive(&mut run, &root, exe, &tauri_driver, &edge_driver).await });
+    let outcome =
+        rt.block_on(async { drive(&mut run, &root, exe, &tauri_driver, &edge_driver).await });
 
     // Teardown runs on both paths: the session first (it closes the app), then
     // the driver, then the dev server, then the dummy credential, then the root.
@@ -160,7 +161,10 @@ fn main_walk() {
         }
         Err(e) => {
             eprintln!("\ngui walk: FAIL — {e}");
-            eprintln!("gui walk: leaving {} in place for inspection", root.display());
+            eprintln!(
+                "gui walk: leaving {} in place for inspection",
+                root.display()
+            );
             std::process::exit(1);
         }
     }
@@ -210,8 +214,12 @@ async fn drive(
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("could not start `pnpm dev`: {e}"))?;
-        wait_for_port("127.0.0.1:1420", Duration::from_secs(90), "the Vite dev server")
-            .inspect_err(|_| kill_tree(&mut dev))?;
+        wait_for_port(
+            "127.0.0.1:1420",
+            Duration::from_secs(90),
+            "the Vite dev server",
+        )
+        .inspect_err(|_| kill_tree(&mut dev))?;
         run.dev_server = Some(dev);
         ok(&format!("started a dev server on {DEV_URL}"));
     } else {
@@ -277,12 +285,10 @@ async fn drive(
     let deadline = mounted + Duration::from_secs(60);
     loop {
         let probe = session
-            .js(
-                "const root = document.querySelector('#root');\n\
+            .js("const root = document.querySelector('#root');\n\
                  return { href: location.href, title: document.title,\n\
                            ready: document.readyState,\n\
-                           nodes: root ? root.children.length : -1 }",
-            )
+                           nodes: root ? root.children.length : -1 }")
             .await?;
         let nodes = probe.get("nodes").and_then(|n| n.as_i64()).unwrap_or(-1);
         let href = probe.get("href").and_then(|h| h.as_str()).unwrap_or("?");
@@ -362,7 +368,10 @@ async fn drive(
         }
         let state = session.js(&probe).await?;
         let src = state.get("src").and_then(|s| s.as_str()).unwrap_or("");
-        let active = state.get("active").and_then(|b| b.as_bool()).unwrap_or(false);
+        let active = state
+            .get("active")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false);
         if let Some(port) = local_url_port(src) {
             if active && !src.is_empty() {
                 ok(&format!("workspace iframe active, src={src}"));
@@ -386,7 +395,10 @@ async fn drive(
         }
         last = format!(
             "src={src:?} active={active} hidden={}",
-            state.get("hidden").and_then(|b| b.as_bool()).unwrap_or(true)
+            state
+                .get("hidden")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(true)
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -515,7 +527,11 @@ impl Session {
             .ok_or_else(|| format!("expected a list of elements, got {v}"))?;
         Ok(list
             .iter()
-            .filter_map(|e| e.get(ELEMENT_KEY).and_then(|i| i.as_str()).map(String::from))
+            .filter_map(|e| {
+                e.get(ELEMENT_KEY)
+                    .and_then(|i| i.as_str())
+                    .map(String::from)
+            })
             .collect())
     }
 
@@ -603,7 +619,10 @@ impl Session {
             .js("return document.body ? document.body.innerText : '(no body)'")
             .await
         {
-            Ok(v) => format!("{shot}\n  window text:\n{}", v.as_str().unwrap_or("(not a string)")),
+            Ok(v) => format!(
+                "{shot}\n  window text:\n{}",
+                v.as_str().unwrap_or("(not a string)")
+            ),
             Err(e) => format!("{shot}\n  (could not read the window: {e})"),
         }
     }
@@ -647,11 +666,7 @@ async fn post(
     unwrap(res, what).await
 }
 
-async fn get(
-    http: &reqwest::Client,
-    url: &str,
-    what: &str,
-) -> Result<serde_json::Value, String> {
+async fn get(http: &reqwest::Client, url: &str, what: &str) -> Result<serde_json::Value, String> {
     let res = http
         .get(url)
         .send()
@@ -663,7 +678,10 @@ async fn get(
 /// A WebDriver response carries its payload (or its error) under `value`.
 async fn unwrap(res: reqwest::Response, what: &str) -> Result<serde_json::Value, String> {
     let status = res.status();
-    let text = res.text().await.map_err(|e| format!("could not {what}: {e}"))?;
+    let text = res
+        .text()
+        .await
+        .map_err(|e| format!("could not {what}: {e}"))?;
     let value: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| format!("could not {what}: {status} {text} ({e})"))?;
     let value = value.get("value").cloned().unwrap_or(value);
@@ -734,7 +752,10 @@ fn require_tool(name: &str, env_key: Option<&str>, how: &str) -> PathBuf {
             if p.is_file() {
                 return p;
             }
-            eprintln!("gui walk: {key}={} is not a file, falling back to PATH", p.display());
+            eprintln!(
+                "gui walk: {key}={} is not a file, falling back to PATH",
+                p.display()
+            );
         }
     }
     if let Some(p) = find_on_path(name) {
@@ -755,7 +776,9 @@ fn require_edge_driver() -> PathBuf {
         return p;
     }
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        let p = PathBuf::from(local).join("ahl-e2e").join("msedgedriver.exe");
+        let p = PathBuf::from(local)
+            .join("ahl-e2e")
+            .join("msedgedriver.exe");
         if p.is_file() {
             return p;
         }
@@ -865,7 +888,10 @@ fn wait_for_port(addr: &str, timeout: Duration, what: &str) -> Result<(), String
         }
         std::thread::sleep(Duration::from_millis(250));
     }
-    Err(format!("{what} never came up on {addr} within {}s", timeout.as_secs()))
+    Err(format!(
+        "{what} never came up on {addr} within {}s",
+        timeout.as_secs()
+    ))
 }
 
 // ---------------------------------------------------------------------------

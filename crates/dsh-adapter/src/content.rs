@@ -230,7 +230,9 @@ fn bundle_matches_disk(dir: &Path, bundle: &SkillBundle) -> bool {
         && expected
             .iter()
             .zip(&on_disk)
-            .all(|((path, bytes), (disk_path, disk))| *path == disk_path && *bytes == disk.as_slice())
+            .all(|((path, bytes), (disk_path, disk))| {
+                *path == disk_path && *bytes == disk.as_slice()
+            })
 }
 
 /// Remove files under `dir` that `bundle` does not carry, then any directory
@@ -335,8 +337,8 @@ pub fn skill_disk_state(instance: &InstanceManifest, id: &str) -> SkillDiskState
     let dir = skills_dir(instance).join(&dir_name);
     let path = dir.join("SKILL.md");
     let present = path.is_file();
-    let valid = present
-        && skill_frontmatter_valid(&std::fs::read_to_string(&path).unwrap_or_default());
+    let valid =
+        present && skill_frontmatter_valid(&std::fs::read_to_string(&path).unwrap_or_default());
     SkillDiskState {
         present,
         valid,
@@ -407,7 +409,9 @@ impl SkillBundle {
 
     /// Every file, in a deterministic (path-sorted) order.
     fn files(&self) -> impl Iterator<Item = (&str, &[u8])> {
-        self.files.iter().map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+        self.files
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
     }
 
     /// The `SKILL.md` body — guaranteed present by [`SkillBundle::new`].
@@ -477,9 +481,9 @@ async fn fetch_single_file(
     else {
         return Err(anyhow!(why));
     };
-    let text = fetch_text(fetch, mirror).await.map_err(|fetch_err| {
-        anyhow!("{why}; the raw SKILL.md fallback failed too: {fetch_err}")
-    })?;
+    let text = fetch_text(fetch, mirror)
+        .await
+        .map_err(|fetch_err| anyhow!("{why}; the raw SKILL.md fallback failed too: {fetch_err}"))?;
     SkillBundle::new(vec![("SKILL.md".to_string(), text.into_bytes())], source)
 }
 
@@ -572,11 +576,7 @@ async fn clone_repo(repo: &str, dest: &Path, mirror: bool) -> Result<()> {
     }
     Err(match errors.len() {
         1 => errors.pop().expect("one clone attempt reported one error"),
-        _ => anyhow!(
-            "{}; the retry failed too: {}",
-            errors[0],
-            errors[1]
-        ),
+        _ => anyhow!("{}; the retry failed too: {}", errors[0], errors[1]),
     })
 }
 
@@ -915,7 +915,8 @@ pub(crate) fn skin_id_from_package(package: &str) -> String {
         .strip_prefix("dsh-client-")
         .or_else(|| base.strip_prefix("dsh-"))
         .unwrap_or(base);
-    let base = base.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.');
+    let base =
+        base.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.');
     if base.starts_with("skin-") || base == "skin" {
         base.to_string()
     } else {
@@ -1266,14 +1267,13 @@ fn mcp_needs_token(entry: &RegistryPlugin) -> bool {
 /// supply: a `${VAR}` reference, or a value that names a token/key. Shared by
 /// [`mcp_needs_token`] and the MCP import warning path (roadmap §10 / P3).
 pub(crate) fn value_needs_token(v: &str) -> bool {
-    v.contains("${")
-        || {
-            let upper = v.to_ascii_uppercase();
-            upper.contains("TOKEN")
-                || upper.contains("API_KEY")
-                || upper.contains("SECRET")
-                || upper.contains("BEARER")
-        }
+    v.contains("${") || {
+        let upper = v.to_ascii_uppercase();
+        upper.contains("TOKEN")
+            || upper.contains("API_KEY")
+            || upper.contains("SECRET")
+            || upper.contains("BEARER")
+    }
 }
 
 #[cfg(test)]
@@ -1306,18 +1306,45 @@ mod tests {
     #[test]
     fn needs_allowed_directory_recognizes_only_filesystem_family() {
         // Directory-gated: the official filesystem server, under any name/id form.
-        assert!(needs_allowed_directory(&rec("modelcontextprotocol/server-filesystem", "server-filesystem")));
-        assert!(needs_allowed_directory(&rec("modelcontextprotocol/server-filesystem", "filesystem")));
-        assert!(needs_allowed_directory(&rec("someone/mcp-filesystem", "filesystem")));
+        assert!(needs_allowed_directory(&rec(
+            "modelcontextprotocol/server-filesystem",
+            "server-filesystem"
+        )));
+        assert!(needs_allowed_directory(&rec(
+            "modelcontextprotocol/server-filesystem",
+            "filesystem"
+        )));
+        assert!(needs_allowed_directory(&rec(
+            "someone/mcp-filesystem",
+            "filesystem"
+        )));
         // Deliberately NOT directory-gated — injecting a workspace into these
         // would corrupt their launch args.
-        assert!(!needs_allowed_directory(&rec("modelcontextprotocol/server-github", "github")));
-        assert!(!needs_allowed_directory(&rec("modelcontextprotocol/server-memory", "memory")));
-        assert!(!needs_allowed_directory(&rec("ErnestoCorona/kanboard-mcp", "kanboard")));
-        assert!(!needs_allowed_directory(&rec("mendableai/firecrawl-mcp", "firecrawl-mcp")));
-        assert!(!needs_allowed_directory(&rec("modelcontextprotocol/server-puppeteer", "puppeteer")));
+        assert!(!needs_allowed_directory(&rec(
+            "modelcontextprotocol/server-github",
+            "github"
+        )));
+        assert!(!needs_allowed_directory(&rec(
+            "modelcontextprotocol/server-memory",
+            "memory"
+        )));
+        assert!(!needs_allowed_directory(&rec(
+            "ErnestoCorona/kanboard-mcp",
+            "kanboard"
+        )));
+        assert!(!needs_allowed_directory(&rec(
+            "mendableai/firecrawl-mcp",
+            "firecrawl-mcp"
+        )));
+        assert!(!needs_allowed_directory(&rec(
+            "modelcontextprotocol/server-puppeteer",
+            "puppeteer"
+        )));
         // No false positive on id prefixes that merely contain the word.
-        assert!(!needs_allowed_directory(&rec("acme/filesystem-proxy-not-local", "proxy")));
+        assert!(!needs_allowed_directory(&rec(
+            "acme/filesystem-proxy-not-local",
+            "proxy"
+        )));
     }
 
     #[test]
@@ -1334,7 +1361,9 @@ mod tests {
         assert_eq!(mcp_record_missing_config(&record).len(), 2);
 
         // One set → only the unset key survives (with its secret flag).
-        record.env.insert("KANBOARD_URL".into(), "https://pm.example.com".into());
+        record
+            .env
+            .insert("KANBOARD_URL".into(), "https://pm.example.com".into());
         let missing = mcp_record_missing_config(&record);
         assert_eq!(missing, vec![req("KANBOARD_API_TOKEN", true)]);
 
@@ -1344,7 +1373,10 @@ mod tests {
 
         // Whitespace-only still counts as unset.
         record.env.insert("KANBOARD_API_TOKEN".into(), "  ".into());
-        assert_eq!(mcp_record_missing_config(&record), vec![req("KANBOARD_API_TOKEN", true)]);
+        assert_eq!(
+            mcp_record_missing_config(&record),
+            vec![req("KANBOARD_API_TOKEN", true)]
+        );
 
         // No declarations → never missing.
         record.required_env.clear();
@@ -1367,7 +1399,9 @@ mod tests {
 
         assert_eq!(mcp_missing_against(&record, &declared).len(), 1);
         // Record gained a value (future fill phase writes record.env) → hint clears.
-        record.env.insert("KANBOARD_URL".into(), "https://pm.example.com".into());
+        record
+            .env
+            .insert("KANBOARD_URL".into(), "https://pm.example.com".into());
         assert!(mcp_missing_against(&record, &declared).is_empty());
         // No declaration for this record → still nothing missing.
         assert!(mcp_missing_against(&record, &[]).is_empty());
@@ -1410,7 +1444,10 @@ mod tests {
             server_name: Some("github".into()),
             transport: Some("stdio".into()),
             command: Some("npx".into()),
-            args: Some(vec!["-y".into(), "@modelcontextprotocol/server-github".into()]),
+            args: Some(vec![
+                "-y".into(),
+                "@modelcontextprotocol/server-github".into(),
+            ]),
             env: Some(Default::default()),
             ..Default::default()
         };
@@ -1463,7 +1500,10 @@ mod tests {
         let (instance, ws) = test_instance("sync-multi");
         std::fs::write(patch_path(&instance), "[]\n").unwrap();
 
-        let records = vec![rec("modelcontextprotocol/server-github", "github"), rec("o/web", "web")];
+        let records = vec![
+            rec("modelcontextprotocol/server-github", "github"),
+            rec("o/web", "web"),
+        ];
         sync_mcp_patch(&instance, &records).unwrap();
 
         let text = std::fs::read_to_string(patch_path(&instance)).unwrap();
@@ -1484,10 +1524,15 @@ mod tests {
         let (instance, ws) = test_instance("sync-toggle");
         let github = rec("modelcontextprotocol/server-github", "github");
         let web = rec("o/web", "web");
-        let both = |github_enabled: bool| vec![
-            McpServerRecord { enabled: github_enabled, ..github.clone() },
-            web.clone(),
-        ];
+        let both = |github_enabled: bool| {
+            vec![
+                McpServerRecord {
+                    enabled: github_enabled,
+                    ..github.clone()
+                },
+                web.clone(),
+            ]
+        };
 
         sync_mcp_patch(&instance, &both(true)).unwrap();
 
@@ -1496,7 +1541,10 @@ mod tests {
         let text = std::fs::read_to_string(patch_path(&instance)).unwrap();
         assert!(!text.contains("mcp-github"), "{text}");
         assert!(text.contains("mcp-web"), "{text}");
-        assert_eq!(text.lines().filter(|l| l.starts_with("- insert:")).count(), 1);
+        assert_eq!(
+            text.lines().filter(|l| l.starts_with("- insert:")).count(),
+            1
+        );
 
         // Re-enable → row is back.
         sync_mcp_patch(&instance, &both(true)).unwrap();
@@ -1520,7 +1568,11 @@ mod tests {
         )
         .unwrap();
 
-        sync_mcp_patch(&instance, &[rec("modelcontextprotocol/server-github", "github")]).unwrap();
+        sync_mcp_patch(
+            &instance,
+            &[rec("modelcontextprotocol/server-github", "github")],
+        )
+        .unwrap();
 
         let text = std::fs::read_to_string(patch_path(&instance)).unwrap();
         assert!(text.contains("# launcher comment"), "{text}");
@@ -1528,8 +1580,15 @@ mod tests {
         assert!(text.contains("- id: timer\n  disabled: true"), "{text}");
         assert!(text.contains("mcp-github"), "{text}");
         // User block kept alongside — the launcher block is appended, never merged.
-        assert_eq!(text.lines().filter(|l| l.starts_with("- insert:")).count(), 2, "{text}");
-        assert!(text.trim_end().ends_with("env: {}"), "launcher block appended last:\n{text}");
+        assert_eq!(
+            text.lines().filter(|l| l.starts_with("- insert:")).count(),
+            2,
+            "{text}"
+        );
+        assert!(
+            text.trim_end().ends_with("env: {}"),
+            "launcher block appended last:\n{text}"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -1545,7 +1604,10 @@ mod tests {
     fn skin_id_from_package_derives_stable_slug() {
         assert_eq!(skin_id_from_package("dsh-skin-sakura"), "skin-sakura");
         assert_eq!(skin_id_from_package("dsh-client-ui-aqua"), "skin-ui-aqua");
-        assert_eq!(skin_id_from_package("@deepseek-ai/dsh-skin-dark"), "skin-dark");
+        assert_eq!(
+            skin_id_from_package("@deepseek-ai/dsh-skin-dark"),
+            "skin-dark"
+        );
         assert_eq!(skin_id_from_package("plain"), "skin-plain");
         assert_eq!(skin_id_from_package("dsh-skin"), "skin");
     }
@@ -1572,7 +1634,11 @@ mod tests {
         ];
         sync_skin_patch(&instance, &skins).unwrap();
         let text = std::fs::read_to_string(patch_path(&instance)).unwrap();
-        assert_eq!(text.lines().filter(|l| l.starts_with("- insert:")).count(), 1, "{text}");
+        assert_eq!(
+            text.lines().filter(|l| l.starts_with("- insert:")).count(),
+            1,
+            "{text}"
+        );
         assert!(text.contains("skin-sakura"), "{text}");
         assert!(text.contains("skin-dark"), "{text}");
         assert!(text.contains("# []"), "{text}");
@@ -1584,13 +1650,15 @@ mod tests {
         let (instance, ws) = test_instance("skin-sync-toggle");
         let sakura = skin("owner/sakura", "dsh-skin-sakura", true);
         let dark = skin("owner/dark", "dsh-skin-dark", true);
-        let both = |sakura_enabled: bool| vec![
-            SkinPackage {
-                enabled: sakura_enabled,
-                ..sakura.clone()
-            },
-            dark.clone(),
-        ];
+        let both = |sakura_enabled: bool| {
+            vec![
+                SkinPackage {
+                    enabled: sakura_enabled,
+                    ..sakura.clone()
+                },
+                dark.clone(),
+            ]
+        };
 
         sync_skin_patch(&instance, &both(true)).unwrap();
 
@@ -1598,7 +1666,10 @@ mod tests {
         let text = std::fs::read_to_string(patch_path(&instance)).unwrap();
         assert!(!text.contains("skin-sakura"), "{text}");
         assert!(text.contains("skin-dark"), "{text}");
-        assert_eq!(text.lines().filter(|l| l.starts_with("- insert:")).count(), 1);
+        assert_eq!(
+            text.lines().filter(|l| l.starts_with("- insert:")).count(),
+            1
+        );
 
         sync_skin_patch(&instance, &both(true)).unwrap();
         let text = std::fs::read_to_string(patch_path(&instance)).unwrap();
@@ -1626,7 +1697,11 @@ mod tests {
         assert!(text.contains("- id: timer\n  disabled: true"), "{text}");
         assert!(text.contains("skin-sakura"), "{text}");
         // MCP block kept; skin block appended → two insert blocks.
-        assert_eq!(text.lines().filter(|l| l.starts_with("- insert:")).count(), 2, "{text}");
+        assert_eq!(
+            text.lines().filter(|l| l.starts_with("- insert:")).count(),
+            2,
+            "{text}"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -1636,9 +1711,7 @@ mod tests {
         // catppuccin is installed and declares `dsh.bundle`; sakura is a plain
         // client skin. Both are enabled in the launcher model.
         let profile = DshAdapter::profile_dir(&instance);
-        let bundle_dir = profile
-            .join("node_modules")
-            .join("dsh-catppuccin");
+        let bundle_dir = profile.join("node_modules").join("dsh-catppuccin");
         std::fs::create_dir_all(&bundle_dir).unwrap();
         std::fs::write(
             bundle_dir.join("package.json"),
@@ -1655,7 +1728,10 @@ mod tests {
             !text.contains("dsh-catppuccin"),
             "a dsh.bundle skin must not get an insert row (double mount):\n{text}"
         );
-        assert!(text.contains("skin-sakura"), "client skin still inserted:\n{text}");
+        assert!(
+            text.contains("skin-sakura"),
+            "client skin still inserted:\n{text}"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -1735,9 +1811,18 @@ mod tests {
 
     #[test]
     fn github_repo_normalises_urls() {
-        assert_eq!(github_repo("https://github.com/o/r").as_deref(), Some("o/r"));
-        assert_eq!(github_repo("https://github.com/o/r/").as_deref(), Some("o/r"));
-        assert_eq!(github_repo("https://github.com/o/r.git").as_deref(), Some("o/r"));
+        assert_eq!(
+            github_repo("https://github.com/o/r").as_deref(),
+            Some("o/r")
+        );
+        assert_eq!(
+            github_repo("https://github.com/o/r/").as_deref(),
+            Some("o/r")
+        );
+        assert_eq!(
+            github_repo("https://github.com/o/r.git").as_deref(),
+            Some("o/r")
+        );
         assert_eq!(github_repo("https://gitlab.com/o/r"), None);
         assert_eq!(github_repo("https://github.com/"), None);
     }
@@ -1778,7 +1863,10 @@ mod tests {
         }
         let files = read_bundle(&root).unwrap();
         let paths: Vec<&str> = files.iter().map(|(path, _)| path.as_str()).collect();
-        assert_eq!(paths, vec!["SKILL.md", "references/stage_1.md", "tools/run.sh"]);
+        assert_eq!(
+            paths,
+            vec!["SKILL.md", "references/stage_1.md", "tools/run.sh"]
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1788,7 +1876,10 @@ mod tests {
         let first = SkillBundle::new(
             vec![
                 ("SKILL.md".to_string(), b"v1".to_vec()),
-                ("references/old.md".to_string(), b"gone next version".to_vec()),
+                (
+                    "references/old.md".to_string(),
+                    b"gone next version".to_vec(),
+                ),
                 ("scripts/check.py".to_string(), b"print(1)".to_vec()),
             ],
             "https://example.test/skill".to_string(),
@@ -1803,7 +1894,10 @@ mod tests {
         let second = SkillBundle::new(
             vec![
                 ("SKILL.md".to_string(), b"v2".to_vec()),
-                ("templates/report.tex".to_string(), b"\\documentclass".to_vec()),
+                (
+                    "templates/report.tex".to_string(),
+                    b"\\documentclass".to_vec(),
+                ),
             ],
             "https://example.test/skill".to_string(),
         )
@@ -1855,8 +1949,11 @@ mod tests {
 
     #[test]
     fn a_bundle_without_a_skill_md_is_refused() {
-        let err = SkillBundle::new(vec![("README.md".to_string(), b"x".to_vec())], String::new())
-            .unwrap_err();
+        let err = SkillBundle::new(
+            vec![("README.md".to_string(), b"x".to_vec())],
+            String::new(),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("SKILL.md"), "{err}");
     }
 
@@ -1918,9 +2015,14 @@ mod tests {
             "https://raw.githubusercontent.com/rootkiller6788/mathmodel-skill/HEAD/SKILL.md",
         ));
         let source = skill_source(&pinned).unwrap();
-        let hash = fetch_skill_hash(&source, &pinned.name, false).await.unwrap();
+        let hash = fetch_skill_hash(&source, &pinned.name, false)
+            .await
+            .unwrap();
         let (instance, ws) = test_instance("probe-pinned");
-        assert_eq!(hash, install_skill(&instance, &pinned, false).await.unwrap().hash);
+        assert_eq!(
+            hash,
+            install_skill(&instance, &pinned, false).await.unwrap().hash
+        );
         let _ = std::fs::remove_dir_all(&ws);
 
         // The shape a record captured before the catalog pinned `fetch`, i.e. a
@@ -1929,9 +2031,17 @@ mod tests {
         let repo_only = entry(None);
         let source = skill_source(&repo_only).unwrap();
         assert_eq!(source, repo_only.url);
-        let hash = fetch_skill_hash(&source, &repo_only.name, false).await.unwrap();
+        let hash = fetch_skill_hash(&source, &repo_only.name, false)
+            .await
+            .unwrap();
         let (instance, ws) = test_instance("probe-repo");
-        assert_eq!(hash, install_skill(&instance, &repo_only, false).await.unwrap().hash);
+        assert_eq!(
+            hash,
+            install_skill(&instance, &repo_only, false)
+                .await
+                .unwrap()
+                .hash
+        );
         let _ = std::fs::remove_dir_all(&ws);
 
         // A skill nested inside its repo: resolved by the name search, which is
@@ -1956,7 +2066,9 @@ mod tests {
             "the path must 404 for this to prove anything"
         );
         assert_eq!(
-            fetch_skill_hash(moved, "mathmodel-skill", false).await.unwrap(),
+            fetch_skill_hash(moved, "mathmodel-skill", false)
+                .await
+                .unwrap(),
             nested_hash_of_repo("rootkiller6788/mathmodel-skill", "mathmodel-skill").await
         );
     }
@@ -2004,16 +2116,18 @@ mod tests {
 
     #[test]
     fn skill_frontmatter_valid_requires_name() {
-        assert!(skill_frontmatter_valid("---\nname: docx\ndescription: read docs\n---\nbody"));
-        assert!(!skill_frontmatter_valid("---\ndescription: no name\n---\nbody"));
+        assert!(skill_frontmatter_valid(
+            "---\nname: docx\ndescription: read docs\n---\nbody"
+        ));
+        assert!(!skill_frontmatter_valid(
+            "---\ndescription: no name\n---\nbody"
+        ));
         assert!(!skill_frontmatter_valid("no frontmatter at all"));
         assert!(!skill_frontmatter_valid(""));
     }
 
     #[test]
     fn mcp_config_issues_flags_missing_endpoint() {
-        
-
         let stdio_missing = RegistryPlugin {
             name: "s".into(),
             owner: "o".into(),
@@ -2021,7 +2135,10 @@ mod tests {
             command: None,
             ..Default::default()
         };
-        assert_eq!(mcp_config_issues(&stdio_missing), vec!["mcp.missingCommand"]);
+        assert_eq!(
+            mcp_config_issues(&stdio_missing),
+            vec!["mcp.missingCommand"]
+        );
 
         let http_missing = RegistryPlugin {
             name: "s".into(),
@@ -2075,10 +2192,7 @@ mod tests {
             owner: "o".into(),
             transport: Some("stdio".into()),
             command: Some("npx".into()),
-            env: Some(HashMap::from([(
-                "API_KEY".into(),
-                "${API_KEY}".into(),
-            )])),
+            env: Some(HashMap::from([("API_KEY".into(), "${API_KEY}".into())])),
             ..Default::default()
         };
         assert_eq!(
@@ -2142,10 +2256,7 @@ mod tests {
             env: HashMap::from([("API_KEY".into(), "${API_KEY}".into())]),
             ..Default::default()
         };
-        assert_eq!(
-            mcp_record_config_issues(&key_env),
-            vec!["mcp.missingToken"]
-        );
+        assert_eq!(mcp_record_config_issues(&key_env), vec!["mcp.missingToken"]);
     }
 
     #[test]
@@ -2160,7 +2271,10 @@ mod tests {
             entry_id: None,
             fiber_phase: None,
         };
-        assert!(skill_loader_active(&[plugin("skill-filesystem"), plugin("timer")]));
+        assert!(skill_loader_active(&[
+            plugin("skill-filesystem"),
+            plugin("timer")
+        ]));
         assert!(!skill_loader_active(&[plugin("timer"), plugin("market")]));
         assert!(!skill_loader_active(&[]));
     }
@@ -2172,7 +2286,10 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
-        assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]
@@ -2180,7 +2297,10 @@ mod tests {
         let fetch = RegistryPlugin {
             name: "docx".into(),
             owner: "anthropics".into(),
-            fetch: Some("https://raw.githubusercontent.com/anthropics/skills/HEAD/skills/docx/SKILL.md".into()),
+            fetch: Some(
+                "https://raw.githubusercontent.com/anthropics/skills/HEAD/skills/docx/SKILL.md"
+                    .into(),
+            ),
             url: "https://github.com/anthropics/skills".into(),
             ..Default::default()
         };
@@ -2196,7 +2316,10 @@ mod tests {
             url: "https://github.com/anthropics/skills".into(),
             ..Default::default()
         };
-        assert_eq!(skill_source(&repo_only).unwrap(), "https://github.com/anthropics/skills");
+        assert_eq!(
+            skill_source(&repo_only).unwrap(),
+            "https://github.com/anthropics/skills"
+        );
 
         let none = RegistryPlugin {
             name: "ghost".into(),
@@ -2225,7 +2348,10 @@ mod tests {
 
         // Overwrite (an update) replaces content atomically.
         write_atomic(&dir, "SKILL.md", "v2 body \u{2014} longer".as_bytes()).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v2 body \u{2014} longer");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "v2 body \u{2014} longer"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2256,7 +2382,10 @@ mod tests {
             r#"{"name":"@deepseek-ai/dsh-client-ui-tp7-skin","main":"lib/index.js"}"#,
         )
         .unwrap();
-        assert!(!entry_artifact_exists(&dir), "declared-but-missing main is NOT loadable");
+        assert!(
+            !entry_artifact_exists(&dir),
+            "declared-but-missing main is NOT loadable"
+        );
         let _ = std::fs::remove_dir_all(&dir);
 
         // A working skin: `main` present on disk.
@@ -2286,7 +2415,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("package.json"), r#"{"name":"bare-shell"}"#).unwrap();
-        assert!(!entry_artifact_exists(&dir), "no artifact at all is NOT loadable");
+        assert!(
+            !entry_artifact_exists(&dir),
+            "no artifact at all is NOT loadable"
+        );
         let _ = std::fs::remove_dir_all(&dir);
 
         // exports["."] as a string form (modern dual-package skins).
@@ -2299,7 +2431,10 @@ mod tests {
             r#"{"name":"modern-skin","exports":{".":"./dist/client.js"}}"#,
         )
         .unwrap();
-        assert!(entry_artifact_exists(&dir), "string exports['.'] is loadable");
+        assert!(
+            entry_artifact_exists(&dir),
+            "string exports['.'] is loadable"
+        );
         let _ = std::fs::remove_dir_all(&dir);
 
         // exports["."] naming a missing file — the same brick through exports.
@@ -2311,7 +2446,10 @@ mod tests {
             r#"{"name":"exp-miss","exports":{".":"./dist/missing.js"}}"#,
         )
         .unwrap();
-        assert!(!entry_artifact_exists(&dir), "missing exports['.'] is NOT loadable");
+        assert!(
+            !entry_artifact_exists(&dir),
+            "missing exports['.'] is NOT loadable"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2445,14 +2583,24 @@ mod tests {
         .unwrap();
 
         let quarantined = quarantine_unloadable_client_bundles(&instance);
-        assert_eq!(quarantined, vec!["dsh-brick"], "only the brick is quarantined");
+        assert_eq!(
+            quarantined,
+            vec!["dsh-brick"],
+            "only the brick is quarantined"
+        );
         let text = std::fs::read_to_string(profile.join("cordis.patch.yml")).unwrap();
         assert!(
             text.contains("- id: brick\n  disabled: true"),
             "brick row disabled so the next boot skips it:\n{text}"
         );
-        assert!(!text.contains("id: built"), "built bundle untouched:\n{text}");
-        assert!(!text.contains("id: res"), "resource bundle untouched:\n{text}");
+        assert!(
+            !text.contains("id: built"),
+            "built bundle untouched:\n{text}"
+        );
+        assert!(
+            !text.contains("id: res"),
+            "resource bundle untouched:\n{text}"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 }

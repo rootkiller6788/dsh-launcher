@@ -574,8 +574,7 @@ fn library_inventory_detail_for(
         let resolved = config_store.resolved_keys(&instance.id, &record.id);
         let id = &record.id;
         let metadata =
-            market_metadata_for_key_values(&cache.launcher_metadata, ContentKind::Mcp, id)
-                .cloned();
+            market_metadata_for_key_values(&cache.launcher_metadata, ContentKind::Mcp, id).cloned();
         let install_source = cache.install_sources.get(id);
         items.push(LibraryInventoryItem {
             id: id.clone(),
@@ -607,10 +606,7 @@ fn library_inventory_detail_for(
             missing_config: content_adapter::mcp_missing_against(
                 record,
                 if record.required_env.is_empty() {
-                    declared_env
-                        .get(id)
-                        .map(Vec::as_slice)
-                        .unwrap_or_default()
+                    declared_env.get(id).map(Vec::as_slice).unwrap_or_default()
                 } else {
                     record.required_env.as_slice()
                 },
@@ -920,10 +916,7 @@ async fn run_git(args: &[String], cwd: Option<&Path>) -> Result<(), AppError> {
         return Ok(());
     }
     let detail = {
-        let v = lines
-            .lock()
-            .map(|v| v.join("\n"))
-            .unwrap_or_default();
+        let v = lines.lock().map(|v| v.join("\n")).unwrap_or_default();
         let trimmed = v.trim();
         if trimmed.is_empty() {
             format!("exit code {code}")
@@ -1060,9 +1053,7 @@ pub(crate) async fn resolve_plugin_install_target(
     let result = if cache_dir.join(".git").exists() && !broken {
         emit_log(
             app,
-            &format!(
-                "{id} · updating cached GitHub plugin {display}…{transport}"
-            ),
+            &format!("{id} · updating cached GitHub plugin {display}…{transport}"),
         );
         // Repoint `origin` at the transport the current mirror toggle picks so
         // flipping it applies to updates of an existing clone, not just fresh
@@ -1081,8 +1072,7 @@ pub(crate) async fn resolve_plugin_install_target(
         .await;
         match set_url {
             Ok(()) => {
-                let fetch_ref =
-                    spec.reference.clone().unwrap_or_else(|| "HEAD".to_string());
+                let fetch_ref = spec.reference.clone().unwrap_or_else(|| "HEAD".to_string());
                 let fetch = run_git(
                     &[
                         "-C".to_string(),
@@ -1126,15 +1116,9 @@ pub(crate) async fn resolve_plugin_install_target(
         }
         emit_log(
             app,
-            &format!(
-                "{id} · shallow cloning GitHub plugin {display}…{transport}"
-            ),
+            &format!("{id} · shallow cloning GitHub plugin {display}…{transport}"),
         );
-        let _ = std::fs::create_dir_all(
-            cache_dir
-                .parent()
-                .unwrap_or(state.paths.cache.as_path()),
-        );
+        let _ = std::fs::create_dir_all(cache_dir.parent().unwrap_or(state.paths.cache.as_path()));
         if cache_dir.exists() {
             let _ = std::fs::remove_dir_all(&cache_dir);
         }
@@ -1299,10 +1283,7 @@ pub async fn plugin_install(
         &id,
         &key,
         &format!("plugin {key}"),
-        JobPlan::Plugin {
-            target,
-            entry,
-        },
+        JobPlan::Plugin { target, entry },
     )
     .await
 }
@@ -1690,9 +1671,7 @@ pub async fn plugin_update(
         &id,
         &name,
         &label,
-        JobPlan::PluginUpdate {
-            name: name.clone(),
-        },
+        JobPlan::PluginUpdate { name: name.clone() },
     )
     .await
 }
@@ -1759,7 +1738,13 @@ mod tests {
     fn sample_state(label: &str) -> AppState {
         let paths = temp_paths(label);
         let vault = ProviderVault::new(paths.clone());
-        AppState::new(paths, AppSettings::default(), vault, None, Arc::new(AtomicBool::new(false)))
+        AppState::new(
+            paths,
+            AppSettings::default(),
+            vault,
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )
     }
 
     fn plugin(name: &str, source: InstalledPluginSource) -> InstalledPlugin {
@@ -1782,11 +1767,11 @@ mod tests {
         live_alpha.toggleable = false;
         let mut profile_alpha = plugin("alpha", InstalledPluginSource::Profile);
         profile_alpha.toggleable = true;
-        let inventory = vec![
-            live_alpha,
-            plugin("beta", InstalledPluginSource::Inventory),
+        let inventory = vec![live_alpha, plugin("beta", InstalledPluginSource::Inventory)];
+        let profile = vec![
+            profile_alpha,
+            plugin("gamma", InstalledPluginSource::Profile),
         ];
-        let profile = vec![profile_alpha, plugin("gamma", InstalledPluginSource::Profile)];
         let merged = merge_plugin_sources(inventory, profile);
         let names: Vec<&str> = merged.iter().map(|p| p.name.as_str()).collect();
 
@@ -1796,7 +1781,10 @@ mod tests {
         // being shadowed by the live row's hardcoded `false`.
         assert_eq!(merged.len(), 3, "alpha must dedupe: {names:?}");
         assert_eq!(names, vec!["alpha", "gamma", "beta"]);
-        let alpha = merged.iter().find(|p| p.name == "alpha").expect("alpha row");
+        let alpha = merged
+            .iter()
+            .find(|p| p.name == "alpha")
+            .expect("alpha row");
         assert_eq!(alpha.source, InstalledPluginSource::Profile);
         assert!(alpha.toggleable, "profile copy's toggleable must survive");
         assert_eq!(merged[0].source, InstalledPluginSource::Profile);
@@ -1910,7 +1898,10 @@ mod tests {
         // In-flight pack left over from an interrupted transfer.
         let pack = make(true);
         fs::write(
-            pack.join(".git").join("objects").join("pack").join("tmp_pack_xjAdEM"),
+            pack.join(".git")
+                .join("objects")
+                .join("pack")
+                .join("tmp_pack_xjAdEM"),
             "partial",
         )
         .unwrap();
@@ -1920,7 +1911,10 @@ mod tests {
         // A normal pack file (no `tmp_pack_` prefix) with a checkout is healthy.
         let real = make(true);
         fs::write(
-            real.join(".git").join("objects").join("pack").join("real.pack"),
+            real.join(".git")
+                .join("objects")
+                .join("pack")
+                .join("real.pack"),
             "x",
         )
         .unwrap();

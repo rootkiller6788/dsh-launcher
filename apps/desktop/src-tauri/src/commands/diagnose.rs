@@ -187,7 +187,10 @@ pub(crate) fn collect(
     let log = state.paths.launcher_log.clone();
     let log_body = match read_shared_tail(&log, LOG_READ_BYTES) {
         Ok(Some(text)) => mask(&tail_lines(&text, LOG_TAIL_LINES)),
-        Ok(None) => format!("(no launcher log at {})\n", mask(&log.display().to_string())),
+        Ok(None) => format!(
+            "(no launcher log at {})\n",
+            mask(&log.display().to_string())
+        ),
         Err(e) => format!("(launcher log unreadable: {e})\n"),
     };
     files.push(("log.txt".into(), log_body));
@@ -282,7 +285,11 @@ fn env_section(
 ) -> String {
     let mut out = String::new();
     out.push_str("== machine ==\n");
-    out.push_str(&format!("os: {} ({})\n", std::env::consts::OS, std::env::consts::ARCH));
+    out.push_str(&format!(
+        "os: {} ({})\n",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
     if let Some(version) = sysinfo::System::long_os_version() {
         out.push_str(&format!("osVersion: {version}\n"));
     }
@@ -391,10 +398,7 @@ fn state_section(
 /// `present` + version + note, on one line.
 fn describe(item: &launcher_core::diagnostics::EnvItem) -> String {
     if !item.present {
-        return item
-            .note
-            .clone()
-            .unwrap_or_else(|| "not found".to_string());
+        return item.note.clone().unwrap_or_else(|| "not found".to_string());
     }
     match &item.version {
         Some(v) => v.clone(),
@@ -523,11 +527,11 @@ mod tests {
             .into_iter()
             .map(|(n, _)| n)
             .collect();
-        assert!(names.contains(&"crash-torn-name.txt".to_string()), "{names:?}");
         assert!(
-            names.contains(&format!("crash-{NOW}.txt")),
+            names.contains(&"crash-torn-name.txt".to_string()),
             "{names:?}"
         );
+        assert!(names.contains(&format!("crash-{NOW}.txt")), "{names:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -577,7 +581,9 @@ mod tests {
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).expect("open");
         assert_eq!(archive.len(), 2);
         // Subdirectory names are preserved as paths inside the archive.
-        archive.by_name("crashes/crash-1.txt").expect("nested entry");
+        archive
+            .by_name("crashes/crash-1.txt")
+            .expect("nested entry");
     }
 
     #[test]

@@ -71,10 +71,25 @@ fn go_non_registry_install_builds_and_probes_ok() {
         (launch, repo_dir, how, state)
     });
 
-    eprintln!("probe: state={} error={:?} tools={}", probe_state.state, probe_state.error, probe_state.tools.len());
-    assert_eq!(probe_state.state, MCP_STATE_OK, "go-built server must probe ok, error: {:?}", probe_state.error);
-    assert!(!probe_state.tools.is_empty(), "expected tools/list to be answered");
-    assert_eq!(how, "deterministic", "a go.mod repo must take the deterministic branch, not ai-resolve");
+    eprintln!(
+        "probe: state={} error={:?} tools={}",
+        probe_state.state,
+        probe_state.error,
+        probe_state.tools.len()
+    );
+    assert_eq!(
+        probe_state.state, MCP_STATE_OK,
+        "go-built server must probe ok, error: {:?}",
+        probe_state.error
+    );
+    assert!(
+        !probe_state.tools.is_empty(),
+        "expected tools/list to be answered"
+    );
+    assert_eq!(
+        how, "deterministic",
+        "a go.mod repo must take the deterministic branch, not ai-resolve"
+    );
     let _ = launch;
     let _ = std::fs::remove_dir_all(&target);
     assert!(!target.exists(), "cleanup must remove the whole clone dir");

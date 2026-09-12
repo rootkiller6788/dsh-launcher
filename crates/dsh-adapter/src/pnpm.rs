@@ -236,7 +236,9 @@ fn insert_allow_build(text: &str, package: &str, line: &str) -> Result<Edit> {
         .unwrap_or_else(|| detect_indent(&bare));
 
     for (i, l) in block.iter().enumerate() {
-        let Some((key, value)) = entry(l) else { continue };
+        let Some((key, value)) = entry(l) else {
+            continue;
+        };
         if key != package {
             continue;
         }
@@ -415,7 +417,10 @@ mod tests {
         let out = add_allow_build(&m, "@scope/pkg").unwrap();
         assert_eq!(out.line, "\"@scope/pkg\": true");
         let text = read(&file);
-        assert_eq!(text, "allowBuilds:\n  esbuild: true\n  \"@scope/pkg\": true\n");
+        assert_eq!(
+            text,
+            "allowBuilds:\n  esbuild: true\n  \"@scope/pkg\": true\n"
+        );
         // And what it produced is a mapping under that key — which an unquoted
         // `@scope/pkg` would not be.
         let value: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
@@ -500,7 +505,10 @@ mod tests {
         let out = add_allow_build(&m, "esbuild").unwrap();
         assert!(out.written);
         assert_eq!(out.backup, None, "nothing existed to back up");
-        assert_eq!(read(&profile.join("pnpm-workspace.yaml")), "allowBuilds:\n  esbuild: true\n");
+        assert_eq!(
+            read(&profile.join("pnpm-workspace.yaml")),
+            "allowBuilds:\n  esbuild: true\n"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -514,7 +522,10 @@ mod tests {
             text, "packages:\r\n  - \"apps/*\"\r\n\r\nallowBuilds:\r\n  esbuild: true\r\n",
             "CRLF stays CRLF"
         );
-        assert!(!text.contains("\n\n"), "no LF was introduced into a CRLF file");
+        assert!(
+            !text.contains("\n\n"),
+            "no LF was introduced into a CRLF file"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

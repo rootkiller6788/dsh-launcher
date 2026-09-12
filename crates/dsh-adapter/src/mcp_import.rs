@@ -42,8 +42,7 @@ pub struct ImportedMcp {
 /// Parse a Claude Desktop or Cursor config: a top-level `mcpServers` object
 /// keyed by server name.
 pub fn parse_claude_or_cursor(text: &str) -> Result<Vec<ImportedMcp>, String> {
-    let root = serde_json::from_str::<Value>(text)
-        .map_err(|e| format!("not valid JSON: {e}"))?;
+    let root = serde_json::from_str::<Value>(text).map_err(|e| format!("not valid JSON: {e}"))?;
     let servers = root
         .get("mcpServers")
         .and_then(Value::as_object)
@@ -54,8 +53,7 @@ pub fn parse_claude_or_cursor(text: &str) -> Result<Vec<ImportedMcp>, String> {
 /// Parse a VSCode `settings.json`: MCP servers live at `mcp.servers` (older
 /// configs use a top-level `servers`).
 pub fn parse_vscode_settings(text: &str) -> Result<Vec<ImportedMcp>, String> {
-    let root = serde_json::from_str::<Value>(text)
-        .map_err(|e| format!("not valid JSON: {e}"))?;
+    let root = serde_json::from_str::<Value>(text).map_err(|e| format!("not valid JSON: {e}"))?;
     let servers = root
         .get("mcp")
         .and_then(|m| m.get("servers"))
@@ -68,8 +66,7 @@ pub fn parse_vscode_settings(text: &str) -> Result<Vec<ImportedMcp>, String> {
 /// Detect the config shape and parse it. Returns `None` when the text holds
 /// neither recognized container (caller surfaces a readable error).
 pub fn parse_any(text: &str) -> Result<Option<Vec<ImportedMcp>>, String> {
-    let root = serde_json::from_str::<Value>(text)
-        .map_err(|e| format!("not valid JSON: {e}"))?;
+    let root = serde_json::from_str::<Value>(text).map_err(|e| format!("not valid JSON: {e}"))?;
     if let Some(map) = root.get("mcpServers").and_then(Value::as_object) {
         return Ok(Some(parse_servers_map(map)));
     }
@@ -112,14 +109,24 @@ fn parse_server(name: &str, obj: &serde_json::Map<String, Value>) -> ImportedMcp
     };
 
     // Explicit transport hint, when present ("stdio" | "http" | "sse").
-    let type_hint = obj.get("type").and_then(Value::as_str).map(|s| s.to_ascii_lowercase());
+    let type_hint = obj
+        .get("type")
+        .and_then(Value::as_str)
+        .map(|s| s.to_ascii_lowercase());
 
     // URL endpoint → streamable-http; SSE is approximated (see D3) with a note.
-    let url = obj.get("url").and_then(Value::as_str).map(str::trim).unwrap_or("");
+    let url = obj
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
     if !url.is_empty() {
         imported.record.transport = "streamable-http".to_string();
         imported.record.url = url.to_string();
-        copy_string_map(obj.get("headers").and_then(Value::as_object), &mut imported.record.headers);
+        copy_string_map(
+            obj.get("headers").and_then(Value::as_object),
+            &mut imported.record.headers,
+        );
         if type_hint.as_deref() == Some("sse") {
             imported.warning = Some("mcp.import.warnSseFolded".to_string());
         }
@@ -134,7 +141,11 @@ fn parse_server(name: &str, obj: &serde_json::Map<String, Value>) -> ImportedMcp
     }
 
     // stdio launch.
-    let command = obj.get("command").and_then(Value::as_str).map(str::trim).unwrap_or("");
+    let command = obj
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
     if command.is_empty() {
         imported.warning = Some("mcp.import.warnNoLaunch".to_string());
         return imported;
@@ -147,14 +158,20 @@ fn parse_server(name: &str, obj: &serde_json::Map<String, Value>) -> ImportedMcp
             .map(|s| s.to_string())
             .collect();
     }
-    copy_string_map(obj.get("env").and_then(Value::as_object), &mut imported.record.env);
+    copy_string_map(
+        obj.get("env").and_then(Value::as_object),
+        &mut imported.record.env,
+    );
     warn_token_if_needed(&imported.record, &mut imported.warning);
     imported
 }
 
 /// Copy a JSON string→string map into the record's `env`/`headers`, dropping
 /// non-string values (externally-authored configs occasionally carry numbers).
-fn copy_string_map(src: Option<&serde_json::Map<String, Value>>, dst: &mut HashMap<String, String>) {
+fn copy_string_map(
+    src: Option<&serde_json::Map<String, Value>>,
+    dst: &mut HashMap<String, String>,
+) {
     if let Some(map) = src {
         for (k, v) in map {
             if let Some(s) = v.as_str() {
@@ -190,11 +207,17 @@ mod tests {
         }}"#;
         let parsed = parse_claude_or_cursor(text).unwrap();
         assert_eq!(parsed.len(), 2);
-        let fs = parsed.iter().find(|m| m.server_name == "filesystem").unwrap();
+        let fs = parsed
+            .iter()
+            .find(|m| m.server_name == "filesystem")
+            .unwrap();
         assert_eq!(fs.record.id, "import:filesystem");
         assert_eq!(fs.record.transport, "stdio");
         assert_eq!(fs.record.command, "npx");
-        assert_eq!(fs.record.args, vec!["-y", "@modelcontextprotocol/server-filesystem"]);
+        assert_eq!(
+            fs.record.args,
+            vec!["-y", "@modelcontextprotocol/server-filesystem"]
+        );
         assert!(fs.warning.is_none());
     }
 
@@ -205,7 +228,10 @@ mod tests {
         let remote = &parsed[0];
         assert_eq!(remote.record.transport, "streamable-http");
         assert_eq!(remote.record.url, "https://example.com/mcp");
-        assert_eq!(remote.record.headers.get("Authorization").unwrap(), "Bearer ${TOKEN}");
+        assert_eq!(
+            remote.record.headers.get("Authorization").unwrap(),
+            "Bearer ${TOKEN}"
+        );
         // ${TOKEN} in a header → review warning.
         assert_eq!(remote.warning.as_deref(), Some("mcp.import.warnNeedsToken"));
     }
@@ -216,7 +242,10 @@ mod tests {
         // VSCode settings shape tolerates top-level `servers`.
         let parsed = parse_vscode_settings(text).unwrap();
         assert_eq!(parsed[0].record.transport, "streamable-http");
-        assert_eq!(parsed[0].warning.as_deref(), Some("mcp.import.warnSseFolded"));
+        assert_eq!(
+            parsed[0].warning.as_deref(),
+            Some("mcp.import.warnSseFolded")
+        );
     }
 
     #[test]
@@ -232,7 +261,10 @@ mod tests {
     fn no_launch_server_is_skipped_with_warning() {
         let text = r#"{"mcpServers":{"broken":{"some":"thing"}}}"#;
         let parsed = parse_claude_or_cursor(text).unwrap();
-        assert_eq!(parsed[0].warning.as_deref(), Some("mcp.import.warnNoLaunch"));
+        assert_eq!(
+            parsed[0].warning.as_deref(),
+            Some("mcp.import.warnNoLaunch")
+        );
         assert!(parsed[0].record.command.is_empty());
         assert!(parsed[0].record.url.is_empty());
     }
@@ -246,8 +278,12 @@ mod tests {
 
     #[test]
     fn parse_any_detects_both_shapes() {
-        assert!(parse_any(r#"{"mcpServers":{"a":{"command":"npx"}}}"#).unwrap().is_some());
-        assert!(parse_any(r#"{"mcp":{"servers":{"b":{"command":"npx"}}}}"#).unwrap().is_some());
+        assert!(parse_any(r#"{"mcpServers":{"a":{"command":"npx"}}}"#)
+            .unwrap()
+            .is_some());
+        assert!(parse_any(r#"{"mcp":{"servers":{"b":{"command":"npx"}}}}"#)
+            .unwrap()
+            .is_some());
         assert!(parse_any(r#"{"unrelated":1}"#).unwrap().is_none());
     }
 
@@ -256,11 +292,18 @@ mod tests {
         // The token predicate is value-based (matches `mcp_needs_token`): a
         // `${VAR}` reference in a value trips the review warning, a bare key
         // name does not.
-        let text = r#"{"mcpServers":{"n":{"command":"npx","env":{"PORT":8080,"API_KEY":"${API_KEY}"}}}}"#;
+        let text =
+            r#"{"mcpServers":{"n":{"command":"npx","env":{"PORT":8080,"API_KEY":"${API_KEY}"}}}}"#;
         let parsed = parse_claude_or_cursor(text).unwrap();
-        assert!(!parsed[0].record.env.contains_key("PORT"), "numbers are dropped");
+        assert!(
+            !parsed[0].record.env.contains_key("PORT"),
+            "numbers are dropped"
+        );
         assert_eq!(parsed[0].record.env.get("API_KEY").unwrap(), "${API_KEY}");
-        assert_eq!(parsed[0].warning.as_deref(), Some("mcp.import.warnNeedsToken"));
+        assert_eq!(
+            parsed[0].warning.as_deref(),
+            Some("mcp.import.warnNeedsToken")
+        );
     }
 
     #[test]

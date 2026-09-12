@@ -44,10 +44,7 @@ pub fn reserve_rescue_point(state: &AppState, app: &AppHandle, id: &str) {
             ),
         ),
         Ok(None) => {}
-        Err(e) => emit_warn(
-            app,
-            &format!("{id} · could not take a rescue point: {e:#}"),
-        ),
+        Err(e) => emit_warn(app, &format!("{id} · could not take a rescue point: {e:#}")),
     }
 }
 
@@ -76,10 +73,7 @@ pub fn refresh_rescue_point(state: &AppState, app: &AppHandle, id: &str) {
 
 /// Whether the instance has a rescue point, and what it holds.
 #[tauri::command]
-pub fn rescue_status(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<RescueStatus, AppError> {
+pub fn rescue_status(state: State<'_, AppState>, id: String) -> Result<RescueStatus, AppError> {
     Ok(rescue::snapshot_status(&state.paths.rescue_dir(&id)))
 }
 

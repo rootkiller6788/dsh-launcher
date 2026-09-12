@@ -47,11 +47,22 @@ fn probe_real_github_server_via_cmd_npx() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let state = rt.block_on(async {
         // node=None → launch_command falls back to `cmd /C npx` on Windows.
-        probe_mcp(&github_record("npx", vec!["-y".into(), "@modelcontextprotocol/server-github".into()]), None, sink()).await
+        probe_mcp(
+            &github_record(
+                "npx",
+                vec!["-y".into(), "@modelcontextprotocol/server-github".into()],
+            ),
+            None,
+            sink(),
+        )
+        .await
     });
     eprintln!("VERDICT(no-node): {}", state.state);
     assert_eq!(state.state, MCP_STATE_OK, "error: {:?}", state.error);
-    assert!(!state.tools.is_empty(), "expected tools/list to be answered");
+    assert!(
+        !state.tools.is_empty(),
+        "expected tools/list to be answered"
+    );
 }
 
 #[test]
@@ -65,7 +76,15 @@ fn probe_real_github_server_via_path_node() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let state = rt.block_on(async {
         // node with an npm install → launch_command uses `node <npx-cli.js>`.
-        probe_mcp(&github_record("npx", vec!["-y".into(), "@modelcontextprotocol/server-github".into()]), Some(&node), sink()).await
+        probe_mcp(
+            &github_record(
+                "npx",
+                vec!["-y".into(), "@modelcontextprotocol/server-github".into()],
+            ),
+            Some(&node),
+            sink(),
+        )
+        .await
     });
     eprintln!("VERDICT(path-node): {}", state.state);
     assert_eq!(state.state, MCP_STATE_OK, "error: {:?}", state.error);
@@ -82,7 +101,10 @@ fn probe_puppeteer() {
 fn probe_wiki_explorer() {
     // Without `--stdio` the package boots a streamable-HTTP app server on :3001 and never
     // answers a stdio initialize; with it, it runs as a proper stdio MCP server.
-    probe_pkg_args("@modelcontextprotocol/server-wiki-explorer", vec!["--stdio"]);
+    probe_pkg_args(
+        "@modelcontextprotocol/server-wiki-explorer",
+        vec!["--stdio"],
+    );
 }
 
 #[test]
@@ -93,14 +115,23 @@ fn probe_wiki_explorer_without_stdio_flag_fails_fast() {
     // sitting out the 30s init window with a bare "no initialize" timeout.
     let rec = github_record(
         "npx",
-        vec!["-y".to_string(), "@modelcontextprotocol/server-wiki-explorer".to_string()],
+        vec![
+            "-y".to_string(),
+            "@modelcontextprotocol/server-wiki-explorer".to_string(),
+        ],
     );
     let rt = tokio::runtime::Runtime::new().unwrap();
     let state = rt.block_on(async { probe_mcp(&rec, None, sink()).await });
-    eprintln!("VERDICT(no-stdio-flag): state={} error={:?}", state.state, state.error);
+    eprintln!(
+        "VERDICT(no-stdio-flag): state={} error={:?}",
+        state.state, state.error
+    );
     assert_eq!(state.state, MCP_STATE_ERROR, "error: {:?}", state.error);
     let err = state.error.as_deref().unwrap_or("");
-    assert!(err.contains("HTTP"), "expected transport hint in error, got: {err}");
+    assert!(
+        err.contains("HTTP"),
+        "expected transport hint in error, got: {err}"
+    );
 }
 
 #[test]
@@ -119,7 +150,12 @@ fn probe_pkg_args(pkg: &str, extra: Vec<&str>) {
     let rec = github_record("npx", args);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let state = rt.block_on(async { probe_mcp(&rec, None, sink()).await });
-    eprintln!("VERDICT({pkg}): state={} error={:?} tools={}", state.state, state.error, state.tools.len());
+    eprintln!(
+        "VERDICT({pkg}): state={} error={:?} tools={}",
+        state.state,
+        state.error,
+        state.tools.len()
+    );
 }
 
 #[test]
@@ -139,15 +175,26 @@ fn std_vs_tokio_spawn_puppeteer_piped() {
         let f = std::fs::File::open(&path).unwrap();
         let mut sc = std::process::Command::new("cmd");
         sc.args(["/C", "npx", "-y", pkg]);
-        sc.stdin(std::process::Stdio::from(f)).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        sc.stdin(std::process::Stdio::from(f))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         let mut child = sc.spawn().unwrap();
         let so = child.stdout.take().unwrap();
         let se = child.stderr.take().unwrap();
-        let t1 = std::thread::spawn(move || { for l in BufReader::new(so).lines().map_while(Result::ok) { eprintln!("[std-out] {l}"); } });
-        let t2 = std::thread::spawn(move || { for l in BufReader::new(se).lines().map_while(Result::ok) { eprintln!("[std-err] {l}"); } });
+        let t1 = std::thread::spawn(move || {
+            for l in BufReader::new(so).lines().map_while(Result::ok) {
+                eprintln!("[std-out] {l}");
+            }
+        });
+        let t2 = std::thread::spawn(move || {
+            for l in BufReader::new(se).lines().map_while(Result::ok) {
+                eprintln!("[std-err] {l}");
+            }
+        });
         let code = child.wait().unwrap();
         eprintln!("STD-piped exit: {:?}", code.code());
-        let _ = t1.join(); let _ = t2.join();
+        let _ = t1.join();
+        let _ = t2.join();
     }
     // --- tokio::process, piped, drained async ---
     {
@@ -157,15 +204,28 @@ fn std_vs_tokio_spawn_puppeteer_piped() {
             let f2 = std::fs::File::open(&path).unwrap();
             let mut tc = tokio::process::Command::new("cmd");
             tc.args(["/C", "npx", "-y", pkg]);
-            tc.stdin(std::process::Stdio::from(f2)).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+            tc.stdin(std::process::Stdio::from(f2))
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
             let mut child = tc.spawn().unwrap();
             let so = child.stdout.take().unwrap();
             let se = child.stderr.take().unwrap();
-            let h1 = tokio::spawn(async move { let mut r = TBuf::new(so).lines(); while let Ok(Some(l)) = r.next_line().await { eprintln!("[tok-out] {l}"); } });
-            let h2 = tokio::spawn(async move { let mut r = TBuf::new(se).lines(); while let Ok(Some(l)) = r.next_line().await { eprintln!("[tok-err] {l}"); } });
+            let h1 = tokio::spawn(async move {
+                let mut r = TBuf::new(so).lines();
+                while let Ok(Some(l)) = r.next_line().await {
+                    eprintln!("[tok-out] {l}");
+                }
+            });
+            let h2 = tokio::spawn(async move {
+                let mut r = TBuf::new(se).lines();
+                while let Ok(Some(l)) = r.next_line().await {
+                    eprintln!("[tok-err] {l}");
+                }
+            });
             let status = child.wait().await.unwrap();
             eprintln!("TOKIO-piped exit: {:?}", status.code());
-            let _ = h1.await; let _ = h2.await;
+            let _ = h1.await;
+            let _ = h2.await;
         });
     }
     let _ = std::fs::remove_file(&path);
@@ -200,8 +260,7 @@ fn prefetch_uv_without_uv_reports_honest_error() {
         ..Default::default()
     };
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let err = rt
-        .block_on(async { prefetch_mcp(&m, None, sink()).await.unwrap_err() });
+    let err = rt.block_on(async { prefetch_mcp(&m, None, sink()).await.unwrap_err() });
     eprintln!("VERDICT(no-uv prefetch): {err}");
     assert!(
         err.contains("uv not found"),

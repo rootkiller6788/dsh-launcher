@@ -109,7 +109,9 @@ async fn prefetch_npm(
         return Err("no npm package recorded — cannot download".into());
     }
     if !warmable(spec) {
-        return Err(format!("{spec} is a source-run (github:/git+) — no registry package"));
+        return Err(format!(
+            "{spec} is a source-run (github:/git+) — no registry package"
+        ));
     }
     // `npm cache add <pkg>` fetches the tarball into the shared npm cache that
     // npx's pacote reads on first launch — that fetch is what this stage is for.
@@ -143,7 +145,10 @@ async fn prefetch_npm(
 pub(crate) fn npm_program(node: Option<&Path>) -> (String, Vec<String>) {
     if let Some(node_exe) = node {
         if let Some(cli) = bundled_cli(node_exe, "npm") {
-            return (node_exe.display().to_string(), vec![cli.display().to_string()]);
+            return (
+                node_exe.display().to_string(),
+                vec![cli.display().to_string()],
+            );
         }
     }
     if cfg!(windows) {
@@ -173,7 +178,9 @@ async fn prefetch_uv(manifest: &McpInstallManifest, sink: LogSink) -> Result<Str
         return Err("no uv package recorded — cannot download".into());
     }
     if !warmable(spec) {
-        return Err(format!("{spec} is a source-run (github:/git+) — no registry package"));
+        return Err(format!(
+            "{spec} is a source-run (github:/git+) — no registry package"
+        ));
     }
     let uv = match which::which("uv") {
         Ok(p) => p,
@@ -231,9 +238,7 @@ async fn run_tool(
     }
     cmd.kill_on_drop(true);
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("spawn {program}: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| format!("spawn {program}: {e}"))?;
 
     let mut readers = Vec::new();
     if let Some(out) = child.stdout.take() {
@@ -297,7 +302,9 @@ async fn run_tool(
     if code == 0 {
         Ok(())
     } else {
-        Err(format!("{program} exited with code {code} — registry/network issue?"))
+        Err(format!(
+            "{program} exited with code {code} — registry/network issue?"
+        ))
     }
 }
 
@@ -315,7 +322,10 @@ mod tests {
     }
 
     fn stdio_record() -> McpServerRecord {
-        McpServerRecord { transport: "stdio".to_string(), ..Default::default() }
+        McpServerRecord {
+            transport: "stdio".to_string(),
+            ..Default::default()
+        }
     }
 
     fn plan(method: &str, package: &str, launch: bool) -> McpInstallManifest {
@@ -323,7 +333,11 @@ mod tests {
             method: method.to_string(),
             package: package.to_string(),
             launch: launcher_core::market::McpLaunchSpec {
-                command: if launch { "npx".to_string() } else { String::new() },
+                command: if launch {
+                    "npx".to_string()
+                } else {
+                    String::new()
+                },
                 ..Default::default()
             },
             ..Default::default()
@@ -357,7 +371,10 @@ mod tests {
             InstallClass::Remote
         );
         // Any non-empty url on a stdio row also means remote-hosted.
-        let hosted = McpServerRecord { url: "https://example.com/mcp".to_string(), ..Default::default() };
+        let hosted = McpServerRecord {
+            url: "https://example.com/mcp".to_string(),
+            ..Default::default()
+        };
         assert_eq!(
             classify_install(&hosted, Some(&plan("npm", "@acme/server", true))),
             InstallClass::Remote
@@ -389,7 +406,10 @@ mod tests {
             classify_install(&stdio_record(), Some(&plan("npm", "@acme/server", false))),
             InstallClass::Source
         );
-        assert_eq!(classify_install(&stdio_record(), None), InstallClass::Source);
+        assert_eq!(
+            classify_install(&stdio_record(), None),
+            InstallClass::Source
+        );
     }
 
     #[test]
@@ -400,9 +420,15 @@ mod tests {
         // and RegistryPackage implies warmable (no git spec sneaks in).
         let cases: Vec<(McpServerRecord, Option<McpInstallManifest>)> = vec![
             (stdio_record(), Some(plan("npm", "@acme/server", true))),
-            (stdio_record(), Some(plan("npm", "github:acme/server", true))),
             (
-                McpServerRecord { transport: "streamable-http".into(), ..Default::default() },
+                stdio_record(),
+                Some(plan("npm", "github:acme/server", true)),
+            ),
+            (
+                McpServerRecord {
+                    transport: "streamable-http".into(),
+                    ..Default::default()
+                },
                 Some(plan("npm", "@acme/server", true)),
             ),
             (stdio_record(), None),

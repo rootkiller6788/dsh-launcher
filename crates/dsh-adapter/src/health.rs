@@ -319,7 +319,12 @@ fn patch_check(id: &'static str, path: &Path) -> HealthCheck {
             format!("{} is not valid YAML: {e}", path.display()),
         )
         .with_fix(HealthFix::RestoreRescue, Vec::new()),
-        Ok(value) if !matches!(value, serde_yaml::Value::Null | serde_yaml::Value::Sequence(_)) => {
+        Ok(value)
+            if !matches!(
+                value,
+                serde_yaml::Value::Null | serde_yaml::Value::Sequence(_)
+            ) =>
+        {
             HealthCheck::new(
                 id,
                 HealthGroup::Profile,
@@ -447,9 +452,7 @@ fn bundle_needs_artifact(instance: &InstanceManifest, name: &str) -> bool {
     let dir = DshAdapter::profile_dir(instance)
         .join("node_modules")
         .join(name);
-    skin_has_bundle(instance, name)
-        && package_mounts_client(&dir)
-        && !entry_artifact_exists(&dir)
+    skin_has_bundle(instance, name) && package_mounts_client(&dir) && !entry_artifact_exists(&dir)
 }
 
 /// MCP server records, from the manifest alone — no probe, no network. What it
@@ -483,7 +486,10 @@ fn mcp_checks(instance: &InstanceManifest) -> Vec<HealthCheck> {
             "mcp-launch-shape",
             HealthGroup::Mcp,
             HealthStatus::Ok,
-            format!("{} enabled server(s) have a launch definition", enabled.len()),
+            format!(
+                "{} enabled server(s) have a launch definition",
+                enabled.len()
+            ),
         )
     } else {
         HealthCheck::new(
@@ -537,7 +543,10 @@ fn mcp_checks(instance: &InstanceManifest) -> Vec<HealthCheck> {
             "mcp-env",
             HealthGroup::Mcp,
             HealthStatus::Warn,
-            format!("declared environment variables with no value: {}", unset.join("; ")),
+            format!(
+                "declared environment variables with no value: {}",
+                unset.join("; ")
+            ),
         )
     });
 
@@ -554,19 +563,14 @@ fn rescue_check(rescue_dir: &Path) -> HealthCheck {
             "rescue-point",
             HealthGroup::Rescue,
             HealthStatus::Ok,
-            format!(
-                "{} file(s) captured at {}",
-                status.files.len(),
-                status.at
-            ),
+            format!("{} file(s) captured at {}", status.files.len(), status.at),
         )
     } else {
         HealthCheck::new(
             "rescue-point",
             HealthGroup::Rescue,
             HealthStatus::Warn,
-            "no rescue point yet — a bad change could not be undone until one exists"
-                .to_string(),
+            "no rescue point yet — a bad change could not be undone until one exists".to_string(),
         )
         .with_fix(HealthFix::CreateRescue, Vec::new())
     }
@@ -579,8 +583,7 @@ mod tests {
 
     /// A throwaway workspace with an instance manifest pointing at it.
     fn instance(tag: &str) -> (std::path::PathBuf, InstanceManifest) {
-        let root = std::env::temp_dir()
-            .join(format!("ahl-health-{tag}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("ahl-health-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).expect("create workspace");
@@ -611,10 +614,8 @@ mod tests {
     /// checks — those delegate to `resolve_node` / `resolve_bin`, which report
     /// on the machine running the test.
     fn report(instance: &InstanceManifest, rescue_dir: &Path) -> Vec<HealthCheck> {
-        let adapter = DshAdapter::configured(
-            std::env::temp_dir().join("ahl-health-runtimes"),
-            None,
-        );
+        let adapter =
+            DshAdapter::configured(std::env::temp_dir().join("ahl-health-runtimes"), None);
         health_report(&adapter, &AppSettings::default(), instance, rescue_dir)
             .checks
             .into_iter()
@@ -690,7 +691,10 @@ mod tests {
     #[test]
     fn an_absent_patch_layer_is_not_a_finding() {
         let (root, instance) = instance("no-patch");
-        write(&profile_dir(&instance).join("package.json"), r#"{"dsh":{}}"#);
+        write(
+            &profile_dir(&instance).join("package.json"),
+            r#"{"dsh":{}}"#,
+        );
         let checks = report(&instance, &root.join("rescue"));
         let c = check(&checks, "profile-patch");
         assert_eq!(c.status, HealthStatus::Ok, "{}", c.detail);
@@ -701,7 +705,10 @@ mod tests {
     #[test]
     fn an_empty_patch_layer_parses_as_nothing_mounted() {
         let (root, instance) = instance("empty-patch");
-        write(&profile_dir(&instance).join("package.json"), r#"{"dsh":{}}"#);
+        write(
+            &profile_dir(&instance).join("package.json"),
+            r#"{"dsh":{}}"#,
+        );
         write(&profile_dir(&instance).join("cordis.patch.yml"), "[]\n");
         let checks = report(&instance, &root.join("rescue"));
         assert_eq!(check(&checks, "profile-patch").status, HealthStatus::Ok);
@@ -796,14 +803,20 @@ mod tests {
         let c = check(&checks, "entry-duplicates");
         assert_eq!(c.status, HealthStatus::Fail);
         assert!(c.detail.contains("shared-row"), "{}", c.detail);
-        assert!(c.fixes.is_empty(), "which layer gives way is not ours to pick");
+        assert!(
+            c.fixes.is_empty(),
+            "which layer gives way is not ours to pick"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn mcp_records_are_checked_for_launch_shape_and_unset_env() {
         let (root, mut instance) = instance("mcp");
-        write(&profile_dir(&instance).join("package.json"), r#"{"dsh":{}}"#);
+        write(
+            &profile_dir(&instance).join("package.json"),
+            r#"{"dsh":{}}"#,
+        );
         instance.mcp = vec![
             McpServerRecord {
                 id: "owner/no-command".into(),
@@ -849,9 +862,20 @@ mod tests {
         let checks = report(&instance, &root.join("rescue"));
         let shape = check(&checks, "mcp-launch-shape");
         assert_eq!(shape.status, HealthStatus::Fail);
-        assert!(shape.detail.contains("owner/no-command"), "{}", shape.detail);
-        assert!(shape.detail.contains("owner/http-no-url"), "{}", shape.detail);
-        assert!(!shape.detail.contains("owner/off"), "disabled must not be checked");
+        assert!(
+            shape.detail.contains("owner/no-command"),
+            "{}",
+            shape.detail
+        );
+        assert!(
+            shape.detail.contains("owner/http-no-url"),
+            "{}",
+            shape.detail
+        );
+        assert!(
+            !shape.detail.contains("owner/off"),
+            "disabled must not be checked"
+        );
 
         let env = check(&checks, "mcp-env");
         assert_eq!(env.status, HealthStatus::Warn);
@@ -862,7 +886,9 @@ mod tests {
 
         // Filling both in clears it.
         if let Some(record) = instance.mcp.iter_mut().find(|r| r.id == "owner/needs-key") {
-            record.env.insert("KANBOARD_URL".into(), "https://kb".into());
+            record
+                .env
+                .insert("KANBOARD_URL".into(), "https://kb".into());
             record.env.insert("KANBOARD_TOKEN".into(), "t".into());
         }
         let checks = report(&instance, &root.join("rescue"));
@@ -873,7 +899,10 @@ mod tests {
     #[test]
     fn an_empty_env_value_counts_as_unset() {
         let (root, mut instance) = instance("mcp-blank-env");
-        write(&profile_dir(&instance).join("package.json"), r#"{"dsh":{}}"#);
+        write(
+            &profile_dir(&instance).join("package.json"),
+            r#"{"dsh":{}}"#,
+        );
         let mut record = McpServerRecord {
             id: "owner/blank".into(),
             transport: "stdio".into(),
@@ -895,7 +924,10 @@ mod tests {
     #[test]
     fn the_rescue_point_is_a_warning_until_one_exists() {
         let (root, instance) = instance("rescue");
-        write(&profile_dir(&instance).join("package.json"), r#"{"dsh":{}}"#);
+        write(
+            &profile_dir(&instance).join("package.json"),
+            r#"{"dsh":{}}"#,
+        );
         let rescue_dir = root.join("rescue");
 
         let checks = report(&instance, &rescue_dir);
@@ -913,16 +945,32 @@ mod tests {
     #[test]
     fn worst_reports_the_most_severe_finding() {
         let (root, instance) = instance("worst");
-        write(&profile_dir(&instance).join("package.json"), r#"{"dsh":{}}"#);
+        write(
+            &profile_dir(&instance).join("package.json"),
+            r#"{"dsh":{}}"#,
+        );
         // No rescue point → warn at worst.
         let adapter =
             DshAdapter::configured(std::env::temp_dir().join("ahl-health-runtimes"), None);
-        let r = health_report(&adapter, &AppSettings::default(), &instance, &root.join("rescue"));
+        let r = health_report(
+            &adapter,
+            &AppSettings::default(),
+            &instance,
+            &root.join("rescue"),
+        );
         assert!(r.has_at_least(HealthStatus::Warn));
 
         // A malformed profile file outranks it.
-        write(&profile_dir(&instance).join("cordis.patch.yml"), "not: [a, sequence\n");
-        let r = health_report(&adapter, &AppSettings::default(), &instance, &root.join("rescue"));
+        write(
+            &profile_dir(&instance).join("cordis.patch.yml"),
+            "not: [a, sequence\n",
+        );
+        let r = health_report(
+            &adapter,
+            &AppSettings::default(),
+            &instance,
+            &root.join("rescue"),
+        );
         assert_eq!(r.worst, HealthStatus::Fail);
         let _ = std::fs::remove_dir_all(root);
     }

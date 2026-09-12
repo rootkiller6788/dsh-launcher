@@ -77,14 +77,13 @@ fn mcp_needs_token(item: &RegistryPlugin) -> bool {
         .flat_map(|m| m.values())
         .chain(item.headers.iter().flat_map(|m| m.values()))
         .any(|v| {
-            v.contains("${")
-                || {
-                    let upper = v.to_ascii_uppercase();
-                    upper.contains("TOKEN")
-                        || upper.contains("API_KEY")
-                        || upper.contains("SECRET")
-                        || upper.contains("BEARER")
-                }
+            v.contains("${") || {
+                let upper = v.to_ascii_uppercase();
+                upper.contains("TOKEN")
+                    || upper.contains("API_KEY")
+                    || upper.contains("SECRET")
+                    || upper.contains("BEARER")
+            }
         })
 }
 
@@ -178,9 +177,10 @@ fn preview_for(pkg: &EnvironmentPackage) -> EnvironmentPreviewResult {
 /// `serde_json`), so it re-emits every nested object with sorted keys on both
 /// sides and the checksum becomes a function of the content and nothing else.
 fn manifest_checksum(manifest: &EnvironmentManifest) -> Result<String, AppError> {
-    let value = serde_json::to_value(manifest)
-        .context("serialize environment manifest for checksum")?;
-    let bytes = serde_json::to_vec(&value).context("render the environment manifest for hashing")?;
+    let value =
+        serde_json::to_value(manifest).context("serialize environment manifest for checksum")?;
+    let bytes =
+        serde_json::to_vec(&value).context("render the environment manifest for hashing")?;
     let hash = Sha256::digest(bytes);
     Ok(hash.iter().map(|b| format!("{b:02x}")).collect())
 }
@@ -476,11 +476,7 @@ async fn enqueue_environment_import(
         .await?;
 
     let key = slug(&instance_name);
-    let label = format!(
-        "{} ({} items)",
-        pkg.manifest.name,
-        pkg.manifest.items.len()
-    );
+    let label = format!("{} ({} items)", pkg.manifest.name, pkg.manifest.items.len());
     enqueue_install(
         state,
         app,
@@ -628,7 +624,10 @@ mod tests {
         };
         let json = package_json(&pkg).expect("serialize package");
         assert!(!json.contains("sk-"), "no API key material in package");
-        assert!(!json.contains("DEEPSEEK_API_KEY"), "no key env var in package");
+        assert!(
+            !json.contains("DEEPSEEK_API_KEY"),
+            "no key env var in package"
+        );
     }
 
     #[test]

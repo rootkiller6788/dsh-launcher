@@ -269,7 +269,10 @@ fn launch_command(command: &str, node: Option<&Path>) -> (String, Vec<String>) {
         "npx" => {
             if let Some(node_exe) = node {
                 if let Some(cli) = bundled_cli(node_exe, "npx") {
-                    return (node_exe.display().to_string(), vec![cli.display().to_string()]);
+                    return (
+                        node_exe.display().to_string(),
+                        vec![cli.display().to_string()],
+                    );
                 }
             }
             if cfg!(windows) {
@@ -294,7 +297,13 @@ pub async fn probe_mcp(
         return probe_http(record).await;
     }
     if record.command.trim().is_empty() {
-        return verdict(&transport, MCP_STATE_ERROR, None, "no launch command — open its repo to run".into(), vec![]);
+        return verdict(
+            &transport,
+            MCP_STATE_ERROR,
+            None,
+            "no launch command — open its repo to run".into(),
+            vec![],
+        );
     }
     probe_stdio(record, node, sink).await
 }
@@ -320,7 +329,11 @@ fn verdict(
 
 // --- stdio probe ------------------------------------------------------------
 
-async fn probe_stdio(record: &McpServerRecord, node: Option<&Path>, sink: LogSink) -> McpRuntimeState {
+async fn probe_stdio(
+    record: &McpServerRecord,
+    node: Option<&Path>,
+    sink: LogSink,
+) -> McpRuntimeState {
     let transport = "stdio".to_string();
     let (program, prefix) = launch_command(&record.command, node);
 
@@ -375,7 +388,13 @@ async fn probe_stdio(record: &McpServerRecord, node: Option<&Path>, sink: LogSin
         Err(e) => {
             let _ = std::fs::remove_file(&stdin_path);
             emit(&sink, &format!("health: spawn {program} failed: {e}"));
-            return verdict(&transport, MCP_STATE_ERROR, None, format!("spawn {program}: {e}"), vec![]);
+            return verdict(
+                &transport,
+                MCP_STATE_ERROR,
+                None,
+                format!("spawn {program}: {e}"),
+                vec![],
+            );
         }
     };
     // Child holds its own handle to the file now; the staging path can go.
@@ -514,7 +533,10 @@ async fn probe_stdio(record: &McpServerRecord, node: Option<&Path>, sink: LogSin
             }
             emit(&sink, &format!("health: {detail}"));
             let tools_out = if tools.is_empty() {
-                emit(&sink, "health: tools/list unavailable (server may still be healthy)");
+                emit(
+                    &sink,
+                    "health: tools/list unavailable (server may still be healthy)",
+                );
                 vec![]
             } else {
                 tools
@@ -574,7 +596,11 @@ async fn probe_stdio(record: &McpServerRecord, node: Option<&Path>, sink: LogSin
                 MCP_STATE_ERROR
             };
             let detail = if http_seen || http_transport_hint(&tail).is_some() {
-                format!("server never answered a stdio initialize — {hint}", hint = http_transport_hint(&tail).unwrap_or("it started an HTTP/streamable listener instead"))
+                format!(
+                    "server never answered a stdio initialize — {hint}",
+                    hint = http_transport_hint(&tail)
+                        .unwrap_or("it started an HTTP/streamable listener instead")
+                )
             } else if let Some(hint) = asset_miss {
                 format!("server exited before initialize — {hint}")
             } else {
@@ -582,7 +608,11 @@ async fn probe_stdio(record: &McpServerRecord, node: Option<&Path>, sink: LogSin
                     Some(c) => format!("server exited with code {c} before initialize response"),
                     None => {
                         let total = init_timeout.as_secs()
-                            + if cold_grace_granted { cold_grace.as_secs() } else { 0 };
+                            + if cold_grace_granted {
+                                cold_grace.as_secs()
+                            } else {
+                                0
+                            };
                         // Name the knob: this is the message a user on a slow
                         // registry hits, and it is the one they can act on.
                         format!(
@@ -592,7 +622,11 @@ async fn probe_stdio(record: &McpServerRecord, node: Option<&Path>, sink: LogSin
                     }
                 }
             };
-            let detail = if tail.is_empty() { detail } else { format!("{detail} — captured: {tail}") };
+            let detail = if tail.is_empty() {
+                detail
+            } else {
+                format!("{detail} — captured: {tail}")
+            };
             emit(&sink, &format!("health: {detail}"));
             verdict(&transport, state, code, detail, vec![])
         }
@@ -660,7 +694,13 @@ async fn probe_http(record: &McpServerRecord) -> McpRuntimeState {
     let transport = "streamable-http".to_string();
     let url = record.url.trim();
     if url.is_empty() {
-        return verdict(&transport, MCP_STATE_ERROR, None, "streamable-http record has no url".into(), vec![]);
+        return verdict(
+            &transport,
+            MCP_STATE_ERROR,
+            None,
+            "streamable-http record has no url".into(),
+            vec![],
+        );
     }
     let client = reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
@@ -669,7 +709,11 @@ async fn probe_http(record: &McpServerRecord) -> McpRuntimeState {
     // Default JSON content type, but only when the catalog doesn't supply its own
     // (appending would send two Content-Type headers — some servers reject that).
     let mut req = client.post(url);
-    if !record.headers.keys().any(|k| k.eq_ignore_ascii_case("content-type")) {
+    if !record
+        .headers
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case("content-type"))
+    {
         req = req.header("Content-Type", "application/json");
     }
     for (k, v) in &record.headers {
@@ -681,20 +725,41 @@ async fn probe_http(record: &McpServerRecord) -> McpRuntimeState {
     }
     req = req.body(init_request());
     match req.send().await {
-        Err(e) => verdict(&transport, MCP_STATE_ERROR, None, format!("http probe failed: {e}"), vec![]),
+        Err(e) => verdict(
+            &transport,
+            MCP_STATE_ERROR,
+            None,
+            format!("http probe failed: {e}"),
+            vec![],
+        ),
         Ok(resp) => {
             let status = resp.status();
             let text = match resp.text().await {
                 Ok(t) => t,
                 Err(e) => {
-                    return verdict(&transport, MCP_STATE_ERROR, None, format!("read http response: {e}"), vec![]);
+                    return verdict(
+                        &transport,
+                        MCP_STATE_ERROR,
+                        None,
+                        format!("read http response: {e}"),
+                        vec![],
+                    );
                 }
             };
             if status.is_success() {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
                     if v.get("error").is_some() {
-                        let msg = v["error"]["message"].as_str().unwrap_or("handshake rejected").to_string();
-                        return verdict(&transport, MCP_STATE_DEGRADED, None, format!("http initialize error: {msg}"), vec![]);
+                        let msg = v["error"]["message"]
+                            .as_str()
+                            .unwrap_or("handshake rejected")
+                            .to_string();
+                        return verdict(
+                            &transport,
+                            MCP_STATE_DEGRADED,
+                            None,
+                            format!("http initialize error: {msg}"),
+                            vec![],
+                        );
                     }
                     if v.get("result").is_some() {
                         return McpRuntimeState {
@@ -705,14 +770,26 @@ async fn probe_http(record: &McpServerRecord) -> McpRuntimeState {
                         };
                     }
                 }
-                verdict(&transport, MCP_STATE_ERROR, None, format!("http {status}: unexpected body"), vec![])
+                verdict(
+                    &transport,
+                    MCP_STATE_ERROR,
+                    None,
+                    format!("http {status}: unexpected body"),
+                    vec![],
+                )
             } else {
                 let state = if status.as_u16() == 401 || status.as_u16() == 403 {
                     MCP_STATE_DEGRADED
                 } else {
                     MCP_STATE_ERROR
                 };
-                verdict(&transport, state, None, format!("http {status}: {text}"), vec![])
+                verdict(
+                    &transport,
+                    state,
+                    None,
+                    format!("http {status}: {text}"),
+                    vec![],
+                )
             }
         }
     }
@@ -725,7 +802,10 @@ mod tests {
     #[test]
     fn parse_initialize_result_carries_server_name() {
         let line = r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"github-mcp","version":"0.1"}}}"#;
-        assert_eq!(parse_response(line), ParseOutcome::InitResult(Some("github-mcp".into())));
+        assert_eq!(
+            parse_response(line),
+            ParseOutcome::InitResult(Some("github-mcp".into()))
+        );
     }
 
     #[test]
@@ -739,7 +819,10 @@ mod tests {
 
     #[test]
     fn parse_tools_lists_names_up_to_cap() {
-        let many = (0..60).map(|i| format!(r#"{{"name":"t{i}","description":""}}"#)).collect::<Vec<_>>().join(",");
+        let many = (0..60)
+            .map(|i| format!(r#"{{"name":"t{i}","description":""}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
         let line = format!(r#"{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{many}]}}}}"#);
         match parse_response(&line) {
             ParseOutcome::Tools(names) => {
@@ -789,19 +872,33 @@ mod tests {
         // Real lines kanboard-mcp prints on stderr when KANBOARD_URL is unset.
         let config_err = r#"{"level":40,"time":1788690087829,"pid":16208,"hostname":"Kant","err":{"name":"ConfigError"},"msg":"kanboard-mcp started WITHOUT valid credentials — running in DEGRADED mode. Tools are LISTABLE (tools/list works) but every tool CALL will fail until the environment is fixed. Cause: KANBOARD_URL is required but was not set."}"#;
         let start_line = r#"{"level":40,"time":1788690087834,"pid":16208,"hostname":"Kant","name":"kanboard-mcp","version":"0.3.6","node":"v24.13.1","degraded":true,"msg":"starting stdio transport in DEGRADED mode — tools are listable but every call will fail until credentials are fixed"}"#;
-        assert!(self_declared_degraded(config_err), "ConfigError 'without valid credentials' must flag");
-        assert!(self_declared_degraded(start_line), "\"degraded\":true + DEGRADED mode must flag");
+        assert!(
+            self_declared_degraded(config_err),
+            "ConfigError 'without valid credentials' must flag"
+        );
+        assert!(
+            self_declared_degraded(start_line),
+            "\"degraded\":true + DEGRADED mode must flag"
+        );
     }
 
     #[test]
     fn self_declared_degraded_ignores_healthy_noise() {
         assert!(!self_declared_degraded(""));
-        assert!(!self_declared_degraded(r#"{"level":30,"time":1,"name":"github-mcp","msg":"Server listening on stdio"}"#));
-        assert!(!self_declared_degraded("Connected to Kanboard API at https://pm.example.com"));
-        assert!(!self_declared_degraded("2025-01-01 debug: initialized 40 tools"));
+        assert!(!self_declared_degraded(
+            r#"{"level":30,"time":1,"name":"github-mcp","msg":"Server listening on stdio"}"#
+        ));
+        assert!(!self_declared_degraded(
+            "Connected to Kanboard API at https://pm.example.com"
+        ));
+        assert!(!self_declared_degraded(
+            "2025-01-01 debug: initialized 40 tools"
+        ));
         // A word merely containing "degraded" in passing (e.g. error recovery docs)
         // is not a self-declared degraded state.
-        assert!(!self_declared_degraded("connection health may degrade under load"));
+        assert!(!self_declared_degraded(
+            "connection health may degrade under load"
+        ));
     }
 
     #[test]
@@ -828,7 +925,10 @@ mod tests {
         // value only between the bounds.
         assert_eq!(INIT_TIMEOUT, Duration::from_secs(30));
         assert_eq!(parse_init_timeout("90"), Some(Duration::from_secs(90)));
-        assert_eq!(parse_init_timeout("  120  "), Some(Duration::from_secs(120)));
+        assert_eq!(
+            parse_init_timeout("  120  "),
+            Some(Duration::from_secs(120))
+        );
         // Too small to let a healthy cold server answer → the floor.
         assert_eq!(parse_init_timeout("1"), Some(Duration::from_secs(5)));
         assert_eq!(parse_init_timeout("0"), Some(Duration::from_secs(5)));
@@ -848,7 +948,9 @@ mod tests {
         // not. Matched from either stream, and case-insensitively.
         assert!(runtime_asset_hint("ERROR: Failed to download Chromium!").is_some());
         assert!(runtime_asset_hint("npm ERR! Failed to set up chrome").is_some());
-        assert!(runtime_asset_hint("Error: Could not find expected browser (chrome) locally").is_some());
+        assert!(
+            runtime_asset_hint("Error: Could not find expected browser (chrome) locally").is_some()
+        );
         assert!(runtime_asset_hint("browser download failed").is_some());
         // A missing browser must never be classified as an HTTP-transport
         // mismatch — those point at the catalog entry, this points at the network.
@@ -861,7 +963,9 @@ mod tests {
         // genuine failed install and must still be reported as one — softening
         // these would keep broken records in the library.
         assert!(runtime_asset_hint("npm ERR! 404 Not Found - GET /nonexistent").is_none());
-        assert!(runtime_asset_hint("server exited with code 1 before initialize response").is_none());
+        assert!(
+            runtime_asset_hint("server exited with code 1 before initialize response").is_none()
+        );
         assert!(runtime_asset_hint("").is_none());
         assert!(runtime_asset_hint("Server listening on stdio").is_none());
         // Mentioning a browser is not enough — it has to be a download failure.
@@ -878,6 +982,9 @@ mod tests {
         // does not get faster because the user set a small timeout.
         assert_eq!(cold_start_grace(Duration::from_secs(5)), COLD_START_GRACE);
         // A raised one does widen it, so the two stay proportionate.
-        assert_eq!(cold_start_grace(Duration::from_secs(120)), Duration::from_secs(360));
+        assert_eq!(
+            cold_start_grace(Duration::from_secs(120)),
+            Duration::from_secs(360)
+        );
     }
 }

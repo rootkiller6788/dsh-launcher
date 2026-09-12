@@ -29,7 +29,14 @@ pub(crate) const BUILD_TIMEOUT: Duration = crate::INSTALL_TIMEOUT;
 /// `.venv`/`node_modules` presence is cheap and decisive; install/build output
 /// streams to the Activity log. Non-zero exit or timeout is a hard error.
 const SKIP_DIRS: [&str; 8] = [
-    ".git", "node_modules", ".venv", "venv", "target", "dist", ".tox", "__pycache__",
+    ".git",
+    "node_modules",
+    ".venv",
+    "venv",
+    "target",
+    "dist",
+    ".tox",
+    "__pycache__",
 ];
 
 // --- public surface ---------------------------------------------------------
@@ -128,7 +135,9 @@ pub fn github_source(url: &str) -> Option<(String, String, Option<String>)> {
     if owner.is_empty() {
         return None;
     }
-    let repo = segs.get(1).map(|s| s.trim_end_matches(".git").to_string())?;
+    let repo = segs
+        .get(1)
+        .map(|s| s.trim_end_matches(".git").to_string())?;
     if repo.is_empty() || repo == "tree" || repo == "blob" {
         return None;
     }
@@ -179,7 +188,15 @@ async fn shallow_clone(url: &str, target: &Path, sink: LogSink) -> Result<(), St
     let mut args: Vec<String> = vec!["clone".into(), "--depth".into(), "1".into(), "--".into()];
     args.push(url.to_string());
     args.push(path_arg(target));
-    match run_cmd("git", &args, target.parent().unwrap_or(target), &[], sink, CLONE_TIMEOUT).await
+    match run_cmd(
+        "git",
+        &args,
+        target.parent().unwrap_or(target),
+        &[],
+        sink,
+        CLONE_TIMEOUT,
+    )
+    .await
     {
         Ok(()) => Ok(()),
         Err(e) => Err(format!(
@@ -299,7 +316,10 @@ fn parse_pyproject_full(text: &str) -> Option<PyInfo> {
             _ => {}
         }
     }
-    name.map(|name| PyInfo { name: Some(name), scripts })
+    name.map(|name| PyInfo {
+        name: Some(name),
+        scripts,
+    })
 }
 
 fn unquote_toml(s: &str) -> String {
@@ -390,7 +410,8 @@ async fn build_local(
         ));
     }
     Err(ResolveFail::NeedsAi(
-        "repo has no recognizable package manifest (package.json / pyproject / Cargo / go.mod)".into(),
+        "repo has no recognizable package manifest (package.json / pyproject / Cargo / go.mod)"
+            .into(),
     ))
 }
 
@@ -403,7 +424,8 @@ async fn build_go(base: &Path, sink: LogSink) -> Result<LocalLaunch, ResolveFail
         )
     })?;
     let bin_dir = base.join("bin");
-    std::fs::create_dir_all(&bin_dir).map_err(|e| ResolveFail::Failed(format!("mkdir bin: {e}")))?;
+    std::fs::create_dir_all(&bin_dir)
+        .map_err(|e| ResolveFail::Failed(format!("mkdir bin: {e}")))?;
     let name = bin_slug(&leaf_name(base));
     let out = bin_dir.join(exe_name(&name));
     sink(LogLine {
@@ -444,8 +466,9 @@ async fn build_rust(base: &Path, sink: LogSink) -> Result<LocalLaunch, ResolveFa
     })?;
     let toml = std::fs::read_to_string(base.join("Cargo.toml"))
         .map_err(|e| ResolveFail::Failed(format!("read Cargo.toml: {e}")))?;
-    let crate_name = cargo_package_name(&toml)
-        .ok_or_else(|| ResolveFail::NeedsAi("Cargo.toml has no [package] name (workspace root)".into()))?;
+    let crate_name = cargo_package_name(&toml).ok_or_else(|| {
+        ResolveFail::NeedsAi("Cargo.toml has no [package] name (workspace root)".into())
+    })?;
     sink(LogLine {
         stream: LogStream::Stdout,
         level: LogLevel::Info,
@@ -462,7 +485,10 @@ async fn build_rust(base: &Path, sink: LogSink) -> Result<LocalLaunch, ResolveFa
     )
     .await
     .map_err(|e| ResolveFail::Failed(format!("cargo build failed: {e}")))?;
-    let out = base.join("target").join("release").join(exe_name(&crate_name));
+    let out = base
+        .join("target")
+        .join("release")
+        .join(exe_name(&crate_name));
     if !out.is_file() {
         return Err(ResolveFail::Failed(format!(
             "cargo build finished without producing target/release/{crate_name}"
@@ -505,9 +531,9 @@ async fn build_node(
     if !entry.is_file() {
         // A bin that needs `npm run build` to produce its dist entry.
         if pkg.has_build {
-            run_npm(base, &["run".into(), "build".into()], node, sink).await.map_err(
-                |e| ResolveFail::Failed(format!("npm run build failed: {e}")),
-            )?;
+            run_npm(base, &["run".into(), "build".into()], node, sink)
+                .await
+                .map_err(|e| ResolveFail::Failed(format!("npm run build failed: {e}")))?;
         }
         if !entry.is_file() {
             return Err(ResolveFail::NeedsAi(format!(
@@ -794,8 +820,8 @@ impl Suggestion {
             (Some(a), Some(b)) if b > a => &s[a..=b],
             _ => s,
         };
-        let v: serde_json::Value = serde_json::from_str(slice)
-            .map_err(|e| format!("suggestion is not JSON: {e}"))?;
+        let v: serde_json::Value =
+            serde_json::from_str(slice).map_err(|e| format!("suggestion is not JSON: {e}"))?;
         let kind = v
             .get("kind")
             .and_then(|k| k.as_str())
@@ -835,10 +861,7 @@ impl Suggestion {
                     .collect::<HashMap<_, _>>()
             })
             .unwrap_or_default();
-        let note = v
-            .get("note")
-            .and_then(|n| n.as_str())
-            .map(String::from);
+        let note = v.get("note").and_then(|n| n.as_str()).map(String::from);
         Ok(Suggestion {
             kind,
             entry,
@@ -871,11 +894,7 @@ a named *.py). Never point outside the repo.\n\
 - \"env\": only values the server needs that the repo cannot self-supply.\n\
 - \"note\": one short English sentence on your choice.\n\
 Reply exactly: {\"kind\":\"node|python\",\"entry\":\"relative/path\",\"args\":[],\"env\":{},\"note\":\"...\"}";
-    let user = format!(
-        "Cloned repo dir: {}\n\n{}",
-        path_arg(base),
-        context
-    );
+    let user = format!("Cloned repo dir: {}\n\n{}", path_arg(base), context);
     let raw = launcher_core::llm::chat(provider, system, &user)
         .await
         .map_err(|e| format!("AI call failed: {e}"))?;
@@ -888,7 +907,11 @@ Reply exactly: {\"kind\":\"node|python\",\"entry\":\"relative/path\",\"args\":[]
             "ai-resolve: {} entry '{}'{}",
             sug.kind,
             sug.entry,
-            if note.is_empty() { String::new() } else { format!(" — {note}") }
+            if note.is_empty() {
+                String::new()
+            } else {
+                format!(" — {note}")
+            }
         ),
     });
 
@@ -900,14 +923,12 @@ Reply exactly: {\"kind\":\"node|python\",\"entry\":\"relative/path\",\"args\":[]
             if !base.join("package.json").is_file() {
                 return Err("AI chose node but the repo has no package.json".into());
             }
-            let node_abs = node_or_resolve(node).ok_or_else(|| {
-                "Node not found — cannot run a node-based MCP".to_string()
-            })?;
+            let node_abs = node_or_resolve(node)
+                .ok_or_else(|| "Node not found — cannot run a node-based MCP".to_string())?;
             node_deps(base, node, sink.clone())
                 .await
                 .map_err(|e| format!("install node deps: {}", e.into_err()))?;
-            let pkg = read_pkg(base, "package.json unreadable")
-                .map_err(|e| e.into_err())?;
+            let pkg = read_pkg(base, "package.json unreadable").map_err(|e| e.into_err())?;
             if !entry_path.is_file() && pkg.has_build {
                 run_npm(base, &["run".into(), "build".into()], node, sink)
                     .await
@@ -1010,8 +1031,15 @@ fn repo_context(base: &Path) -> String {
                     let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
                     let likely = matches!(
                         fname,
-                        "main.py" | "app.py" | "server.py" | "cli.py" | "__main__.py"
-                            | "main.js" | "index.js" | "server.js" | "cli.js"
+                        "main.py"
+                            | "app.py"
+                            | "server.py"
+                            | "cli.py"
+                            | "__main__.py"
+                            | "main.js"
+                            | "index.js"
+                            | "server.js"
+                            | "cli.js"
                     );
                     match ext {
                         "py" if likely => py.push(p),
@@ -1070,7 +1098,9 @@ fn collect_tree(dir: &Path, out: &mut Vec<String>, depth: usize, count: &mut usi
     if depth > 5 || *count >= cap {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut names: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
     names.sort();
     for p in names {
@@ -1147,19 +1177,21 @@ mod tests {
     fn github_source_parses_plain_and_subdirs() {
         assert_eq!(
             github_source("https://github.com/acme/server").unwrap(),
-            ("https://github.com/acme/server".to_string(), "server".into(), None)
+            (
+                "https://github.com/acme/server".to_string(),
+                "server".into(),
+                None
+            )
         );
-        let (url, repo, sub) =
-            github_source("https://github.com/acme/server.git").unwrap();
+        let (url, repo, sub) = github_source("https://github.com/acme/server.git").unwrap();
         assert_eq!(url, "https://github.com/acme/server");
         assert_eq!(repo, "server");
         assert_eq!(sub, None);
         // blob subpath → subdir after skipping tree/blob + ref.
-        let (_, _, sub) = github_source("https://github.com/acme/mono/blob/main/packages/mcp-srv")
-            .unwrap();
-        assert_eq!(sub.as_deref(), Some("packages/mcp-srv"));
         let (_, _, sub) =
-            github_source("https://github.com/acme/mono/tree/dev/server").unwrap();
+            github_source("https://github.com/acme/mono/blob/main/packages/mcp-srv").unwrap();
+        assert_eq!(sub.as_deref(), Some("packages/mcp-srv"));
+        let (_, _, sub) = github_source("https://github.com/acme/mono/tree/dev/server").unwrap();
         assert_eq!(sub.as_deref(), Some("server"));
         // Non-github / non-parseable.
         assert!(github_source("https://example.com/x").is_none());
@@ -1179,7 +1211,8 @@ mod tests {
         // empty deps map → regression: false-failed runnable repos).
         let zero_dep = r#"{ "name": "s", "main": "server.js" }"#;
         assert!(!parse_package_json_full(zero_dep).unwrap().has_deps);
-        let with_deps = r#"{ "name": "s", "dependencies": { "fastmcp": "^2" }, "devDependencies": {} }"#;
+        let with_deps =
+            r#"{ "name": "s", "dependencies": { "fastmcp": "^2" }, "devDependencies": {} }"#;
         assert!(parse_package_json_full(with_deps).unwrap().has_deps);
 
         let obj_bin = r#"{ "name": "x", "bin": { "other": "a.js", "x": "b.js" } }"#;
@@ -1217,7 +1250,10 @@ cli = "pkg.cli:run"
 
     #[test]
     fn setup_and_cargo_name_parse() {
-        assert_eq!(setup_name("setup(name=\"mcp-git\", version=\"0.1\")").unwrap(), "mcp-git");
+        assert_eq!(
+            setup_name("setup(name=\"mcp-git\", version=\"0.1\")").unwrap(),
+            "mcp-git"
+        );
         let cargo = "[package]\nname = \"mcp-rs\"\nversion = \"0.1.0\"\n\n[workspace]\nmembers=[]";
         assert_eq!(cargo_package_name(cargo).unwrap(), "mcp-rs");
         // Workspace root (no [package]) → None.
@@ -1227,7 +1263,10 @@ cli = "pkg.cli:run"
     #[test]
     fn resolve_inside_rejects_escapes_and_absolutes() {
         let base = std::path::Path::new("/tmp/repo");
-        assert_eq!(resolve_inside(base, "src/main.py").unwrap(), base.join("src/main.py"));
+        assert_eq!(
+            resolve_inside(base, "src/main.py").unwrap(),
+            base.join("src/main.py")
+        );
         assert!(resolve_inside(base, "../etc/passwd").is_err());
         assert!(resolve_inside(base, "/etc/passwd").is_err());
         assert!(resolve_inside(base, "C:\\Windows\\x").is_err());
@@ -1269,7 +1308,10 @@ cli = "pkg.cli:run"
         assert_eq!(s.entry, "server.py");
 
         assert!(Suggestion::parse(r#"{"kind":"go","entry":"main.go"}"#).is_err());
-        assert!(Suggestion::parse(r#"{"kind":"node"}"#).is_err(), "entry required");
+        assert!(
+            Suggestion::parse(r#"{"kind":"node"}"#).is_err(),
+            "entry required"
+        );
         assert!(Suggestion::parse("not json").is_err());
 
         // Fenced replies are tolerated.

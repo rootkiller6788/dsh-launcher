@@ -71,16 +71,24 @@ pub async fn watch_settings_changes(
 /// updates. The frame is the `server-request` envelope: `{ payload: { type,
 /// event, args } }`.
 fn handle_frame(text: &str, on_change: &mut (impl FnMut(&str) + Send)) {
-    let Ok(frame) = serde_json::from_str::<Value>(text) else { return };
-    let Some(payload) = frame.get("payload") else { return };
+    let Ok(frame) = serde_json::from_str::<Value>(text) else {
+        return;
+    };
+    let Some(payload) = frame.get("payload") else {
+        return;
+    };
     if payload.get("type").and_then(Value::as_str) != Some("host/remote-event") {
         return;
     }
     if payload.get("event").and_then(Value::as_str) != Some("settings/document-updated") {
         return;
     }
-    let Some(args) = payload.get("args").and_then(Value::as_array) else { return };
-    let Some(ns) = args.first().and_then(Value::as_str) else { return };
+    let Some(args) = payload.get("args").and_then(Value::as_array) else {
+        return;
+    };
+    let Some(ns) = args.first().and_then(Value::as_str) else {
+        return;
+    };
     if ns == APPEARANCE_NS || ns == LANGUAGE_NS {
         on_change(ns);
     }

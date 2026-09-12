@@ -82,8 +82,14 @@ pub(crate) fn ensure_ok(value: &Value, method: &str) -> Result<()> {
     match value.get("ok").and_then(Value::as_bool) {
         Some(true) => Ok(()),
         _ => {
-            let detail = value.get("error").map(|e| e.to_string()).unwrap_or_default();
-            Err(anyhow!("{method}: rejected{}{detail}", if detail.is_empty() { "" } else { ": " }))
+            let detail = value
+                .get("error")
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            Err(anyhow!(
+                "{method}: rejected{}{detail}",
+                if detail.is_empty() { "" } else { ": " }
+            ))
         }
     }
 }

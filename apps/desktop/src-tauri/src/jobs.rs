@@ -232,7 +232,10 @@ impl JobCtx {
 
     /// Drain the recorded exit code once, at failure-marking time.
     pub(crate) fn take_exit_code(&self) -> Option<i64> {
-        self.exit_code.lock().ok().and_then(|mut guard| guard.take())
+        self.exit_code
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take())
     }
 }
 
@@ -357,9 +360,10 @@ async fn execute_job(app: &AppHandle, instance_id: &str, job_id: i64) {
         Ok(plan) => plan,
         Err(e) => {
             tracing::warn!(target: "install", "job {job_id} plan unreadable: {e}");
-            if let Ok(job) = state
-                .jobs
-                .mark_failed(job_id, &format!("install plan unreadable: {e}"), None)
+            if let Ok(job) =
+                state
+                    .jobs
+                    .mark_failed(job_id, &format!("install plan unreadable: {e}"), None)
             {
                 emit_job(app, &job);
             }
@@ -368,11 +372,10 @@ async fn execute_job(app: &AppHandle, instance_id: &str, job_id: i64) {
     };
 
     let ctx = JobCtx::new(app, job_id);
-    let outcome =
-        run_instance_job(&state, app, instance_id, HeavyJobKind::Install, || {
-            dispatch_plan(&state, app, instance_id, plan, &ctx)
-        })
-        .await;
+    let outcome = run_instance_job(&state, app, instance_id, HeavyJobKind::Install, || {
+        dispatch_plan(&state, app, instance_id, plan, &ctx)
+    })
+    .await;
 
     match outcome {
         Ok(()) => {
@@ -410,8 +413,7 @@ async fn dispatch_plan(
     crate::commands::rescue::reserve_rescue_point(state, app, instance_id);
     match plan {
         JobPlan::Market { entry } => {
-            crate::commands::content::market_install_job(state, app, instance_id, &entry, ctx)
-                .await
+            crate::commands::content::market_install_job(state, app, instance_id, &entry, ctx).await
         }
         JobPlan::Plugin { target, entry } => {
             crate::commands::plugins::plugin_install_job(

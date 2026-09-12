@@ -81,8 +81,11 @@ fn resolve_bundle_dir(profile_dir: &Path, workspace: &Path, name: &str) -> Optio
 /// declared `dsh.bundle.patch` and its conventional root `cordis.patch.yml`.
 fn bundle_entry_ids(dir: &Path) -> Vec<String> {
     let mut ids = Vec::new();
-    let declared = read_json(&dir.join("package.json"))
-        .and_then(|v| v.pointer("/dsh/bundle/patch").and_then(|p| p.as_str()).map(String::from));
+    let declared = read_json(&dir.join("package.json")).and_then(|v| {
+        v.pointer("/dsh/bundle/patch")
+            .and_then(|p| p.as_str())
+            .map(String::from)
+    });
     if let Some(rel) = declared {
         ids.extend(parse_inserted_ids(&read(&dir.join(rel))));
     }
@@ -146,7 +149,11 @@ fn order_violations(
     bundle_names: &[String],
     constraints: &HashMap<String, (Vec<String>, Vec<String>)>,
 ) -> Vec<OrderViolation> {
-    let idx: HashMap<&String, usize> = bundle_names.iter().enumerate().map(|(i, n)| (n, i)).collect();
+    let idx: HashMap<&String, usize> = bundle_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n, i))
+        .collect();
     let mut out = Vec::new();
     for (name, (before, after)) in constraints {
         for b in before {
@@ -230,7 +237,8 @@ pub fn diagnose_profile(instance: &InstanceManifest) -> DiagnosticsReport {
     let mut entry_count: HashMap<String, usize> = HashMap::new();
     let mut all_ids = Vec::new();
     for name in &bundle_names {
-        let (resolved, entry_ids, error) = match resolve_bundle_dir(&profile_dir, &workspace, name) {
+        let (resolved, entry_ids, error) = match resolve_bundle_dir(&profile_dir, &workspace, name)
+        {
             Some(dir) => (true, bundle_entry_ids(&dir), None),
             None => (
                 false,

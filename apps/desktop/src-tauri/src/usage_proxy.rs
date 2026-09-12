@@ -626,7 +626,12 @@ fn request_model(body: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
-const INPUT_KEYS: &[&str] = &["input_tokens", "prompt_tokens", "inputTokens", "promptTokens"];
+const INPUT_KEYS: &[&str] = &[
+    "input_tokens",
+    "prompt_tokens",
+    "inputTokens",
+    "promptTokens",
+];
 const OUTPUT_KEYS: &[&str] = &[
     "output_tokens",
     "completion_tokens",
@@ -790,10 +795,8 @@ data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usa
 
     #[test]
     fn first_u64_coerces_float_and_string() {
-        let value: Value = serde_json::from_str(
-            r#"{"a": 12, "b": 3.0, "c": "7", "d": "x"}"#,
-        )
-        .unwrap();
+        let value: Value =
+            serde_json::from_str(r#"{"a": 12, "b": 3.0, "c": "7", "d": "x"}"#).unwrap();
         assert_eq!(first_u64(&value, &["a"]), Some(12));
         assert_eq!(first_u64(&value, &["b"]), Some(3));
         assert_eq!(first_u64(&value, &["c"]), Some(7));

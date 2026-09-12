@@ -168,7 +168,10 @@ fn workdir(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "ahl-acceptance-{tag}-{}-{:x}",
         std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
     ))
 }
 
@@ -197,7 +200,11 @@ fn make_repo(dir: &Path, files: &[(&str, &str)]) {
             .args(&args)
             .output()
             .expect("git runnable");
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 }
 
@@ -226,7 +233,11 @@ fn install_leaf(
             let record = rt()
                 .block_on(install_skill(instance, item, mirror))
                 .unwrap_or_else(|e| panic!("install skill {key}: {e}"));
-            ok(format!("skill {key} → skills/{} (sha256 {})", record.id.replace('/', "-"), &record.hash[..12]));
+            ok(format!(
+                "skill {key} → skills/{} (sha256 {})",
+                record.id.replace('/', "-"),
+                &record.hash[..12]
+            ));
             InstanceManifest::add_skill(paths, &instance.id, &record).expect("persist the skill")
         }
         ContentKind::Mcp => {
@@ -243,14 +254,22 @@ fn install_leaf(
             // The health snapshot the Library's MCP badge reads: persisted next
             // to the manifest, keyed by the sanitized server name.
             let state = rt().block_on(probe_mcp(&record, None, logs.sink()));
-            assert_eq!(state.state, MCP_STATE_OK, "MCP {key} must handshake, err: {:?}", state.error);
+            assert_eq!(
+                state.state, MCP_STATE_OK,
+                "MCP {key} must handshake, err: {:?}",
+                state.error
+            );
             assert!(!state.tools.is_empty(), "MCP {key} answered no tools/list");
             launcher_core::save_runtime(
                 &paths.mcp_runtime_file(&instance.id, &record.server_name),
                 &state,
             )
             .expect("persist the MCP health snapshot");
-            ok(format!("mcp {key} → {} tool(s), state={}", state.tools.len(), state.state));
+            ok(format!(
+                "mcp {key} → {} tool(s), state={}",
+                state.tools.len(),
+                state.state
+            ));
             InstanceManifest::add_mcp(paths, &instance.id, &record).expect("persist the MCP")
         }
         ContentKind::Theme | ContentKind::Plugin => {
@@ -267,7 +286,9 @@ fn install_leaf(
                 sync_skin_patch(&enabled, &enabled.skin_packages).expect("compile the skin patch");
                 ok(format!("skin {key} → {package} (insert row compiled)"));
             } else {
-                ok(format!("plugin {key} → {package} (profile dep + patch rows)"));
+                ok(format!(
+                    "plugin {key} → {package} (profile dep + patch rows)"
+                ));
             }
             InstanceManifest::get(paths, &instance.id).expect("re-read the instance")
         }
@@ -305,7 +326,11 @@ fn materialize_profile_package(instance: &InstanceManifest, package: &str, skin:
         .unwrap_or_default();
     deps.insert(package.to_string(), serde_json::json!("1.0.0"));
     manifest["dependencies"] = serde_json::Value::Object(deps);
-    std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
 
     // A skin declares `dsh.client` and no `dsh.bundle` — the shape the launcher
     // classifies as a Theme and mounts through an insert row. A plugin declares
@@ -324,7 +349,9 @@ fn materialize_profile_package(instance: &InstanceManifest, package: &str, skin:
                 "name": package, "version": "1.0.0", "main": "index.js",
                 "dsh": { "bundle": { "patch": "cordis.patch.yml" } },
             }),
-            Some(format!("- insert:\n    - id: acceptance-toolbox\n      name: {package}\n")),
+            Some(format!(
+                "- insert:\n    - id: acceptance-toolbox\n      name: {package}\n"
+            )),
         )
     };
     std::fs::write(
@@ -355,14 +382,27 @@ fn acceptance_walk_instance_to_import() {
     let rt = rt();
 
     for tool in ["git", "node"] {
-        let present = std::process::Command::new(tool).arg("--version").output().is_ok();
+        let present = std::process::Command::new(tool)
+            .arg("--version")
+            .output()
+            .is_ok();
         // Not a skip: the launcher cannot run DSH, clone a fixture, or install
         // an MCP without these. A machine missing one cannot be accepted.
-        assert!(present, "{tool} is not on PATH — the launcher cannot run without it");
+        assert!(
+            present,
+            "{tool} is not on PATH — the launcher cannot run without it"
+        );
     }
 
     eprintln!("acceptance walk → {}", root.display());
-    eprintln!("github mirror: {}", if mirror { "on" } else { "off (AHL_WALK_MIRROR=1 to enable)" });
+    eprintln!(
+        "github mirror: {}",
+        if mirror {
+            "on"
+        } else {
+            "off (AHL_WALK_MIRROR=1 to enable)"
+        }
+    );
     paths.ensure_dirs().expect("create the app root");
 
     // ---- 1. create an instance ------------------------------------------
@@ -370,7 +410,11 @@ fn acceptance_walk_instance_to_import() {
     let instance = InstanceManifest::create(&paths, "Acceptance Walk").expect("create instance");
     let file = paths.instance_file(&instance.id);
     assert!(file.is_file(), "no manifest at {}", file.display());
-    assert!(Path::new(&instance.workspace).is_dir(), "no workspace at {}", instance.workspace);
+    assert!(
+        Path::new(&instance.workspace).is_dir(),
+        "no workspace at {}",
+        instance.workspace
+    );
     let listed = InstanceManifest::list(&paths).expect("list instances");
     assert_eq!(listed.len(), 1, "the new instance must be the only one");
     assert_eq!(listed[0].id, instance.id);
@@ -395,7 +439,10 @@ fn acceptance_walk_instance_to_import() {
         .join("skills")
         .join(instance.skills[0].id.replace('/', "-"));
     let landed = file_sha256(&skill_dir.join("SKILL.md")).expect("hash the landed SKILL.md");
-    assert_eq!(instance.skills[0].hash, landed, "the recorded hash must describe what landed");
+    assert_eq!(
+        instance.skills[0].hash, landed,
+        "the recorded hash must describe what landed"
+    );
 
     // The MCP row installs from a local git fixture, so this step needs no
     // network — the same shallow-clone → fingerprint → entry path a real
@@ -404,7 +451,10 @@ fn acceptance_walk_instance_to_import() {
     make_repo(
         &repo,
         &[
-            ("package.json", r#"{"name":"walk-mcp-srv","version":"1.0.0","main":"server.js"}"#),
+            (
+                "package.json",
+                r#"{"name":"walk-mcp-srv","version":"1.0.0","main":"server.js"}"#,
+            ),
             ("server.js", MCP_SRV),
         ],
     );
@@ -417,7 +467,10 @@ fn acceptance_walk_instance_to_import() {
             logs.sink(),
         ))
         .unwrap_or_else(|e| panic!("local MCP install failed: {e}"));
-    assert_eq!(how, "deterministic", "a package.json repo must not need AI to resolve");
+    assert_eq!(
+        how, "deterministic",
+        "a package.json repo must not need AI to resolve"
+    );
     let mcp_entry = RegistryPlugin {
         kind: ContentKind::Mcp,
         owner: "acceptance".into(),
@@ -467,8 +520,14 @@ fn acceptance_walk_instance_to_import() {
         .into_iter()
         .find(|p| p.name == PKG_PLUGIN)
         .expect("the plugin must project");
-    assert!(!plugin_row.enabled, "the plugin was disabled; the patch row must still say so");
-    assert!(plugin_row.toggleable, "a plugin with bundle rows must be switchable");
+    assert!(
+        !plugin_row.enabled,
+        "the plugin was disabled; the patch row must still say so"
+    );
+    assert!(
+        plugin_row.toggleable,
+        "a plugin with bundle rows must be switchable"
+    );
     ok("plugin toggle survives a cold re-read and the skin recompile");
 
     // ---- 3. Library sees all four, from disk ----------------------------
@@ -479,16 +538,32 @@ fn acceptance_walk_instance_to_import() {
     assert_eq!(fresh.skin_packages.len(), 1, "one skin recorded");
     let plugins = DshAdapter::installed_plugins(&fresh);
     assert!(
-        plugins.iter().any(|p| p.name == PKG_SKIN && p.enabled && p.toggleable),
+        plugins
+            .iter()
+            .any(|p| p.name == PKG_SKIN && p.enabled && p.toggleable),
         "the mounted skin must project as an enabled, switchable Theme: {plugins:?}"
     );
-    assert!(plugins.iter().any(|p| p.name == PKG_PLUGIN), "the plugin must project");
+    assert!(
+        plugins.iter().any(|p| p.name == PKG_PLUGIN),
+        "the plugin must project"
+    );
     // The MCP's health snapshot is what the Library badge reads.
     let runtime = launcher_core::load_runtime(&paths.mcp_runtime_file(&fresh.id, MCP_SERVER));
-    assert_eq!(runtime.state, MCP_STATE_OK, "the MCP snapshot must survive a re-read");
-    assert!(skill_dir.join("SKILL.md").is_file(), "the skill's files must be on disk");
-    ok(format!("{} plugin row(s), {} skill(s), {} mcp(s), {} skin(s)",
-        plugins.len(), fresh.skills.len(), fresh.mcp.len(), fresh.skin_packages.len()));
+    assert_eq!(
+        runtime.state, MCP_STATE_OK,
+        "the MCP snapshot must survive a re-read"
+    );
+    assert!(
+        skill_dir.join("SKILL.md").is_file(),
+        "the skill's files must be on disk"
+    );
+    ok(format!(
+        "{} plugin row(s), {} skill(s), {} mcp(s), {} skin(s)",
+        plugins.len(),
+        fresh.skills.len(),
+        fresh.mcp.len(),
+        fresh.skin_packages.len()
+    ));
 
     // ---- 4. launch it, under the ledger ---------------------------------
     step(4, "launch (launcher half: spawn → logs → ready → stop)");
@@ -513,13 +588,20 @@ fn acceptance_walk_instance_to_import() {
         .block_on(spawn_child_with_exit(cmd, logs.sink(), Some(on_exit)))
         .expect("spawn the child");
     let pid = handle.pid;
-    assert_eq!(handle.state().status, ProcessStatus::Starting, "a fresh child starts as Starting");
+    assert_eq!(
+        handle.state().status,
+        ProcessStatus::Starting,
+        "a fresh child starts as Starting"
+    );
 
     // The startup zombie sweep runs before every launch. A tree this launcher
     // is still managing must survive it — otherwise a second launcher would
     // kill a healthy harness.
     ledger.record(&instance.id, pid);
-    assert!(sweep_leftover(&ledger).is_empty(), "the sweep reaped a live launcher's own tree");
+    assert!(
+        sweep_leftover(&ledger).is_empty(),
+        "the sweep reaped a live launcher's own tree"
+    );
     ok(format!("pid {pid} recorded and left alone by the sweep"));
 
     // Readiness comes off the child's own stdout, the way the launcher reads
@@ -527,7 +609,11 @@ fn acceptance_walk_instance_to_import() {
     let line = logs
         .wait_line(Duration::from_secs(15), |l| l.starts_with("listening "))
         .expect("the child never reported its port on stdout");
-    let port: u16 = line.trim_start_matches("listening ").trim().parse().expect("a port");
+    let port: u16 = line
+        .trim_start_matches("listening ")
+        .trim()
+        .parse()
+        .expect("a port");
     assert!(
         rt.block_on(wait_for_port(port, Duration::from_secs(5))),
         "port {port} was reported but never accepted a connection"
@@ -539,10 +625,24 @@ fn acceptance_walk_instance_to_import() {
     rt.block_on(handle.stop()).expect("stop the child");
     // do_stop's bookkeeping: the row goes, and the whole tree dies with it.
     ledger.forget(pid);
-    assert!(ledger.read().is_empty(), "the ledger must be empty after stop");
-    assert!(eventually(Duration::from_secs(5), || !pid_alive(pid)), "stop left pid {pid} alive");
-    let exit_state = exited.lock().unwrap().clone().expect("the exit callback must fire");
-    assert_eq!(exit_state.status, ProcessStatus::Stopped, "a stopped child reports Stopped");
+    assert!(
+        ledger.read().is_empty(),
+        "the ledger must be empty after stop"
+    );
+    assert!(
+        eventually(Duration::from_secs(5), || !pid_alive(pid)),
+        "stop left pid {pid} alive"
+    );
+    let exit_state = exited
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the exit callback must fire");
+    assert_eq!(
+        exit_state.status,
+        ProcessStatus::Stopped,
+        "a stopped child reports Stopped"
+    );
     ok("stopped, reaped, and the ledger row cleared");
 
     // ---- 5. usage lands in the ledger -----------------------------------
@@ -567,24 +667,48 @@ fn acceptance_walk_instance_to_import() {
     unknown.model = "no-such-model-xyz".into();
     unknown.cost = None;
 
-    assert!(ledger.record(known.clone()).unwrap().is_some(), "the first request records");
-    assert!(ledger.record(unknown).unwrap().is_some(), "the second request records");
+    assert!(
+        ledger.record(known.clone()).unwrap().is_some(),
+        "the first request records"
+    );
+    assert!(
+        ledger.record(unknown).unwrap().is_some(),
+        "the second request records"
+    );
     // The proxy retries; the same request id must not be counted twice.
-    assert!(ledger.record(known.clone()).unwrap().is_none(), "a duplicate request id must not double-count");
+    assert!(
+        ledger.record(known.clone()).unwrap().is_none(),
+        "a duplicate request id must not double-count"
+    );
 
-    let mut foreign = NewUsageRecord { request_id: Some("walk-req-3".into()), ..known.clone() };
+    let mut foreign = NewUsageRecord {
+        request_id: Some("walk-req-3".into()),
+        ..known.clone()
+    };
     foreign.instance_id = "another-instance".into();
     assert!(ledger.record(foreign).unwrap().is_some());
 
-    let mine = ledger.summary(Some(&instance.id), None, None, 0, now + 60).unwrap();
+    let mine = ledger
+        .summary(Some(&instance.id), None, None, 0, now + 60)
+        .unwrap();
     assert_eq!(mine.requests, 2, "only this instance's requests");
     assert_eq!(mine.total_tokens, 100 + 20 + 200 + 40);
-    assert_eq!(mine.by_instance.len(), 1, "another instance's rows must not leak into this view");
+    assert_eq!(
+        mine.by_instance.len(),
+        1,
+        "another instance's rows must not leak into this view"
+    );
     assert_eq!(mine.cost_known_records, 1, "a reported cost is known");
-    assert_eq!(mine.unknown_cost_records, 1, "an unpriced model must be flagged unknown, not zero");
+    assert_eq!(
+        mine.unknown_cost_records, 1,
+        "an unpriced model must be flagged unknown, not zero"
+    );
     let all = ledger.summary(None, None, None, 0, now + 60).unwrap();
     assert_eq!(all.requests, 3, "the unfiltered view sees every instance");
-    ok(format!("{} request(s) for this instance, {} across all, 1 unpriced", mine.requests, all.requests));
+    ok(format!(
+        "{} request(s) for this instance, {} across all, 1 unpriced",
+        mine.requests, all.requests
+    ));
 
     // ---- 6. export the environment --------------------------------------
     step(6, "export the environment");
@@ -625,9 +749,18 @@ fn acceptance_walk_instance_to_import() {
     // The four checks the importer's preflight makes, made here on the bytes it
     // would be handed: right format, right version, something to install, and a
     // checksum that still matches after the round trip.
-    assert_eq!(manifest.format, ENVIRONMENT_FORMAT, "not a DSH environment package");
-    assert_eq!(manifest.format_version, ENVIRONMENT_FORMAT_VERSION, "unsupported package version");
-    assert!(!manifest.items.is_empty(), "a package with no installable items is refused");
+    assert_eq!(
+        manifest.format, ENVIRONMENT_FORMAT,
+        "not a DSH environment package"
+    );
+    assert_eq!(
+        manifest.format_version, ENVIRONMENT_FORMAT_VERSION,
+        "unsupported package version"
+    );
+    assert!(
+        !manifest.items.is_empty(),
+        "a package with no installable items is refused"
+    );
     let reparsed: EnvironmentManifest = serde_json::from_slice(&bytes).expect("parse it back");
     let reserialized = serde_json::to_vec(&serde_json::to_value(&reparsed).expect("canonicalize"))
         .expect("re-serialize the manifest");
@@ -649,13 +782,23 @@ fn acceptance_walk_instance_to_import() {
         .filter(|i| i.install_spec().is_empty())
         .map(|i| i.key())
         .collect();
-    assert!(sourceless.is_empty(), "no re-install source for: {sourceless:?}");
-    ok(format!("{} item(s), checksum {}…", reparsed.items.len(), &checksum[..12]));
+    assert!(
+        sourceless.is_empty(),
+        "no re-install source for: {sourceless:?}"
+    );
+    ok(format!(
+        "{} item(s), checksum {}…",
+        reparsed.items.len(),
+        &checksum[..12]
+    ));
 
     // ---- 7. import it into a fresh instance -----------------------------
     step(7, "import into a fresh instance");
     let mut target = InstanceManifest::create(&paths, "Imported Walk").expect("create the import");
-    assert_ne!(target.id, instance.id, "an import lands in its own instance");
+    assert_ne!(
+        target.id, instance.id,
+        "an import lands in its own instance"
+    );
     for item in &reparsed.items {
         // An import re-resolves each leaf rather than pointing at the exporting
         // instance's files: the MCP fixture is cloned fresh, the way a real
@@ -685,9 +828,15 @@ fn acceptance_walk_instance_to_import() {
     let imported = InstanceManifest::get(&paths, &target.id).expect("re-read the import");
     assert_eq!(imported.skills.len(), 1, "the skill leaf must land again");
     assert_eq!(imported.mcp.len(), 1, "the MCP leaf must land again");
-    assert_eq!(imported.skin_packages.len(), 1, "the skin leaf must land again");
+    assert_eq!(
+        imported.skin_packages.len(),
+        1,
+        "the skin leaf must land again"
+    );
     assert!(
-        DshAdapter::installed_plugins(&imported).iter().any(|p| p.name == PKG_PLUGIN),
+        DshAdapter::installed_plugins(&imported)
+            .iter()
+            .any(|p| p.name == PKG_PLUGIN),
         "the plugin leaf must land again"
     );
     // The two instances keep separate workspaces: an import must not write into
@@ -697,9 +846,20 @@ fn acceptance_walk_instance_to_import() {
         .join("skills")
         .join(imported.skills[0].id.replace('/', "-"))
         .join("SKILL.md");
-    assert!(imported_skill.is_file(), "no SKILL.md at {}", imported_skill.display());
-    assert!(imported_skill.starts_with(Path::new(&imported.workspace)), "escaped the workspace");
-    assert_eq!(InstanceManifest::list(&paths).unwrap().len(), 2, "both instances are listed");
+    assert!(
+        imported_skill.is_file(),
+        "no SKILL.md at {}",
+        imported_skill.display()
+    );
+    assert!(
+        imported_skill.starts_with(Path::new(&imported.workspace)),
+        "escaped the workspace"
+    );
+    assert_eq!(
+        InstanceManifest::list(&paths).unwrap().len(),
+        2,
+        "both instances are listed"
+    );
     ok(format!("instance {} mirrors all four kinds", imported.id));
 
     eprintln!("\nacceptance walk: PASS — 7/7 steps on {}", root.display());

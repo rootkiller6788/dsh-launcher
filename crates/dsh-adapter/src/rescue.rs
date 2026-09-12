@@ -155,7 +155,8 @@ pub fn restore_snapshot(files: &[RescueFile], rescue_dir: &Path) -> Result<Rescu
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create {}", parent.display()))?;
         }
-        std::fs::copy(&src, &f.source).with_context(|| format!("restore {}", f.source.display()))?;
+        std::fs::copy(&src, &f.source)
+            .with_context(|| format!("restore {}", f.source.display()))?;
         restored += 1;
     }
     if restored == 0 {
@@ -246,10 +247,18 @@ mod tests {
         let workspace = tmp_dir(tag);
         let profile = workspace.join("profiles").join("web");
         std::fs::create_dir_all(&profile).unwrap();
-        std::fs::write(profile.join("package.json"), r#"{"dsh":{"profile":{"bundles":[]}}}"#).unwrap();
+        std::fs::write(
+            profile.join("package.json"),
+            r#"{"dsh":{"profile":{"bundles":[]}}}"#,
+        )
+        .unwrap();
         std::fs::write(profile.join("cordis.patch.yml"), "- id: a\n").unwrap();
         std::fs::write(workspace.join("cordis.patch.yml"), "- id: home-a\n").unwrap();
-        std::fs::write(profile.join("pnpm-workspace.yaml"), "allowBuilds:\n  esbuild: true\n").unwrap();
+        std::fs::write(
+            profile.join("pnpm-workspace.yaml"),
+            "allowBuilds:\n  esbuild: true\n",
+        )
+        .unwrap();
         let files = rescue_files(&manifest(&workspace));
         (workspace, files)
     }

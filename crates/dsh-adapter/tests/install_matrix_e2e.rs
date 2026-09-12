@@ -23,7 +23,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use dsh_adapter::mcp_local::install_local;
 use dsh_adapter::mcp_prefetch::prefetch_mcp;
 use dsh_adapter::mcp_probe::probe_mcp;
-use launcher_core::{McpInstallManifest, McpLaunchSpec, McpServerRecord, MCP_STATE_ERROR, MCP_STATE_OK};
+use launcher_core::{
+    McpInstallManifest, McpLaunchSpec, McpServerRecord, MCP_STATE_ERROR, MCP_STATE_OK,
+};
 
 fn sink() -> launcher_core::process::LogSink {
     Arc::new(|line| eprintln!("[matrix] {}", line.line))
@@ -33,7 +35,10 @@ fn tmp(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "ahl-matrix-{tag}-{}-{:x}",
         std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
     ))
 }
 
@@ -78,7 +83,13 @@ fn install_fixture(
     repo: &Path,
     target: &Path,
 ) -> Result<(dsh_adapter::mcp_local::LocalLaunch, PathBuf, String), String> {
-    rt().block_on(install_local(&repo.to_string_lossy(), target, None, None, sink()))
+    rt().block_on(install_local(
+        &repo.to_string_lossy(),
+        target,
+        None,
+        None,
+        sink(),
+    ))
 }
 
 // --- 1. node source-run: deterministic (npm/zero-dep) + real probe handshake ---
@@ -106,10 +117,16 @@ rl.on('line', (line) => {
 #[ignore = "node + npm on PATH; git fixture is local. Run: cargo test -p dsh-adapter --test install_matrix_e2e -- --ignored --nocapture"]
 fn source_node_fixture_deterministic_probe_ok() {
     let repo = tmp("node-repo");
-    make_repo(&repo, &BTreeMap::from([
-        ("package.json", r#"{"name":"matrix-node-srv","version":"1.0.0","main":"server.js"}"#),
-        ("server.js", NODE_SRV),
-    ]));
+    make_repo(
+        &repo,
+        &BTreeMap::from([
+            (
+                "package.json",
+                r#"{"name":"matrix-node-srv","version":"1.0.0","main":"server.js"}"#,
+            ),
+            ("server.js", NODE_SRV),
+        ]),
+    );
     let target = tmp("node-clone");
     let (launch, _base, how) = install_fixture(&repo, &target)
         .unwrap_or_else(|e| panic!("node source install failed: {e}"));
@@ -126,8 +143,15 @@ fn source_node_fixture_deterministic_probe_ok() {
         ..Default::default()
     };
     let state = rt().block_on(probe_mcp(&record, None, sink()));
-    eprintln!("probe node source: state={} error={:?}", state.state, state.error);
-    assert_eq!(state.state, MCP_STATE_OK, "node fixture must handshake, err: {:?}", state.error);
+    eprintln!(
+        "probe node source: state={} error={:?}",
+        state.state, state.error
+    );
+    assert_eq!(
+        state.state, MCP_STATE_OK,
+        "node fixture must handshake, err: {:?}",
+        state.error
+    );
     assert!(!state.tools.is_empty(), "expected tools/list answered");
     let _ = std::fs::remove_dir_all(&repo);
     let _ = std::fs::remove_dir_all(&target);
@@ -140,13 +164,19 @@ const PY_FIXTURE: &str = "[project]\nname = \"matrix-pysrv\"\nversion = \"0.1.0\
 #[test]
 #[ignore = "git fixture local; branches on uv presence"]
 fn source_python_fixture_toolchain_gate() {
-    let uv_present = std::process::Command::new("uv").arg("--version").output().is_ok();
+    let uv_present = std::process::Command::new("uv")
+        .arg("--version")
+        .output()
+        .is_ok();
     let repo = tmp("py-repo");
-    make_repo(&repo, &BTreeMap::from([
-        ("pyproject.toml", PY_FIXTURE),
-        ("matrix_pysrv/__init__.py", ""),
-        ("matrix_pysrv/server.py", "def main(): pass\n"),
-    ]));
+    make_repo(
+        &repo,
+        &BTreeMap::from([
+            ("pyproject.toml", PY_FIXTURE),
+            ("matrix_pysrv/__init__.py", ""),
+            ("matrix_pysrv/server.py", "def main(): pass\n"),
+        ]),
+    );
     let target = tmp("py-clone");
     let result = install_fixture(&repo, &target);
     let _ = std::fs::remove_dir_all(&repo);
@@ -156,7 +186,10 @@ fn source_python_fixture_toolchain_gate() {
         // box without uv must fail readably, not hang or fake a record.
         let err = result.expect_err("no uv → deterministic python build must fail honestly");
         eprintln!("VERDICT(no-uv python source): {err}");
-        assert!(err.contains("uv"), "expected a 'uv' toolchain hint, got: {err}");
+        assert!(
+            err.contains("uv"),
+            "expected a 'uv' toolchain hint, got: {err}"
+        );
     } else {
         eprintln!("SKIP-success-path: uv present — python source success covered by real-repo e2e");
         let _ = result;
@@ -165,21 +198,26 @@ fn source_python_fixture_toolchain_gate() {
 
 // --- 3. rust source-run: deterministic cargo build (zero-dep fixture) --------
 
-const CARGO_TOML: &str = "[package]\nname = \"matrixrs\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+const CARGO_TOML: &str =
+    "[package]\nname = \"matrixrs\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
 const RUST_MAIN: &str = "fn main() { std::process::exit(0) }\n";
 
 #[test]
 #[ignore = "cargo on PATH; zero-dep fixture builds in seconds"]
 fn source_rust_fixture_deterministic_build() {
-    if std::process::Command::new("cargo").arg("--version").output().is_err() {
+    if std::process::Command::new("cargo")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
         eprintln!("SKIP: cargo not on PATH");
         return;
     }
     let repo = tmp("rs-repo");
-    make_repo(&repo, &BTreeMap::from([
-        ("Cargo.toml", CARGO_TOML),
-        ("src/main.rs", RUST_MAIN),
-    ]));
+    make_repo(
+        &repo,
+        &BTreeMap::from([("Cargo.toml", CARGO_TOML), ("src/main.rs", RUST_MAIN)]),
+    );
     let target = tmp("rs-clone");
     // install_local hands back the launch (not just base) — probe the build only.
     let (launch, base, how) = rt()
@@ -195,8 +233,16 @@ fn source_rust_fixture_deterministic_build() {
     assert_eq!(how, "deterministic");
     // Cargo.toml name → target/release/matrixrs[.exe], inside the clone.
     let bin = Path::new(&launch.command);
-    assert!(bin.is_file(), "built rust binary missing: {}", launch.command);
-    assert!(bin.starts_with(&base), "escaped clone dir: {}", launch.command);
+    assert!(
+        bin.is_file(),
+        "built rust binary missing: {}",
+        launch.command
+    );
+    assert!(
+        bin.starts_with(&base),
+        "escaped clone dir: {}",
+        launch.command
+    );
     assert!(launch.args.is_empty(), "rust binary launch needs no args");
     let _ = std::fs::remove_dir_all(&repo);
     let _ = std::fs::remove_dir_all(&target);
@@ -226,9 +272,13 @@ fn source_no_fingerprint_without_provider_honest_error() {
 #[ignore = "git fixture local"]
 fn source_dockerfile_only_honest_no_docker() {
     let repo = tmp("dk-repo");
-    make_repo(&repo, &BTreeMap::from([
-        ("Dockerfile", "FROM node:20\nCMD [\"node\", \"server.js\"]\n"),
-    ]));
+    make_repo(
+        &repo,
+        &BTreeMap::from([(
+            "Dockerfile",
+            "FROM node:20\nCMD [\"node\", \"server.js\"]\n",
+        )]),
+    );
     let target = tmp("dk-clone");
     let err = install_fixture(&repo, &target).expect_err("Dockerfile-only repo must fail honestly");
     eprintln!("VERDICT(dockerfile-only): {err}");
@@ -246,13 +296,19 @@ fn source_dockerfile_only_honest_no_docker() {
 #[ignore = "git fixture local"]
 fn source_workspace_monorepo_honest_ambiguous() {
     let repo = tmp("ws-repo");
-    make_repo(&repo, &BTreeMap::from([
-        (
-            "package.json",
-            r#"{"name":"matrix-mono","private":true,"workspaces":["packages/*"]}"#,
-        ),
-        ("packages/a/package.json", r#"{"name":"@matrix/a","version":"1.0.0","main":"index.js"}"#),
-    ]));
+    make_repo(
+        &repo,
+        &BTreeMap::from([
+            (
+                "package.json",
+                r#"{"name":"matrix-mono","private":true,"workspaces":["packages/*"]}"#,
+            ),
+            (
+                "packages/a/package.json",
+                r#"{"name":"@matrix/a","version":"1.0.0","main":"index.js"}"#,
+            ),
+        ]),
+    );
     let target = tmp("ws-clone");
     let err = install_fixture(&repo, &target).expect_err("workspace root must be honest ambiguous");
     eprintln!("VERDICT(workspace monorepo): {err}");
@@ -282,7 +338,10 @@ fn registry_prefetch_rejects_source_run_manifest() {
         .block_on(prefetch_mcp(&m, None, sink()))
         .expect_err("source-run manifest must not be cache-fetched");
     eprintln!("VERDICT(prefetch git manifest): {err}");
-    assert!(err.contains("source-run"), "expected source-run refusal, got: {err}");
+    assert!(
+        err.contains("source-run"),
+        "expected source-run refusal, got: {err}"
+    );
 }
 
 // --- 8. remote streamable-http: unreachable endpoint fails fast & honest -----
@@ -300,6 +359,12 @@ fn remote_unreachable_http_fails_fast_honest() {
         ..Default::default()
     };
     let state = rt().block_on(probe_mcp(&record, None, sink()));
-    eprintln!("VERDICT(remote unreachable): state={} error={:?}", state.state, state.error);
-    assert_eq!(state.state, MCP_STATE_ERROR, "unreachable remote must be an honest error");
+    eprintln!(
+        "VERDICT(remote unreachable): state={} error={:?}",
+        state.state, state.error
+    );
+    assert_eq!(
+        state.state, MCP_STATE_ERROR,
+        "unreachable remote must be an honest error"
+    );
 }
