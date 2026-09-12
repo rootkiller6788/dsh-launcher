@@ -24,6 +24,7 @@ AHL 不调用就绪 API，而是 grep dsh 打印的 ready-line。桌面与 TUI �
 | 2 | 正则 `/http:\/\/127\.0\.0\.1:(\d+)\/\?token=(\S+)/` | 强 | `tui/host/index.js:32`（`WEB_URL_RE`）+ 扫描 stdout/stderr `:119-142` | `\S+` 假设 token 不含空白；旧 build 打印裸 URL（无 token）则永不匹配、侧车永不 `DSH_READY` |
 | 3 | `DSH_READY <port> <token>` 行协议 | 强 | `tui/src-tauri/src/sidecar.rs:122-137` | host 重打包成 `DSH_READY` 前缀行，侧车按空格切两个字段 |
 | 4 | ready-line 里的 `?token=` 查询参数 | 强 | `crates/launcher-core/src/redact.rs`（`SECRET_KEYS` 含 `token`）+ 测试 | 假设 token 以 `token=` 查询参数出现；脱敏依赖该 key 名。**哨兵**：`redact.rs` 13 单测 |
+| 55 | pnpm 的 `Ignored build scripts: <names>.` 行（**pnpm 的输出，不是 dsh 的**） | 弱 | `apps/desktop/src/lib/buildScript.ts`（`suggestBuildPackage`）+ 单测 | 从失败 job 的 stderr 尾部取**第一个**名字，预填"允许构建脚本"的输入框。**只用于预填，从不据此写文件**——写什么必须由用户确认。匹配不上（措辞变了、名字不是包名）就给空框，退化成手输；正则失配不产生任何副作用 |
 
 ---
 
@@ -180,13 +181,20 @@ AHL 不调用就绪 API，而是 grep dsh 打印的 ready-line。桌面与 TUI �
 另有一条**形状随上游大版本变**的依赖，不排进上表，单独记：#53 的 `allowBuilds` 键名
 （pnpm 10 → 11 从 `onlyBuiltDependencies` 列表改成 `allowBuilds` 映射）。它脆弱的方式和
 上面九条不同——不是"上游改措辞"，而是"上游换了字段形状"，症状是 AHL 写进 profile 的
-白名单**静默失效**（pnpm 不认这个键，构建脚本照样被拦），而不是报错。任何按此键写文件的
-动作都必须能验证自己的写入被上游认了。
+白名单**静默失效**（pnpm 不认这个键，构建脚本照样被拦），而不是报错。
+
+**这条依赖没有"验证写入被上游认了"的办法**，落地时也没有假装有（`pnpm.rs`）：能验的只有
+文件本身——改完的文本 parse 得动、`allowBuilds.<pkg>` 确实是 `true`，验不过就不落盘。
+**"pnpm 认不认这个键"验不了**：唯一能问的只有 pnpm 自己，为一行写入跑一次
+`pnpm approve-builds` 之类的探测，代价大于收益，而且它仍然只回答"此刻的 pnpm 认"。
+所以这里的兜底不是验证，是**如实回报**：命令把写进去的那一行原样返回（`allowBuilds: <pkg>: true`），
+用户可以拿它和 dsh 打印的键名对一眼——静默失效时，这一行就是唯一能对照的证物。若日后
+pnpm 换了形状，症状会是"批准了但没用"，届时先查本行的键名。
 
 ## 附三：关键源文件
 
 - `crates/dsh-adapter/src/lib.rs`（launch / plugin_inventory / cordis.patch 编译 / resolve_bin / build_env）
-- `crates/dsh-adapter/src/{theme,llm,language,events,content,diagnostics,runtimes}.rs`
+- `crates/dsh-adapter/src/{theme,llm,language,events,content,diagnostics,runtimes,pnpm,rescue,health}.rs`
 - `apps/desktop/src-tauri/src/commands/{process,plugins,content}.rs`
 - `crates/launcher-core/src/redact.rs`
 - `tui/host/index.js`、`tui/src-tauri/src/sidecar.rs`
@@ -205,3 +213,4 @@ AHL 不调用就绪 API，而是 grep dsh 打印的 ready-line。桌面与 TUI �
 |---|---|
 | 2026-09-12 | 首版。由 `docs/absorb-plan.md` Phase 0.5 产出，覆盖 52 条依赖 + 8 条已核实不存在 + 脆弱度排序。 |
 | 2026-09-12 | 补 #53 / #54：profile 的 `pnpm-workspace.yaml` + `allowBuilds` 键（2.5 的前置核实，直接读 dsh 0.1.5-rc.1 源码取得，非转述）；附二加一条"形状随大版本变"的依赖。 |
+| 2026-09-12 | 2.5 落地后回填：补 #55（pnpm 自己的 `Ignored build scripts:` 行，只用于预填输入框）；附二那一条补上"验不了键名、只能如实回报"的兜底说明（原文写的是"必须能验证自己的写入被上游认了"，落地后证明做不到）；附三补 `pnpm` / `rescue` / `health` 三个文件。 |
