@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -985,6 +986,10 @@ fn diagnose_and_emit(app: &AppHandle, id: &str, stage: &'static str, tail: &LogT
     let extras =
         dsh_adapter::crash::load_signatures(&app.state::<AppState>().paths.crash_signatures);
     let issues = dsh_adapter::crash::diagnose_crash_with(&tail.lines(), &extras);
+    // Dumped before the empty-issues return, not after: a failure that matches no
+    // rule is the one where the archive is the only evidence there is, and the
+    // rule table is exactly the thing that cannot help there.
+    dump_diagnostic_package(app, id, stage, &issues, tail);
     if issues.is_empty() {
         emit_debug(
             app,
@@ -1003,6 +1008,116 @@ fn diagnose_and_emit(app: &AppHandle, id: &str, stage: &'static str, tail: &LogT
             issues,
         },
     );
+}
+
+/// Packages kept per instance before the oldest are removed.
+///
+/// A boot that fails into a retry loop fails every few seconds, and each dump is
+/// a few hundred KB of profile state plus a 2000-line log tail. The last few
+/// describe one incident as well as the first fifty do.
+const KEEP_DIAGNOSTIC_PACKAGES: usize = 5;
+
+/// Write the package `export_diagnostics` writes, without a frontend.
+///
+/// Ported from `1/`'s ADR-023 auto-dump. The manual export can only describe a
+/// crash to someone who was already looking at the window; this puts the same
+/// evidence on disk when the boot dies, so "it crashed last night" is still
+/// answerable in the morning.
+///
+/// Best-effort throughout: every step returns on failure rather than
+/// propagating. This runs on the crash sink, and a launcher that failed to write
+/// a diagnostic package *about* a failure must not turn it into two failures.
+fn dump_diagnostic_package(
+    app: &AppHandle,
+    id: &str,
+    stage: &str,
+    issues: &[dsh_adapter::crash::CrashIssue],
+    tail: &LogTail,
+) {
+    let state = app.state::<AppState>();
+    let Ok(settings) = settings_snapshot(&state) else {
+        return;
+    };
+    let Ok(instance) = InstanceManifest::get(&state.paths, id) else {
+        return;
+    };
+
+    // The Activity panel is not reachable from here, so its contents are
+    // reconstructed from what this path does have. The launcher's own findings
+    // come first — they are the reading of the child output that follows — and
+    // are levelled `warn` to match the `emit_warn` that reported them; the tail
+    // is levelled `error` because on this path it is the output of a boot that
+    // died, not because every line in it is one.
+    let mut activity: Vec<crate::commands::diagnose::ActivityLine> = issues
+        .iter()
+        .map(|issue| crate::commands::diagnose::ActivityLine {
+            level: "warn".into(),
+            line: format!("launcher diagnosis (boot {stage}): {}", issue.message),
+        })
+        .collect();
+    activity.extend(tail.lines().into_iter().map(|line| {
+        crate::commands::diagnose::ActivityLine {
+            level: "error".into(),
+            line,
+        }
+    }));
+
+    let Ok(package) = crate::commands::diagnose::collect(&state, &settings, &instance, &activity)
+    else {
+        return;
+    };
+    let Ok(bytes) = crate::commands::diagnose::write_package(&package.files) else {
+        return;
+    };
+    let dir = state.paths.diagnostics_dir(id);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    // One dump per second, and a second attempt inside the same second lands on
+    // the same name: that is the same incident, so overwriting loses nothing the
+    // first write did not already describe.
+    let name = format!("boot-{stage}-{}.zip", launcher_core::now_secs());
+    if std::fs::write(dir.join(&name), bytes).is_err() {
+        return;
+    }
+    prune_diagnostic_packages(&dir, KEEP_DIAGNOSTIC_PACKAGES);
+    emit_debug(
+        app,
+        &format!("{id} · boot {stage}: diagnostic package written to {name}"),
+    );
+}
+
+/// Keep the newest `keep` packages in `dir`; remove the rest.
+///
+/// Ordered by the epoch the file name encodes, not by directory order or mtime:
+/// the name is what the launcher wrote, and a directory listing carries no
+/// promise of order. A file whose name does not parse as one of ours is left
+/// alone — this prunes what it created, and deleting an unrecognised file in a
+/// retention pass would be the wrong way to find out what it was.
+fn prune_diagnostic_packages(dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut packages: Vec<(u64, PathBuf)> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .filter_map(|path| package_epoch(&path).map(|at| (at, path)))
+        .collect();
+    if packages.len() <= keep {
+        return;
+    }
+    packages.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in packages.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// The epoch a dump's file name encodes (`boot-<stage>-<secs>.zip`), if it is
+/// one of ours.
+fn package_epoch(path: &Path) -> Option<u64> {
+    let stem = path.file_name()?.to_str()?.strip_suffix(".zip")?;
+    stem.strip_prefix("boot-")?.rsplit('-').next()?.parse().ok()
 }
 
 /// Payload of [`LAUNCH_DIAGNOSIS_EVENT`], paired with `RescueStatus` in the UI so
@@ -1247,5 +1362,77 @@ fn classify_launch_error(e: &anyhow::Error) -> ErrorCode {
         ErrorCode::DshBinUnresolvable
     } else {
         ErrorCode::LaunchFailed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ahl-process-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn dump(dir: &Path, epoch: u64) {
+        std::fs::write(dir.join(format!("boot-crashed-{epoch}.zip")), b"PK").unwrap();
+    }
+
+    fn epochs(dir: &Path) -> Vec<u64> {
+        let mut found: Vec<u64> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| package_epoch(&e.path()))
+            .collect();
+        found.sort_unstable();
+        found
+    }
+
+    #[test]
+    fn package_epoch_reads_only_names_the_launcher_wrote() {
+        assert_eq!(package_epoch(Path::new("boot-degraded-42.zip")), Some(42));
+        assert_eq!(package_epoch(Path::new("boot-crashed-nope.zip")), None);
+        assert_eq!(package_epoch(Path::new("boot-crashed-42")), None);
+        assert_eq!(package_epoch(Path::new("ahl-diagnose-default-42.zip")), None);
+    }
+
+    #[test]
+    fn prune_keeps_the_newest_and_removes_the_oldest() {
+        let dir = tmp_dir("prune-newest");
+        for epoch in [100, 200, 300, 400, 500, 600, 700] {
+            dump(&dir, epoch);
+        }
+        prune_diagnostic_packages(&dir, 5);
+        assert_eq!(epochs(&dir), vec![300, 400, 500, 600, 700]);
+    }
+
+    #[test]
+    fn prune_removes_nothing_when_at_or_under_the_limit() {
+        let dir = tmp_dir("prune-under");
+        for epoch in [100, 200, 300] {
+            dump(&dir, epoch);
+        }
+        prune_diagnostic_packages(&dir, 5);
+        assert_eq!(epochs(&dir), vec![100, 200, 300]);
+    }
+
+    #[test]
+    fn prune_leaves_files_it_did_not_name() {
+        let dir = tmp_dir("prune-foreign");
+        for epoch in [100, 200, 300, 400, 500, 600] {
+            dump(&dir, epoch);
+        }
+        // Neither of these is a name this launcher writes. A retention pass that
+        // deletes an unrecognised file is how you find out what it was the hard way.
+        std::fs::write(dir.join("notes.txt"), b"keep me").unwrap();
+        std::fs::write(dir.join("backup.zip"), b"PK").unwrap();
+
+        prune_diagnostic_packages(&dir, 5);
+
+        assert_eq!(epochs(&dir), vec![200, 300, 400, 500, 600]);
+        assert!(dir.join("notes.txt").is_file());
+        assert!(dir.join("backup.zip").is_file());
     }
 }

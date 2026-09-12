@@ -229,7 +229,8 @@ const README: &str = "\
 # AI Harness Launcher — diagnostic package
 
 Produced by the launcher's \"Export diagnostic package\" action, or written
-automatically under `diagnostics/` after a boot failed.
+automatically under `instances/<instance>/diagnostics/` when a boot ended
+crashed or degraded. The automatic ones are pruned to the newest few.
 
 ## Contents
 
@@ -237,7 +238,7 @@ automatically under `diagnostics/` after a boot failed.
 |---|---|
 | `env.txt` | OS, launcher version, tool versions, the environment variables that change what gets launched, and the paths in play |
 | `state.txt` | the instance manifest, settings, rescue-point status, health report, and profile diagnostics |
-| `activity.txt` | the Activity panel's warnings and errors |
+| `activity.txt` | the Activity panel's warnings and errors — or, in a package written automatically after a failed boot, that boot's own output and the launcher's reading of it |
 | `errors.txt` | those lines summarised by error code, with the code's meaning and its recommended next action |
 | `log.txt` | the tail of the launcher's own log |
 | `crashes/` | recent launcher crash reports, if any |
@@ -583,7 +584,7 @@ mod tests {
     fn coded_failures_are_counted_from_the_section_the_reader_opens() {
         // The count the UI shows and the file the reader opens are the same text,
         // so they cannot disagree.
-        let activity = vec![
+        let activity = [
             line("error", "[E1003] dsh exited 1"),
             line("error", "[E1003] again"),
             line("error", "[E2001] npm unreachable"),
