@@ -135,6 +135,15 @@ impl AppPaths {
         self.instance_dir(id).join("rescue")
     }
 
+    /// An instance's auto-dumped diagnostic packages
+    /// (`instances/<id>/diagnostics/`). Written when a boot ends crashed or
+    /// degraded, so the evidence survives even when nobody opened a dialog.
+    /// Bounded by a keep-newest-N prune — unlike `rescue/`, a new dir here
+    /// would otherwise grow without limit.
+    pub fn diagnostics_dir(&self, id: &str) -> PathBuf {
+        self.instance_dir(id).join("diagnostics")
+    }
+
     /// The SQLite file for launch history / index (`root/launcher.db`).
     pub fn db_file(&self) -> PathBuf {
         self.root.join("launcher.db")
@@ -334,6 +343,12 @@ mod tests {
             paths.mcp_log_file("default", "owner/server-git"),
             dir.join("logs").join("last.log")
         );
+        // Every per-instance directory hangs off the same tree, which is what
+        // makes `InstanceManifest::delete`'s `remove_dir_all` sufficient — and
+        // what keeps a dump out of another instance's folder.
+        let instance = paths.instance_dir("default");
+        assert_eq!(paths.rescue_dir("default"), instance.join("rescue"));
+        assert_eq!(paths.diagnostics_dir("default"), instance.join("diagnostics"));
         let _ = std::fs::remove_dir_all(&paths.root);
     }
 
