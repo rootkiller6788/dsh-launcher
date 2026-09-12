@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -13,10 +13,9 @@ use launcher_core::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, State};
-use zip::write::SimpleFileOptions;
 
 use crate::commands::content::install_bundle_item;
-use crate::commands::paths::downloads_dir;
+use crate::commands::paths::{downloads_dir, slug as file_slug};
 use crate::commands::plugins::{
     ensure_not_running, reconcile_library_inventory_after_market_change, LibraryItemSource,
 };
@@ -212,19 +211,12 @@ fn validate_package(pkg: &EnvironmentPackage) -> Result<(), AppError> {
     Ok(())
 }
 
+/// The package file-name segment, via the shared slugifier.
+///
+/// Kept as a named helper rather than inlining `file_slug` at both call sites so
+/// the fallback for an unnamed package lives in one place.
 fn slug(name: &str) -> String {
-    let s: String = name
-        .trim()
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let s = s.trim_matches('-').to_string();
-    if s.is_empty() {
-        "environment".into()
-    } else {
-        s
-    }
+    file_slug(name, "environment")
 }
 
 pub(crate) fn registry_index(registry: &Registry) -> Vec<&RegistryPlugin> {
@@ -304,21 +296,11 @@ fn package_from_json(text: &str) -> Result<EnvironmentPackage, AppError> {
 }
 
 fn zip_package(pkg: &EnvironmentPackage) -> Result<Vec<u8>, AppError> {
-    let mut out = Cursor::new(Vec::new());
-    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    let mut zip = zip::ZipWriter::new(&mut out);
-    zip.start_file("environment.json", options)
-        .context("start environment.json")?;
-    zip.write_all(package_json(pkg)?.as_bytes())
-        .context("write environment.json")?;
-    zip.start_file("README.md", options)
-        .context("start README.md")?;
-    zip.write_all(
-        b"# DSH Environment Package\n\nThis package contains an install manifest only. It does not include API keys, logs, node_modules, or private workspace state.\n",
-    )
-    .context("write README.md")?;
-    zip.finish().context("finish environment package zip")?;
-    Ok(out.into_inner())
+    let readme = b"# DSH Environment Package\n\nThis package contains an install manifest only. It does not include API keys, logs, node_modules, or private workspace state.\n";
+    crate::zip::write_zip(&[
+        ("environment.json", package_json(pkg)?.as_bytes()),
+        ("README.md", &readme[..]),
+    ])
 }
 
 fn read_package_bytes(bytes: &[u8]) -> Result<EnvironmentPackage, AppError> {

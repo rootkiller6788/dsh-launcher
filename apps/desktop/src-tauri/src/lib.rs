@@ -3,6 +3,7 @@ mod error;
 mod jobs;
 mod state;
 mod usage_proxy;
+mod zip;
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -160,6 +161,7 @@ pub fn run() {
             commands::environment::environment_import_package,
             commands::diagnostics::profile_diagnostics,
             commands::health::instance_health,
+            commands::diagnose::export_diagnostics,
             commands::rescue::rescue_status,
             commands::rescue::rescue_create,
             commands::rescue::rescue_restore,

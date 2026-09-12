@@ -1,4 +1,5 @@
 pub mod content;
+pub mod diagnose;
 pub mod diagnostics;
 pub mod environment;
 pub mod health;

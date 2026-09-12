@@ -63,6 +63,28 @@ pub(crate) fn downloads_dir() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
+/// A filesystem-safe file-name segment from a user-supplied name.
+///
+/// `fallback` is used when nothing survives (`""`, `"!!!"`), so the caller
+/// decides what an unnamed artifact is called rather than inheriting a name this
+/// module picked. Both export commands build their file name through here, so an
+/// instance or package named with a slash cannot produce a path outside the
+/// folder the user chose.
+pub(crate) fn slug(name: &str, fallback: &str) -> String {
+    let s: String = name
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let s = s.trim_matches('-').to_string();
+    if s.is_empty() {
+        fallback.into()
+    } else {
+        s
+    }
+}
+
 fn reveal_path(path: &Path) -> Result<(), AppError> {
     #[cfg(target_os = "windows")]
     {
