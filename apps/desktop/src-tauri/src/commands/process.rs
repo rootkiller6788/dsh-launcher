@@ -28,6 +28,18 @@ const SETTINGS_CHANGED_EVENT: &str = "dsh-settings-changed";
 /// `usage_proxy`, and matched by the frontend listener in `appStore.ts`.
 pub(crate) const USAGE_EVENT: &str = "usage-recorded";
 
+/// Seconds between "still booting after Ns" progress hints while a launch sits
+/// on the slow path. The hint is visible in Activity so a long cold boot reads
+/// as "working" rather than "hung".
+const BOOT_HINT_SECS: u64 = 15;
+/// Seconds of *total silence* — no DSH output at all — before a slow boot is
+/// declared degraded. A child that keeps printing (pnpm install progress, plugin
+/// logs) is still making progress and is never timed out on wall-clock alone:
+/// the clock is the last emitted line, not the launch click. Tradeoff inherited
+/// from DSH-Launcher: a plugin stuck in an infinite print loop would evade this,
+/// but that is rarer than the cold boot this saves.
+const BOOT_SILENCE_SECS: u64 = 120;
+
 /// Launch an instance's harness as a managed child, wait for DSH to report its
 /// web URL, then show the UI in a launcher-owned DSH window. One instance runs
 /// at a time: launching a different instance while one is up stops the old one
@@ -158,6 +170,13 @@ async fn do_launch(
     // prints once its server is up (some dsh builds append `/?token=…`).
     // With `--port 0` the port is dynamic, so the old fixed-3080 probe no
     // longer applies. The Activity stream is untouched.
+    //
+    // `last_output` is the adaptive-boot clock: bumped on every streamed line so
+    // the slow path can tell "still printing, therefore still booting" apart
+    // from "gone silent, therefore hung". `std::sync::Mutex` (not an async
+    // mutex) because the writer is a plain `Fn` sink and the reader holds the
+    // guard for a single `Instant::elapsed()` with no `.await` in between.
+    let last_output = Arc::new(std::sync::Mutex::new(Instant::now()));
     let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let base_sink = make_usage_sink(
         app.clone(),
@@ -167,7 +186,11 @@ async fn do_launch(
     );
     let on_log: LogSink = {
         let tx = url_tx.clone();
+        let last_output = last_output.clone();
         Arc::new(move |line: LogLine| {
+            if let Ok(mut clock) = last_output.lock() {
+                *clock = Instant::now();
+            }
             base_sink(line.clone());
             if let Some(url) = parse_dsh_url(&line.line) {
                 let _ = tx.send(url);
@@ -352,48 +375,95 @@ async fn do_launch(
             let id_task = id.clone();
             let pid = handle.pid;
             let usage_proxy_base_url = usage_proxy_base_url.clone();
+            let last_output = last_output.clone();
             // The slow path settles minutes later, so its total has to count from
             // the launch the user clicked, not from the URL landing.
             let boot_start = launch_start;
             tauri::async_runtime::spawn(async move {
-                match tokio::time::timeout(Duration::from_secs(240), url_rx.recv()).await {
-                    Ok(Some(url)) => {
-                        let state = app.state::<AppState>();
-                        let mut guard = state.child.lock().await;
-                        if let Some(r) = guard.as_mut() {
-                            if r.handle.pid == pid {
-                                r.port = url_port(&url);
-                                r.url = Some(url.clone());
-                                r.settings_watch_shutdown = finalize_ready(
+                // Adaptive boot wait. No fixed wall-clock ceiling: a cold first
+                // boot (profile materialize + pnpm install of its bundles) runs
+                // for minutes while printing steadily. The clock is DSH's last
+                // emitted line — while it keeps talking it is "still starting";
+                // only `BOOT_SILENCE_SECS` of total silence marks it degraded.
+                // Even after that the watcher stays alive, so a URL that finally
+                // lands still flips the instance back to Running (self-healing).
+                let mut hint = tokio::time::interval(Duration::from_secs(BOOT_HINT_SECS));
+                hint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                hint.tick().await; // swallow the first (immediate) tick
+
+                let mut degraded = false;
+                loop {
+                    tokio::select! {
+                        url = url_rx.recv() => {
+                            match url {
+                                Some(url) => {
+                                    let state = app.state::<AppState>();
+                                    let mut guard = state.child.lock().await;
+                                    if let Some(r) = guard.as_mut() {
+                                        if r.handle.pid == pid {
+                                            r.port = url_port(&url);
+                                            r.url = Some(url.clone());
+                                            r.settings_watch_shutdown = finalize_ready(
+                                                &app,
+                                                &provider,
+                                                &settings,
+                                                &instance,
+                                                &r.handle,
+                                                &url,
+                                                usage_proxy_base_url.as_deref(),
+                                                boot_start,
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                    return;
+                                }
+                                None => {
+                                    // Channel closed: the child is gone, and the
+                                    // `on_exit` sink owns crash/stop cleanup.
+                                    return;
+                                }
+                            }
+                        }
+                        _ = hint.tick() => {
+                            // No `.await` while the lock is held: read the clock
+                            // into a plain `Duration` first.
+                            let silent_for = last_output
+                                .lock()
+                                .map(|clock| clock.elapsed())
+                                .unwrap_or_default();
+                            if degraded {
+                                // Already flagged — stay quiet; only the URL
+                                // branch above can still rescue this boot.
+                                continue;
+                            }
+                            if silent_for >= Duration::from_secs(BOOT_SILENCE_SECS) {
+                                degraded = true;
+                                let state = app.state::<AppState>();
+                                let mut guard = state.child.lock().await;
+                                if let Some(r) = guard.as_mut() {
+                                    if r.handle.pid == pid {
+                                        r.handle.set_status(ProcessStatus::Degraded);
+                                    }
+                                }
+                                emit_log(
                                     &app,
-                                    &provider,
-                                    &settings,
-                                    &instance,
-                                    &r.handle,
-                                    &url,
-                                    usage_proxy_base_url.as_deref(),
-                                    boot_start,
-                                )
-                                .await;
+                                    &format!(
+                                        "{id_task} · no DSH output for {}s — degraded, still watching for a late startup",
+                                        BOOT_SILENCE_SECS
+                                    ),
+                                );
+                            } else {
+                                emit_log(
+                                    &app,
+                                    &format!(
+                                        "{id_task} · still booting after {}s (last output {}s ago)…",
+                                        boot_start.elapsed().as_secs(),
+                                        silent_for.as_secs()
+                                    ),
+                                );
                             }
                         }
-                    }
-                    _ => {
-                        // Four minutes with no URL is no longer "slow boot" —
-                        // this is the genuine degraded state, and the only
-                        // producer of it: the child is alive but never became
-                        // reachable, so the UI should stop promising a boot.
-                        let state = app.state::<AppState>();
-                        let mut guard = state.child.lock().await;
-                        if let Some(r) = guard.as_mut() {
-                            if r.handle.pid == pid {
-                                r.handle.set_status(ProcessStatus::Degraded);
-                            }
-                        }
-                        emit_log(
-                            &app,
-                            &format!("{id_task} · DSH web still not ready after 4 min — check Activity logs"),
-                        );
                     }
                 }
             });

@@ -143,7 +143,7 @@ fn unquoted_value(input: &str, lower: &str, start: usize, wide: bool) -> usize {
                 break;
             }
             let mut m = k;
-            while b.get(m).map_or(false, |c| c.is_ascii_whitespace()) {
+            while b.get(m).is_some_and(|c| c.is_ascii_whitespace()) {
                 m += 1;
             }
             // Trailing spaces are not part of the value.
@@ -181,7 +181,7 @@ fn prefixed_secret(input: &str, lower: &str, i: usize) -> Option<(usize, usize)>
     if rest.starts_with("bearer") {
         let mut j = i + "bearer".len();
         let spaces_start = j;
-        while b.get(j).map_or(false, |c| c.is_ascii_whitespace()) {
+        while b.get(j).is_some_and(|c| c.is_ascii_whitespace()) {
             j += 1;
         }
         if j == spaces_start || j >= b.len() {
@@ -194,7 +194,7 @@ fn prefixed_secret(input: &str, lower: &str, i: usize) -> Option<(usize, usize)>
     if rest.starts_with("sk-") {
         let start = i;
         let mut k = i;
-        while b.get(k).map_or(false, |c| c.is_ascii_alphanumeric() || *c == b'-' || *c == b'_') {
+        while b.get(k).is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'-' || *c == b'_') {
             k += 1;
         }
         // Short `sk-` runs are words, not keys.
