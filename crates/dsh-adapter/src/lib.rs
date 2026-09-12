@@ -44,6 +44,7 @@ pub mod mcp_prefetch;
 pub mod mcp_probe;
 pub mod mcp_resolver;
 pub mod page_signature;
+pub mod rescue;
 pub mod runtimes;
 pub mod theme;
 
