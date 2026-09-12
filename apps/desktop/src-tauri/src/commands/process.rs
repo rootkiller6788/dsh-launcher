@@ -284,7 +284,10 @@ async fn do_launch(
     // that write.
     if safe_tier.is_none() {
         if let Err(e) = remove_safe_profile(&instance) {
-            emit_warn(app, &format!("{id} · could not remove the safe profile: {e}"));
+            emit_warn(
+                app,
+                &format!("{id} · could not remove the safe profile: {e}"),
+            );
         }
     }
     let provider = state.vault.resolve(&instance.provider_ref)?;
