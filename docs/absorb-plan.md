@@ -512,6 +512,46 @@ AHL 只是替用户写那一行。§3 拒绝同项目的工厂重置，拒绝的
 
 **至此 2.4 / 2.5 全部落地。** 剩下卡住的是 2.3 的编排（需要 1.6，而 1.6 需要的 1.4 已于同日落地，见 Phase 1 实施记录）。
 
+**1.6 + 2.3 已落地**（`18960eb` `1b3f695` `f591ba0` `528a17f` `faad2bd` `3a8c7f8`）。这是
+Phase 2 收尾的一项，把「两级安全模式」（1.6）与「恢复阶梯的编排」（2.3）合并成**一条阶梯**
+落地——计划里就写了它们要合并，落的也是合并后的形态。至此 **Phase 2 全部条目收口**。
+
+**阶梯形状**（`crates/dsh-adapter/src/safe_boot.rs`）：L1 保留用户 profile 里的 first-party
+bundle（`@deepseek-ai/` 前缀，保序）并强制补入 minimal pair；L2 只留 minimal pair
+（`@deepseek-ai/dsh-base` + `@deepseek-ai/dsh-web-app`，即 dsh 自己的 `web` 模板，逐字）。
+L3 不做（§3）。安全 profile 是**用户 profile 的平级目录** `.ahl-safe`，绝不读改写用户的
+`package.json` / `cordis.patch.yml` / `pnpm-workspace.yaml`。
+
+**一个关键修正：安全 profile 只写一个清单，不写 `cordis.yml` / `cordis.patch.yml` /
+`pnpm-workspace.yaml`。** 从 `1/` 的 `SafeProfileBuilder` 移植时，原以为要照 zat 的
+`RESCUE_FILES` 那样给安全 profile 备齐 profile 四件套；核实 dsh 实际行为后**既不需要也不该写**：
+① `loadProfile` 把 profile patch 层读作 `existsSync(patchPath) ? load : []`——缺
+`cordis.patch.yml` 只是"无 overlay"，不是故障；② `prepareProfile` 会把
+`profiles/<name>/node_modules` 物化为指向安装锚点的 symlink 农场，所以手写清单里的 bundle
+无需 pnpm install 就能解析。结论：写**恰好一个** `package.json`（`dsh.profile.bundles`，
+无 `dependencies`）是"没有可错的东西"那一支。契约已登记进 `dsh-contract-inventory.md`
+的 #58 / #59 / #60 / #61 / #62。
+
+**boot 之前让 dsh 先裁决**：`dsh --profile .ahl-safe --dump-config`（父解析器上的 flag，
+不是子命令）。合成成功 exit 0；不可解析 bundle 则 exit 1 并打印
+`Error: dsh: cannot resolve profile bundle "…" …`。AHL 只在 dsh 说"能合成"之后才 boot，
+拒绝时**原样引用 dsh 的话**（`SafeProfileVerdict::Refused.from_dsh` 区分"dsh 说的"与
+"对 exit code 的解读"），绝不自造诊断、也绝不 boot 一个 dsh 刚拒绝过的 profile。
+
+**编排（2.3 的"自动升级"）**：L1 失败自动爬向 L2，L2 失败即到底、如实说"minimal pair 也
+起不来"，不循环。三个触发点：boot 前的 dump 被拒（`do_safe_launch` 内联爬梯）、子进程崩溃
+（`on_exit` 收尾后爬）、静默降级（慢路径 watcher 爬）。爬梯是**一次性**的（`safe_escalating`
+原子标记，`do_launch` 在安全子进程真正起来时复位），避免"降级 + 崩溃"两次失败赛跑出两趟 L2。
+正常启动时清除 `.ahl-safe` 残骸——退出安全模式 = 回到用户自己的 profile、无痕。UI 侧
+`BootRecovery.tsx` 出安全模式入口（失败面板）与 sky 色横幅（安全模式运行中 + 退出按钮）。
+
+**1.4 的版本校准局限（在此一并记录）**：1.4 的 `web_check` 签名（契约 #56/#57）是从本机
+全局安装的 `@deepseek-ai/dsh@0.1.5-rc.1/rc.2` **读源码**得到的；而安全模式这段契约
+（`--dump-config` / `--profile .ahl-safe` / 缺失 patch 非致命 / 就绪行逐字相同）是**对照随
+运行时发布的 dsh 0.1.0-rc.7 实测**得到的——两处校准的 dsh 版本不同。0.1.0-rc.7 是启动器
+实际会跑的那个，所以安全模式的实测更接近生产；但两份契约的版本基准不一致，跟进 dsh 新版本时
+要各自重核，不能拿其中一个版本的行为替另一个背书。
+
 
 ### Phase 3 — 数据与常驻（用户资产保障）
 
