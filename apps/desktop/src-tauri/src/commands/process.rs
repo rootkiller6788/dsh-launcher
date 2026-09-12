@@ -6,7 +6,7 @@ use launcher_core::process::{
     sweep_leftover, wait_for_port, PidLedger, ProcessState, ProcessStatus,
 };
 use launcher_core::{
-    ExitSink, LogLevel, LogLine, LogSink, LogStream, McpConfigStore, NewUsageRecord,
+    ErrorCode, ExitSink, LogLevel, LogLine, LogSink, LogStream, McpConfigStore, NewUsageRecord,
     RuntimeAdapter,
 };
 use serde_json::Value;
@@ -288,7 +288,9 @@ async fn do_launch(
                 let _ = shutdown.send(());
             }
             close_session(state, "crashed");
-            return Err(e.into());
+            let err = AppError::coded(classify_launch_error(&e), e.to_string());
+            emit_error(app, &err);
+            return Err(err);
         }
     };
     let pid = handle.pid;
@@ -446,9 +448,10 @@ async fn do_launch(
                                         r.handle.set_status(ProcessStatus::Degraded);
                                     }
                                 }
-                                emit_log(
+                                emit_coded(
                                     &app,
-                                    &format!(
+                                    ErrorCode::BootTimedOut,
+                                    format!(
                                         "{id_task} · no DSH output for {}s — degraded, still watching for a late startup",
                                         BOOT_SILENCE_SECS
                                     ),
@@ -1091,4 +1094,36 @@ pub(crate) fn emit_log_at(app: &AppHandle, line: &str, level: LogLevel) {
             line: launcher_core::redact_secrets(line).into_owned(),
         },
     );
+}
+
+/// Emit a coded failure to the Activity log as `[E2001] message`, so the same
+/// code the banner shows also lands in the log the user is pointed at.
+pub(crate) fn emit_error(app: &AppHandle, error: &crate::error::AppError) {
+    let e = error.coded_error();
+    emit_log_at(app, &e.log_line(), LogLevel::Error);
+}
+
+/// Emit a coded failure without building an `AppError` (e.g. the degraded-boot
+/// branch, which sets status instead of returning an error).
+pub(crate) fn emit_coded(app: &AppHandle, code: ErrorCode, message: impl Into<String>) {
+    emit_log_at(
+        app,
+        &launcher_core::CodedError::new(code, message).log_line(),
+        LogLevel::Error,
+    );
+}
+
+/// Classify a launch-time `anyhow` error from `dsh-adapter` into a stable code.
+/// The adapter surfaces these as plain `anyhow!` strings (it has no typed error
+/// enum), so this is a *boundary* classification: the two recognised strings are
+/// stable and only matched here, once, not parsed on the hot path.
+fn classify_launch_error(e: &anyhow::Error) -> ErrorCode {
+    let s = e.to_string();
+    if s.contains("Node not found") {
+        ErrorCode::NodeNotFound
+    } else if s.contains("DSH not found") {
+        ErrorCode::DshBinUnresolvable
+    } else {
+        ErrorCode::LaunchFailed
+    }
 }

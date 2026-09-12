@@ -9,8 +9,8 @@ use dsh_adapter::mcp_resolver::probe_mcp_install;
 use launcher_core::market::ContentKind;
 use launcher_core::process::LogSink;
 use launcher_core::{
-    load_runtime, save_runtime, AppSettings, BundleManifest, InstanceManifest, Job, JobPlan,
-    LogLevel, LogLine, LogStream, McpConfigStore, McpConfigVar, McpInstallManifest,
+    load_runtime, save_runtime, AppSettings, BundleManifest, ErrorCode, InstanceManifest, Job,
+    JobPlan, LogLevel, LogLine, LogStream, McpConfigStore, McpConfigVar, McpInstallManifest,
     McpRuntimeState, McpServerRecord, RegistryPlugin, SkillRecord, MCP_STATE_ERROR,
     MCP_STATE_UNTESTED,
 };
@@ -26,7 +26,7 @@ use crate::commands::plugins::{
     record_install_metadata_with_source, record_market_install_metadata,
     remove_market_install_metadata, resolve_plugin_install_target, LibraryItemSource,
 };
-use crate::commands::process::{emit_log, make_sink};
+use crate::commands::process::{emit_error, emit_log, make_sink};
 use crate::commands::settings::settings_snapshot;
 use crate::error::AppError;
 use crate::jobs::{enqueue_install, run_instance_job, HeavyJobKind, JobCtx};
@@ -1316,9 +1316,12 @@ pub(crate) async fn install_bundle_item(
                     let tried = fallback
                         .map(|gh| format!(" (tried {spec} and {gh})"))
                         .unwrap_or_default();
-                    return Err(AppError::msg(format!(
-                        "dsh plugin add exited with code {second}{tried} — check the install spec resolves on npm or GitHub and your network can reach the source (detail in Activity logs)"
-                    )));
+                    let err = AppError::coded(
+                        ErrorCode::PluginOpFailed,
+                        format!("dsh plugin add exited with code {second}{tried}"),
+                    );
+                    emit_error(app, &err);
+                    return Err(err);
                 }
             }
             // Post-install loadability gate (ported from dsh-market's

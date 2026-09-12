@@ -1,8 +1,8 @@
 use dsh_adapter::content as content_adapter;
 use dsh_adapter::{DshAdapter, InstalledPlugin, InstalledPluginSource, PluginUpdate};
 use launcher_core::{
-    market, InstanceManifest, Job, JobPlan, McpConfigStore, McpEnvRequirement, RegistryPlugin,
-    SkinPackage,
+    market, ErrorCode, InstanceManifest, Job, JobPlan, McpConfigStore, McpEnvRequirement,
+    RegistryPlugin, SkinPackage,
 };
 use market::ContentKind;
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::content::land_install_disabled;
-use crate::commands::process::{emit_log, make_sink};
+use crate::commands::process::{emit_error, emit_log, make_sink};
 use crate::commands::settings::settings_snapshot;
 use crate::error::AppError;
 use crate::jobs::{enqueue_install, run_instance_job, HeavyJobKind, JobCtx};
@@ -1354,9 +1354,12 @@ pub(crate) async fn plugin_install_job(
         .await?;
     if code != 0 {
         ctx.set_exit_code(i64::from(code));
-        return Err(AppError::msg(format!(
-            "dsh plugin add exited with code {code} — the package name/version may be wrong or the npm registry unreachable. Check the spec and your network, then Retry (pnpm detail in Activity logs)"
-        )));
+        let err = AppError::coded(
+            ErrorCode::PluginOpFailed,
+            format!("dsh plugin add exited with code {code}"),
+        );
+        emit_error(app, &err);
+        return Err(err);
     }
     // Post-install loadability gate — mirror of the one in
     // `install_bundle_item` (ported from dsh-market's validateAddedPlugins):
@@ -1461,9 +1464,12 @@ pub async fn plugin_uninstall(
             )
             .await?;
         if code != 0 {
-            return Err(AppError::msg(format!(
-                "dsh plugin remove exited with code {code} — the plugin may not be installed, or DSH is busy. Check Activity logs for the detail"
-            )));
+            let err = AppError::coded(
+                ErrorCode::PluginOpFailed,
+                format!("dsh plugin remove exited with code {code}"),
+            );
+            emit_error(&app, &err);
+            return Err(err);
         }
         if let Ok(manifest) = InstanceManifest::get(&state.paths, &id) {
             for skin in manifest.skins {
@@ -1669,9 +1675,12 @@ pub(crate) async fn plugin_update_job(
         .await?;
     if code != 0 {
         ctx.set_exit_code(i64::from(code));
-        return Err(AppError::msg(format!(
-            "dsh plugin update exited with code {code} — check the plugin is installed and your network can reach the npm registry (detail in Activity logs)"
-        )));
+        let err = AppError::coded(
+            ErrorCode::PluginOpFailed,
+            format!("dsh plugin update exited with code {code}"),
+        );
+        emit_error(app, &err);
+        return Err(err);
     }
     ctx.progress("recording", 70);
     emit_log(app, &format!("{id} · updated {name}"));
