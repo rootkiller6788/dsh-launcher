@@ -70,6 +70,11 @@ pub struct AppState {
     /// decision at crash time; the Preferences toggle writes it here so a crash
     /// honours the choice in effect when it happens, not startup's.
     pub telemetry_consent: Arc<AtomicBool>,
+    /// Once-only guard for the recovery ladder's automatic climb: a safe boot
+    /// that fails twice (degrades and then crashes) must not race two next-tier
+    /// launches off the same failure. Reset by the next user-initiated safe
+    /// launch; normal boots never read it.
+    pub safe_escalating: AtomicBool,
 }
 
 impl AppState {
@@ -100,6 +105,7 @@ impl AppState {
             monitor: Mutex::new(sysinfo::System::new()),
             heavy_jobs: Mutex::new(HashMap::new()),
             telemetry_consent,
+            safe_escalating: AtomicBool::new(false),
         }
     }
 }

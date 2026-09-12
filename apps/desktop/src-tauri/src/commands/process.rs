@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dsh_adapter::safe_boot::SAFE_PROFILE_NAME;
+use dsh_adapter::safe_boot::{remove_safe_profile, MINIMAL_BUNDLES, SAFE_PROFILE_NAME};
 use dsh_adapter::web_check::{check_root, WebVerdict};
 use dsh_adapter::{SafeProfileVerdict, SafeTier};
 use launcher_core::instance::InstanceManifest;
@@ -83,6 +84,9 @@ pub async fn safe_launch(
     id: String,
     tier: SafeTier,
 ) -> Result<ProcessState, AppError> {
+    // A user-initiated safe launch starts a fresh ladder: clear the once-only
+    // escalation guard so this boot can climb again if it fails.
+    state.safe_escalating.store(false, Ordering::SeqCst);
     let job_id = id.clone();
     run_instance_job(&state, &app, &job_id, HeavyJobKind::Launch, || async {
         do_safe_launch(&state, &app, id, tier).await
@@ -101,42 +105,121 @@ async fn do_safe_launch(
 ) -> Result<ProcessState, AppError> {
     let settings = settings_snapshot(state)?;
     let instance = InstanceManifest::get(&state.paths, &id)?;
-    let (plan, verdict) = state
-        .adapter
-        .prepare_safe_profile(&settings, &instance, tier)
-        .await
-        .map_err(|e| AppError::coded(ErrorCode::LaunchFailed, e.to_string()))?;
-    match verdict {
-        SafeProfileVerdict::Composed { .. } => {
-            let tier_label = match tier {
-                SafeTier::Plugins => "L1 (first-party plugins)",
-                SafeTier::Minimal => "L2 (minimal)",
-            };
+    let mut current = tier;
+    loop {
+        let (plan, verdict) = state
+            .adapter
+            .prepare_safe_profile(&settings, &instance, current)
+            .await
+            .map_err(|e| AppError::coded(ErrorCode::LaunchFailed, e.to_string()))?;
+        match verdict {
+            SafeProfileVerdict::Composed { .. } => {
+                emit_log(
+                    app,
+                    &format!(
+                        "{id} · dsh composed the safe profile ({}){}",
+                        tier_label(current),
+                        if plan.dropped.is_empty() {
+                            String::new()
+                        } else {
+                            format!("; not loaded this boot: {}", plan.dropped.join(", "))
+                        }
+                    ),
+                );
+                return do_launch(state, app, id, Some(current)).await;
+            }
+            SafeProfileVerdict::Refused { message, from_dsh } => {
+                // Never boot a profile dsh just refused: the dump composes the
+                // same layers the boot does, so this would fail again — but with
+                // the advantage that dsh already said why, and we can quote it.
+                emit_error(app, &AppError::msg(message.clone()));
+                match current.next() {
+                    Some(next) => {
+                        // dsh could not resolve a Tier-1 row (usually a
+                        // first-party plugin installed from npm, which the safe
+                        // profile has no node_modules for). The minimal pair
+                        // resolves from the installation anchor, so climb before
+                        // giving up.
+                        emit_log(
+                            app,
+                            &format!(
+                                "{id} · dsh refused the safe profile at {} — climbing the ladder to {}…",
+                                tier_label(current),
+                                tier_label(next)
+                            ),
+                        );
+                        current = next;
+                    }
+                    None => {
+                        // The bottom of the ladder: no narrower profile exists.
+                        return Err(AppError::msg(if from_dsh {
+                            message
+                        } else {
+                            format!("the safe profile did not compose: {message}")
+                        }));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The human name of a ladder rung, for log lines the user reads in Activity.
+fn tier_label(tier: SafeTier) -> &'static str {
+    match tier {
+        SafeTier::Plugins => "L1 (first-party plugins)",
+        SafeTier::Minimal => "L2 (minimal)",
+    }
+}
+
+/// Climb the recovery ladder after a safe boot failed at `from`.
+///
+/// Only a Tier 1 failure climbs: [`SafeTier::next`] is the ladder's only
+/// direction, and `None` is the bottom — the minimal pair did not boot either,
+/// so nothing AHL generated was the cause, and the honest move is to say so
+/// rather than keep trying. A normal (non-safe) boot never reaches here: the
+/// recovery panel owns that path.
+///
+/// The `safe_escalating` guard makes the climb once-only, so a boot that both
+/// degrades and then crashes cannot race two next-tier launches off the same
+/// failure. `do_launch` clears it the moment a safe child is actually up, so the
+/// *next* failure is a fresh opportunity.
+fn escalate_safe_mode(app: &AppHandle, id: &str, from: Option<SafeTier>, stage: &'static str) {
+    let Some(from) = from else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    if state.safe_escalating.swap(true, Ordering::SeqCst) {
+        return; // already climbing off this failure
+    }
+    match from.next() {
+        Some(next) => {
             emit_log(
                 app,
                 &format!(
-                    "{id} · dsh composed the safe profile ({tier_label}){}",
-                    if plan.dropped.is_empty() {
-                        String::new()
-                    } else {
-                        format!("; not loaded this boot: {}", plan.dropped.join(", "))
-                    }
+                    "{id} · safe mode {stage} at {} — climbing the ladder to {}…",
+                    tier_label(from),
+                    tier_label(next)
                 ),
             );
+            let app = app.clone();
+            let id = id.to_string();
+            tauri::async_runtime::spawn(async move {
+                let state = app.state::<AppState>();
+                // `do_safe_launch` emits its own failure; nothing more to say here.
+                let _ = do_safe_launch(&state, &app, id, next).await;
+            });
         }
-        SafeProfileVerdict::Refused { message, from_dsh } => {
-            // Never boot a profile dsh just refused: the dump composes the same
-            // layers the boot does, so this would fail again — but with the
-            // advantage that dsh already said why, and we can quote it.
-            emit_error(app, &AppError::msg(message.clone()));
-            return Err(AppError::msg(if from_dsh {
-                message
-            } else {
-                format!("the safe profile did not compose: {message}")
-            }));
+        None => {
+            emit_error(
+                app,
+                &AppError::msg(format!(
+                    "{id} · safe mode reached the end of the ladder: even the minimal pair ({}) did not boot",
+                    MINIMAL_BUNDLES.join(", ")
+                )),
+            );
         }
     }
-    do_launch(state, app, id, Some(tier)).await
 }
 
 async fn do_launch(
@@ -194,6 +277,16 @@ async fn do_launch(
 
     let settings = settings_snapshot(state)?;
     let instance = InstanceManifest::get(&state.paths, &id)?;
+    // A normal boot returns the instance to its own profile, so it also clears
+    // the scratch profile a previous safe boot left behind — leaving safe mode
+    // needs no other undo. Safe mode itself skips this: it is about to rewrite
+    // the scratch profile at its own tier, and removing it here would only race
+    // that write.
+    if safe_tier.is_none() {
+        if let Err(e) = remove_safe_profile(&instance) {
+            emit_warn(app, &format!("{id} · could not remove the safe profile: {e}"));
+        }
+    }
     let provider = state.vault.resolve(&instance.provider_ref)?;
     let mut env = state.adapter.build_env(&provider, &instance)?;
     // Fold each installed MCP server's configured env (key names on disk,
@@ -320,6 +413,7 @@ async fn do_launch(
                 if !owns_child {
                     return;
                 }
+                let safe_tier = guard.as_ref().and_then(|running| running.safe_tier);
                 if let Some(mut running) = guard.take() {
                     if let Some(shutdown) = running.usage_proxy_shutdown.take() {
                         let _ = shutdown.send(());
@@ -333,6 +427,12 @@ async fn do_launch(
                 };
                 close_session(&state, status);
                 close_dsh_window(&app);
+                // A safe boot that crashed climbs the ladder: Tier 1 tries the
+                // minimal pair, Tier 2 is the bottom. A normal boot never
+                // escalates — the recovery panel owns that path.
+                if process_state.status == ProcessStatus::Crashed {
+                    escalate_safe_mode(&app, &id, safe_tier, "crashed");
+                }
             });
         })
     };
@@ -402,6 +502,12 @@ async fn do_launch(
         }
     };
     let pid = handle.pid;
+    // A safe child is now up, so its own failure (if it comes) is a fresh
+    // escalation opportunity: clear the once-only guard the climb set. Normal
+    // boots skip this — they never read the guard.
+    if safe_tier.is_some() {
+        state.safe_escalating.store(false, Ordering::SeqCst);
+    }
     ledger.record(&id, pid);
     emit_log(app, &format!("{id} · DSH web starting (pid {pid})…"));
     emit_debug(
@@ -581,6 +687,11 @@ async fn do_launch(
                                 // child is still alive, so the crash sink may never
                                 // fire, and the user is staring at "degraded".
                                 diagnose_and_emit(&app, &id_task, "degraded", &tail);
+                                // A safe boot that went silent has the same answer
+                                // as one that crashed: climb the ladder. A normal
+                                // boot leaves the degraded child alone — it may
+                                // still self-heal the moment its URL lands.
+                                escalate_safe_mode(&app, &id_task, safe_tier, "degraded");
                             } else {
                                 emit_log(
                                     &app,
