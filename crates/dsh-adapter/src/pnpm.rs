@@ -30,6 +30,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use launcher_core::InstanceManifest;
+use serde::Serialize;
 
 use crate::DshAdapter;
 
@@ -44,7 +45,8 @@ fn backup_file(instance: &InstanceManifest) -> PathBuf {
 }
 
 /// What an [`add_allow_build`] call did.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AllowBuildOutcome {
     /// `false` when the package was already approved (the call was a no-op).
     pub written: bool,

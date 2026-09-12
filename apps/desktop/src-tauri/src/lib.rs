@@ -130,6 +130,7 @@ pub fn run() {
             commands::plugins::plugin_install,
             commands::plugins::plugin_uninstall,
             commands::plugins::plugin_toggle,
+            commands::plugins::plugin_allow_build,
             commands::plugins::plugin_updates,
             commands::plugins::plugin_update,
             commands::content::skill_list,

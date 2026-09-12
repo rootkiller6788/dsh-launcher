@@ -1562,6 +1562,54 @@ pub async fn plugin_toggle(
     .await
 }
 
+/// Approve one package's build scripts in the profile's `pnpm-workspace.yaml`.
+///
+/// `dsh plugin` refuses to run a git-hosted dependency's build script until pnpm
+/// approves the package, and prints what to add where. This is that edit — the
+/// launcher relaying dsh's own instruction, not deciding what a profile may
+/// contain (see `docs/absorb-plan.md` §3). It writes the entry and reports what
+/// it wrote; re-running the install is still the user's next step, because only
+/// `dsh plugin` can say whether the approval was enough.
+///
+/// The instance must be stopped, like every other profile mutation: what follows
+/// is `dsh plugin` re-run, which `ensure_not_running` gates anyway.
+#[tauri::command]
+pub async fn plugin_allow_build(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    id: String,
+    package: String,
+) -> Result<dsh_adapter::pnpm::AllowBuildOutcome, AppError> {
+    let job_id = id.clone();
+    run_instance_job(
+        &state,
+        &app,
+        &job_id,
+        HeavyJobKind::ProfileMutation,
+        || async {
+            ensure_not_running(&state, &id).await?;
+            // Best-effort, and unlike the `.bak` below it also covers the other
+            // profile files: a change made while no point exists gets one.
+            crate::commands::rescue::reserve_rescue_point(&state, &app, &id);
+            let instance = InstanceManifest::get(&state.paths, &id)?;
+            let outcome = dsh_adapter::pnpm::add_allow_build(&instance, &package)?;
+            emit_log(
+                &app,
+                &format!(
+                    "{id} · {}",
+                    if outcome.written {
+                        format!("allowBuilds: {}", outcome.line)
+                    } else {
+                        format!("{} was already approved for build scripts", outcome.line)
+                    }
+                ),
+            );
+            Ok(outcome)
+        },
+    )
+    .await
+}
+
 /// Per-plugin update status: npm `latest` vs the installed version.
 #[tauri::command]
 pub async fn plugin_updates(
