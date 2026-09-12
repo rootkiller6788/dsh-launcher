@@ -16,6 +16,11 @@
 // dates), so a mirror's tip only moves when the source branch actually gains
 // commits. Every run after the first is a fast-forward.
 //
+// Only the maintainer's OWN commits are rewritten. A commit whose author or
+// committer is neither account's email was written by someone else — a
+// contributor whose PR was merged — and keeps its authorship: re-crediting their
+// work to the maintainer is the one thing this rewrite must not do.
+//
 //   node scripts/push-both.mjs                  # push main to both accounts
 //   node scripts/push-both.mjs --branch dev     # some other branch
 //   node scripts/push-both.mjs --dry-run        # build the mirrors, push nothing
@@ -95,12 +100,18 @@ function envFilter(account) {
   if (!safe.test(account.name) || !safe.test(account.email)) {
     fail(`${account.label}: name/email contains characters the env-filter cannot quote safely`)
   }
-  return [
-    `export GIT_AUTHOR_NAME='${account.name}'`,
-    `GIT_AUTHOR_EMAIL='${account.email}'`,
-    `GIT_COMMITTER_NAME='${account.name}'`,
-    `GIT_COMMITTER_EMAIL='${account.email}'`,
-  ].join(' ')
+  // Every address that identifies the maintainer, on either host. A commit
+  // carrying one of these is this script's to re-credit; anything else is
+  // someone else's and is left exactly as it was authored.
+  const mine = ACCOUNTS.map((a) => `"${a.email}"`).join('|')
+  const rewrite = (role) =>
+    `case "$GIT_${role}_EMAIL" in ${mine}) ` +
+    `export GIT_${role}_NAME='${account.name}'; ` +
+    `GIT_${role}_EMAIL='${account.email}';; esac`
+  // Author and committer are judged separately: a merged contribution has the
+  // contributor as author and the maintainer as committer, and only the second
+  // of those is ours to rewrite.
+  return `${rewrite('AUTHOR')}; ${rewrite('COMMITTER')}`
 }
 
 /** Rebuild `account.mirror` from `source` under the account's identity. */
