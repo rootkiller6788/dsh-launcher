@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { LifeBuoy, RotateCcw, TriangleAlert, X } from 'lucide-react'
 
 import { useT } from '../lib/i18n'
-import type { CrashIssue, FixAction } from '../lib/types'
+import type { CrashIssue, FixAction, LaunchDiagnosis } from '../lib/types'
 import { useAppStore } from '../stores/appStore'
 
 /**
@@ -54,12 +54,15 @@ export function BootRecovery({ running }: { running: boolean }) {
     // the same at every width.
     <section className="shrink-0 space-y-2">
       {diagnosis && (
-        <div className="rounded-lg border border-red-500/25 bg-red-500/5 p-4">
+        <div className={STAGES[diagnosis.stage].panel}>
           <div className="flex items-start justify-between gap-3">
             <div className="flex items-center gap-2">
-              <TriangleAlert className="h-4 w-4 shrink-0 text-red-300" strokeWidth={1.75} />
-              <h2 className="text-sm font-semibold text-red-200">
-                {diagnosis.stage === 'crashed' ? t('crash.title') : t('crash.stalled')}
+              <TriangleAlert
+                className={`h-4 w-4 shrink-0 ${STAGES[diagnosis.stage].icon}`}
+                strokeWidth={1.75}
+              />
+              <h2 className={`text-sm font-semibold ${STAGES[diagnosis.stage].title}`}>
+                {t(STAGES[diagnosis.stage].heading)}
               </h2>
             </div>
             <button
@@ -70,9 +73,7 @@ export function BootRecovery({ running }: { running: boolean }) {
               <X className="h-3.5 w-3.5" strokeWidth={1.75} />
             </button>
           </div>
-          <p className="mt-1.5 text-[11px] text-zinc-500">
-            {diagnosis.stage === 'crashed' ? t('crash.crashedBody') : t('crash.stalledBody')}
-          </p>
+          <p className="mt-1.5 text-[11px] text-zinc-500">{t(STAGES[diagnosis.stage].body)}</p>
           {diagnosis.issues.length === 0 ? (
             <p className="mt-2 text-xs text-zinc-400">{t('crash.unrecognised')}</p>
           ) : (
@@ -168,6 +169,43 @@ const FIX_KEYS: Record<FixAction, string> = {
   reinstall: 'reinstall',
   'rebuild-source': 'rebuildSource',
   restart: 'restart',
+  'reopen-url': 'reopenUrl',
+}
+
+/**
+ * How each diagnosis stage presents itself.
+ *
+ * `refused` deliberately breaks the red of the other two: nothing failed. The
+ * harness is up and serving, and what it refused was the URL it printed — so the
+ * panel says that, in amber, instead of calling a running harness a failed boot.
+ * The stage is a closed set from the backend (`LaunchDiagnosis.stage`), which is
+ * why this is a record rather than a lookup with a default.
+ */
+const STAGES: Record<
+  LaunchDiagnosis['stage'],
+  { heading: string; body: string; panel: string; icon: string; title: string }
+> = {
+  crashed: {
+    heading: 'crash.title',
+    body: 'crash.crashedBody',
+    panel: 'rounded-lg border border-red-500/25 bg-red-500/5 p-4',
+    icon: 'text-red-300',
+    title: 'text-red-200',
+  },
+  degraded: {
+    heading: 'crash.stalled',
+    body: 'crash.stalledBody',
+    panel: 'rounded-lg border border-red-500/25 bg-red-500/5 p-4',
+    icon: 'text-red-300',
+    title: 'text-red-200',
+  },
+  refused: {
+    heading: 'crash.refused',
+    body: 'crash.refusedBody',
+    panel: 'rounded-lg border border-amber-500/25 bg-amber-500/5 p-4',
+    icon: 'text-amber-300',
+    title: 'text-amber-200',
+  },
 }
 
 /**

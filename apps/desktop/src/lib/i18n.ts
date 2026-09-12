@@ -379,6 +379,9 @@ const en: Dict = {
   'crash.crashedBody': 'The harness exited during startup. Diagnosed from its log:',
   'crash.stalledBody':
     'The harness stopped printing but is still running. Diagnosed from its log so far:',
+  'crash.refused': 'Workspace URL refused',
+  'crash.refusedBody':
+    'The harness is running, but it refused to serve the workspace URL it printed:',
   'crash.dismiss': 'Dismiss',
   'crash.unrecognised': 'The log matched no known failure. See Monitor for the full output.',
   'crash.nextStep': 'Next step:',
@@ -388,6 +391,8 @@ const en: Dict = {
   'crash.fix.reinstall': 'Reinstall this instance’s profile dependencies, then launch again.',
   'crash.fix.rebuildSource': 'Clean and rebuild the source checkout, then launch again.',
   'crash.fix.restart': 'Launch again.',
+  'crash.fix.reopenUrl':
+    'Stop the harness and launch it again, so DSH prints a fresh URL — or open that URL yourself if a saved session still covers it.',
   'crash.apply.excludeBundle': 'Disable it',
   'crash.apply.restore': 'Restore',
   'crash.apply.restart': 'Launch again',
@@ -952,6 +957,8 @@ const zh: Dict = {
   'crash.stalled': '启动卡住',
   'crash.crashedBody': 'harness 在启动过程中退出。根据它的日志诊断为：',
   'crash.stalledBody': 'harness 不再输出但进程仍在运行。根据目前日志诊断为：',
+  'crash.refused': '工作区 URL 被拒绝',
+  'crash.refusedBody': 'harness 正在运行，但它拒绝提供自己打印的那个工作区 URL：',
   'crash.dismiss': '忽略',
   'crash.unrecognised': '日志没有匹配到已知故障，完整输出见「监控」。',
   'crash.nextStep': '下一步：',
@@ -961,6 +968,8 @@ const zh: Dict = {
   'crash.fix.reinstall': '重装该实例的 profile 依赖后重新启动。',
   'crash.fix.rebuildSource': '清理并重新构建源码 checkout 后重新启动。',
   'crash.fix.restart': '重新启动。',
+  'crash.fix.reopenUrl':
+    '停止 harness 后重新启动，让 DSH 重新打印一个 URL；如果之前的会话 cookie 还有效，也可以直接打开那个 URL。',
   'crash.apply.excludeBundle': '禁用',
   'crash.apply.restore': '恢复',
   'crash.apply.restart': '重新启动',

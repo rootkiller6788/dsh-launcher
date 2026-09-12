@@ -628,6 +628,9 @@ export type CrashKind =
   | 'tool-missing'
   | 'cli-arg'
   | 'cli-error'
+  /** The one kind no log rule produces: the launcher's own probe of the
+   * workspace URL found dsh refusing it. */
+  | 'web-auth-refused'
 
 /** The repair a diagnosis recommends. */
 export type FixAction =
@@ -637,6 +640,9 @@ export type FixAction =
   | 'reinstall'
   | 'rebuild-source'
   | 'restart'
+  /** The one action no code performs — dsh's own "reopen the URL" instruction,
+   * carried out by stopping and launching again. Not in `ACTIONABLE`. */
+  | 'reopen-url'
 
 /** One diagnosed cause of a failed boot. */
 export interface CrashIssue {
@@ -648,11 +654,14 @@ export interface CrashIssue {
   fix: FixAction
 }
 
-/** Emitted on the `launch-diagnosis` event when a boot fails. */
+/** Emitted on the `launch-diagnosis` event when a boot goes wrong. */
 export interface LaunchDiagnosis {
   instanceId: string
-  /** `crashed` (child died) or `degraded` (silent but still alive). */
-  stage: 'crashed' | 'degraded'
+  /**
+   * `crashed` (child died), `degraded` (silent but still alive), or `refused`
+   * (alive and serving, but the workspace URL it printed was refused).
+   */
+  stage: 'crashed' | 'degraded' | 'refused'
   issues: CrashIssue[]
 }
 
