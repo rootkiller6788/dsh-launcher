@@ -5,11 +5,11 @@
 <h1 align="center">DeepSeek Harness Launcher</h1>
 
 <p align="center">
-  <strong>DeepSeek Harness 的本地运行与生态管理平台 —— 统一管理运行时、实例、模型供应商、Plugins、Skills、MCP 与启动环境。</strong>
+  <strong>The local runtime and ecosystem manager for DeepSeek Harness — one place for runtimes, instances, model providers, plugins, skills, MCP, and launch environments.</strong>
 </p>
 
 <p align="center">
-  无需手动配置运行环境，开箱即用。Desktop Shell 只是其中一种交互方式；运行时、实例与生态内容由 DSHL 统一管理。
+  No manual environment setup. Works out of the box. The desktop shell is only one way to drive it; runtimes, instances, and ecosystem content are managed by DSHL.
 </p>
 
 <p align="center">
@@ -23,7 +23,7 @@
   <img src="https://img.shields.io/badge/Rust-1.82%2B-dea584?style=flat" alt="Rust">
 </p>
 
-DeepSeek Harness Launcher 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的本地 Web UI、Host 服务与插件系统集成进原生桌面应用。它负责窗口、托盘、运行时、工作配置与更新，并透过 DeepSeek Harness 提供的插件机制与上游能力组合。固定并原样运行特定上游版本，不 fork、不改上游行为。
+DeepSeek Harness Launcher integrates the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) local Web UI, host services, and plugin system into a native desktop application. It owns the window, the tray, the runtime, the work configuration, and updates, and composes with upstream capabilities through the plugin mechanism DeepSeek Harness provides. It pins and runs a specific upstream version as-is — no fork, no changes to upstream behavior.
 
 <p align="center">
   <img src="assets/4664b6a007a53558c07bd1b857d79f49.png" alt="AI Harness Launcher" width="100%">
@@ -41,93 +41,94 @@ DeepSeek Harness Launcher 把 [DeepSeek Harness](https://github.com/deepseek-ai/
   <img src="assets/d4d820d79aef51e2d654a669e7b5afe4.png" alt="AI Harness Launcher" width="100%">
 </p>
 
-## 下载与安装
+## Download and install
 
-当前安装包支持 Windows x64（Ubuntu 即将支持）。无需额外环境，下载安装，一键使用。
+Installers are currently available for Windows x64 (Ubuntu support is coming). No extra runtime required — download, install, and use.
 
-| 平台 | 下载 | 安装方式 |
+| Platform | Download | Install |
 | --- | --- | --- |
-| Windows x64 | [下载安装程序](https://github.com/rootkiller6788/dsh-launcher/releases/latest) | 运行 NSIS 安装程序并按提示完成安装 |
+| Windows x64 | [Download the installer](https://github.com/rootkiller6788/dsh-launcher/releases/latest) | Run the NSIS installer and follow the prompts |
 
-### 从源码构建
+### Building from source
 
-依赖：Node ≥ 22、pnpm ≥ 10、Rust（MSVC 工具链）、WebView2（Win 11 已内置）。
+Requirements: Node ≥ 22, pnpm ≥ 10, Rust (MSVC toolchain), WebView2 (already present on Windows 11).
 
 ```bash
-pnpm install                 # 前端依赖
-cargo build --workspace      # 编译全部 Rust crate
+pnpm install                 # frontend dependencies
+cargo build --workspace      # compile every Rust crate
 pnpm build                   # tauri build → NSIS setup.exe
-# 产物：apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+# output: apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
 ```
 
-## 功能特性
+## Features
 
-- **开箱即用的运行时** — 安装包内置 Node 22；DSH 通过四层链解析（settings 覆盖 → 内置 → 受管 `runtimes/<ver>/` → PATH）。无需 Node、无需 pnpm、无需源码检出。
-- **受管运行时** — 安装 / 切换 / 删除 / 校验多个 DSH 版本并存；每个实例锁定自己的版本。
-- **多实例隔离** — 每个实例独立的 `$DSH_HOME`；插件与配置在实例之间绝不串流。创建 / 重命名 / 克隆 / 删除 / 切换。
-- **模型供应商** — API key 存 Windows Credential Manager，绝不落盘明文；预置供应商库 + 模型目录同步。
-- **插件市场** — 皮肤 / 技能 / MCP / 捆绑包五种目录；注册表浏览 + 智能（LLM 重排）搜索 + 安装 / 卸载 / 热启用停用（经 `cordis.patch.yml` 层，可跨 `dsh plugin` 对账存活）。
-- **MCP 生态** — 安装时 probe 检测、配置缺口显性化（degraded 自述 + 0 工具两种信号）、配置弹窗填写、值存 OS 凭据库并在启动时注入运行环境。
-- **DSH 内嵌窗口** — DSH 渲染在启动器自有窗口内（而非浏览器标签页）；关闭窗口即停止 harness。
-- **双向主题同步** — 浅色 / 深色 / 跟随系统，一个开关：启动器或 DSH 任一边切换，两边同步。
-- **进程树加固** — Windows Job Object（`KILL_ON_JOB_CLOSE`）+ 递归 `taskkill /T /F` 兜底 + 启动前僵尸清扫。连续 10 次启停零残留。
-- **启动历史** — SQLite 记录的会话，含开始 / 结束时间戳与崩溃 / 退出状态。
+- **A runtime that works out of the box** — Node 22 ships inside the installer; DSH is resolved through a four-layer chain (settings override → bundled → managed `runtimes/<ver>/` → PATH). No Node, no pnpm, no source checkout.
+- **Managed runtimes** — install, switch, delete, and verify multiple DSH versions side by side; each instance is pinned to its own version.
+- **Multi-instance isolation** — every instance gets its own `$DSH_HOME`; plugins and configuration never bleed between instances. Create, rename, clone, delete, switch.
+- **Model providers** — API keys live in Windows Credential Manager and never touch disk in plaintext; a built-in provider library plus model catalog sync.
+- **Plugin marketplace** — five catalogs (plugins / skins / skills / MCP / bundles); registry browsing, smart (LLM-reranked) search, and install / uninstall / hot enable-disable through the `cordis.patch.yml` layer, which survives reconciliation by `dsh plugin`.
+- **MCP ecosystem** — probe detection at install time, config gaps made explicit (two signals: a self-reported degraded state and a 0-tool count), a config dialog to fill them in, and values stored in the OS credential store and injected into the launch environment.
+- **Embedded DSH window** — DSH renders inside the launcher's own window rather than a browser tab; closing the window stops the harness.
+- **Two-way theme sync** — light / dark / follow system, one switch: change it on either side, the launcher or DSH, and both follow.
+- **Hardened process tree** — Windows Job Objects (`KILL_ON_JOB_CLOSE`) + recursive `taskkill /T /F` as a fallback + a pre-launch zombie sweep. Ten consecutive start/stop cycles leave zero residue.
+- **Launch history** — sessions recorded in SQLite with start and end timestamps and crash / exit status.
 
-## 快速上手
+## Quick start
 
-1. **安装** 并启动 AI Harness Launcher。
-2. **偏好 → 供应商** — 粘贴 DeepSeek API key（存 Windows Credential Manager）。
-3. **首页** — 选实例，点 **启动**。
+1. **Install** and launch AI Harness Launcher.
+2. **Preferences → Providers** — paste your DeepSeek API key (stored in Windows Credential Manager).
+3. **Home** — pick an instance and click **Launch**.
 
-DSH 在自有窗口内启动；Activity 面板实时流式输出 stdout/stderr。同一按钮或关闭窗口即可停止。
+DSH starts in its own window; the Activity panel streams stdout/stderr live. Click the same button — or close the window — to stop it.
 
-## 仓库结构
+## Repository layout
 
 ```
 dsh-launcher/
-├── apps/desktop/               Tauri 2 应用
-│   ├── src/                    React 19 + TS 前端（Vite、Tailwind v4、Zustand）
-│   └── src-tauri/              Rust 外壳：commands/、state/、tauri.conf.json、vendor/node
+├── apps/desktop/               Tauri 2 application
+│   ├── src/                    React 19 + TS frontend (Vite, Tailwind v4, Zustand)
+│   └── src-tauri/              Rust shell: commands/, state/, tauri.conf.json, vendor/node
 ├── crates/
-│   ├── launcher-core/          框架无关核心：paths/settings/instance/provider/process/runtime/market/mcp
-│   └── dsh-adapter/            DSH 专用适配器（RuntimeAdapter 实现）：runtimes/theme/mcp probe/import/resolver
-├── tui/                        dsh-tauri 参考镜像（内嵌窗口机制）
-└── scripts/                    开发辅助（图标生成、目录生成、解析器）
+│   ├── launcher-core/          Framework-agnostic core: paths/settings/instance/provider/process/runtime/market/mcp
+│   └── dsh-adapter/            DSH-specific adapters (RuntimeAdapter implementations): runtimes/theme/mcp probe/import/resolver
+├── tui/                        dsh-tauri reference mirror (embedded-window mechanics)
+├── scripts/                    Development helpers (icon generation, catalog generation, resolvers)
+└── docs/                       Documentation
 ```
 
-**语言边界（有意为之）：** TypeScript 负责 UI；Rust 负责系统（进程、文件系统、网络、密钥、SQLite）。所有系统动作经类型化 Tauri IPC —— 见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
+**The language boundary is deliberate:** TypeScript owns the UI; Rust owns the system (processes, filesystem, network, secrets, SQLite). Every system action goes through typed Tauri IPC — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-## 数据目录
+## Data directory
 
-默认所有数据位于 `%LOCALAPPDATA%/AIHarnessLauncher/`。**便携（绿色）模式**下根目录即 exe 所在目录 —— 把 exe（连同内置资源）丢到任意位置，每个字节都留在它旁边，整个启动器可随 U 盘移动。
+By default everything lives under `%LOCALAPPDATA%/AIHarnessLauncher/`. In **portable (green) mode** the root is the directory holding the exe — drop the exe (with its bundled resources) anywhere and every byte stays next to it, so the whole launcher can travel on a USB stick.
 
 ```
 <root>/
-├── settings.json            应用设置（DSH 路径覆盖、主题、最近实例）
-├── providers.json           供应商元数据（API key 在 Credential Manager，绝不在此）
-├── launcher.db              SQLite 启动历史
-├── runtimes/                受管 DSH 版本 + 内置 node
-├── instances/<id>/          instance.json + workspace/（= 该实例的 $DSH_HOME）
-├── cache/                   注册表 + 下载缓存
-└── logs/launcher.log        应用日志（panic 时另有 crash-*.txt）
+├── settings.json            app settings (DSH path overrides, theme, recent instances)
+├── providers.json           provider metadata (API keys are in Credential Manager, never here)
+├── launcher.db              SQLite launch history
+├── runtimes/                managed DSH versions + bundled node
+├── instances/<id>/          instance.json + workspace/ (= that instance's $DSH_HOME)
+├── cache/                   registry + download cache
+└── logs/launcher.log        app log (plus crash-*.txt on panic)
 ```
 
-## 环境变量
+## Environment variables
 
-| 变量 | 用途 |
+| Variable | Purpose |
 | --- | --- |
-| `AHL_HOME` | 覆盖数据根目录（默认 `%LOCALAPPDATA%/AIHarnessLauncher`；开发 / 测试） |
-| `AHL_PORTABLE` | 置为真值（`1`、`yes`、`on`…）强制便携模式：数据根 = exe 自身目录 |
-| `DSH_CLI_BIN` | 覆盖 DSH CLI 入口（`…/apps/cli/lib/bin.js`） |
+| `AHL_HOME` | Override the data root (defaults to `%LOCALAPPDATA%/AIHarnessLauncher`; development / testing) |
+| `AHL_PORTABLE` | Set to a truthy value (`1`, `yes`, `on`, …) to force portable mode: data root = the exe's own directory |
+| `DSH_CLI_BIN` | Override the DSH CLI entry (`…/apps/cli/lib/bin.js`) |
 
-## 便携（绿色）模式
+## Portable (green) mode
 
-在启动器 exe 旁建一个空 `portable`（或 `.portable`）文件，下次启动即切换为便携模式：`runtimes/`、`instances/`、`settings.json`、`cache/`、`logs/`、`launcher.db` 全部落在 exe 旁。删除标记即回到按用户安装布局。模式在偏好 → 数据存储中可见。API key 始终留在 Windows Credential Manager，不随文件夹迁移。
+Create an empty `portable` (or `.portable`) file next to the launcher exe and the next launch switches to portable mode: `runtimes/`, `instances/`, `settings.json`, `cache/`, `logs/`, and `launcher.db` all land beside the exe. Delete the marker to return to the per-user layout. The active mode is visible under Preferences → Data storage. API keys always stay in Windows Credential Manager and do not travel with the folder.
 
-## 参与贡献
+## Contributing
 
-欢迎提交 PR —— 先读 [`CONTRIBUTING.md`](CONTRIBUTING.md)（分支 / 提交规范、PR 流程、代码与测试标准）。
+PRs are welcome — start with [`CONTRIBUTING.md`](CONTRIBUTING.md) (branch / commit conventions, PR flow, code and test standards).
 
-## 许可
+## License
 
-[MIT](LICENSE) © 2026 dsh-launcher contributors。
+[MIT](LICENSE) © 2026 dsh-launcher contributors.
